@@ -1,6 +1,5 @@
-# Claude Code local config (memory, session data)
-.claude/projects/
-.claude/memory/
+# Claude Code local config (memory, session data, permissions)
+.claude/
 
 # Uploaded product images (user content, not source code)
 uploads/
