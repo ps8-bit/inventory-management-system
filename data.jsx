@@ -71,6 +71,34 @@ function resetProductStore() {
   window.location.reload();
 }
 
+/* ── Persistent stock deduction helpers ──
+   Always mutate PRODUCTS in-place + call saveProductStore() so changes
+   go to Supabase. Also clear any matching ims_stock_adj entry so the
+   display overlay doesn't double-count. */
+function deductStockAndPersist(sku, qty) {
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return;
+  p.qty = Math.max(0, p.qty - qty);
+  saveProductStore();
+  try {
+    const adj = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
+    if (sku in adj) { delete adj[sku]; localStorage.setItem("ims_stock_adj", JSON.stringify(adj)); }
+  } catch (e) {}
+}
+function deductManyAndPersist(deductions) {
+  deductions.forEach(({ sku, qty }) => {
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (p) p.qty = Math.max(0, p.qty - qty);
+  });
+  saveProductStore();
+  try {
+    const adj = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
+    let changed = false;
+    deductions.forEach(({ sku }) => { if (sku in adj) { delete adj[sku]; changed = true; } });
+    if (changed) localStorage.setItem("ims_stock_adj", JSON.stringify(adj));
+  } catch (e) {}
+}
+
 /* ── Persistent order store ──
    Mirrors outbound orders to localStorage so badge counts and other
    components can read them without requiring the Outbound screen
@@ -118,7 +146,7 @@ const OUTBOUND = [
   { id: "SO-26051611", channel: "TikTok",  customer: "คุณ ปิยะวัฒน์ ก.",        phone: "095-118-2240", items: 4, status: "delivered", carrier: "Thai Post", tracking: "EX554208816TH", ts: "11:32", date: "16 พ.ค. 2569", dateIso: "2026-05-16" }
 ];
 
-const TODAY_ISO = "2026-05-19";
+const TODAY_ISO = new Date().toISOString().slice(0, 10);
 
 const isoToThai = (iso) => {
   if (!iso) return "";
@@ -275,5 +303,6 @@ Object.assign(window, {
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelStockFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, isoToThai,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, removeProductsFromStore, resetProductStore,
+  deductStockAndPersist, deductManyAndPersist,
   loadOrders, saveOrders
 });

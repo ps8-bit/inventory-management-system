@@ -114,39 +114,56 @@ function CameraScanner({ onScan, onClose }) {
         const tryPlay = () => v.play().catch(() => {});
         if (v.readyState >= 1) tryPlay(); else v.onloadedmetadata = tryPlay;
 
+        /* Shared canvas — draw video frame here before every detect call */
+        const scanCanvas = document.createElement("canvas");
+        const scanCtx    = scanCanvas.getContext("2d", { willReadFrequently: true });
+        const drawFrame  = (vid) => {
+          const w = vid.videoWidth || 640, h = vid.videoHeight || 480;
+          if (scanCanvas.width !== w)  scanCanvas.width  = w;
+          if (scanCanvas.height !== h) scanCanvas.height = h;
+          scanCtx.drawImage(vid, 0, 0, w, h);
+        };
+
         let detectFn;
         if (hasDetector) {
-          const bd = new BarcodeDetector({ formats: ["ean_13","ean_8","code_128","code_39","code_93","qr_code","data_matrix","itf"] });
-          detectFn = async (vid) => { const h = await bd.detect(vid); return h.length ? h[0].rawValue : null; };
+          /* Always query supported formats so we never pass an unknown one */
+          const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39","code_93","qr_code","data_matrix","itf","aztec"];
+          const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
+          const fmts = allFmts.filter(f => supported.includes(f));
+          const bd = new BarcodeDetector({ formats: fmts.length ? fmts : allFmts });
+          detectFn = async (vid) => {
+            drawFrame(vid);
+            const h = await bd.detect(scanCanvas); // canvas, NOT video element
+            return h.length ? h[0].rawValue : null;
+          };
         } else {
-          const hints = new Map();
-          hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+          const hints = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
           const reader = new ZXing.MultiFormatReader();
           reader.setHints(hints);
-          const canvas = document.createElement("canvas");
-          const ctx    = canvas.getContext("2d");
           detectFn = async (vid) => {
-            canvas.width = vid.videoWidth || 640; canvas.height = vid.videoHeight || 480;
-            ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
-            const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            drawFrame(vid);
             try {
-              const lum = new ZXing.RGBLuminanceSource(id.data, canvas.width, canvas.height);
+              const id  = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+              const lum = new ZXing.RGBLuminanceSource(id.data, scanCanvas.width, scanCanvas.height);
               return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
             } catch (_) { return null; }
           };
         }
 
         setPhase("ready");
+        let busy = false; // prevent overlapping detect calls
         const scan = async () => {
-          if (dead) return;
+          if (dead || busy) return;
           const vid = videoRef.current;
           if (vid && vid.readyState >= 2 && !vid.paused) {
+            busy = true;
             try {
               const val = await detectFn(vid);
-              if (val) {
+              if (val && !dead) {
                 const lr = lastRef.current;
                 if (val === lr.code) {
-                  if (++lr.streak >= 1) {
+                  lr.streak++;
+                  if (lr.streak >= 2) {
                     dead = true; clearInterval(timerRef.current);
                     streamRef.current?.getTracks().forEach(t => t.stop());
                     onScan(val); return;
@@ -154,9 +171,10 @@ function CameraScanner({ onScan, onClose }) {
                 } else { lastRef.current = { code: val, streak: 1 }; }
               }
             } catch (_) {}
+            busy = false;
           }
         };
-        timerRef.current = setInterval(scan, 200);
+        timerRef.current = setInterval(scan, 250);
 
       } catch (_) {
         if (!dead) setPhase("photo"); // any camera error → photo mode
@@ -182,7 +200,10 @@ function CameraScanner({ onScan, onClose }) {
       ctx.drawImage(img, 0, 0);
       if ("BarcodeDetector" in window) {
         try {
-          const hits = await new BarcodeDetector({ formats: ["ean_13","ean_8","code_128","code_39","code_93","qr_code","data_matrix"] }).detect(img);
+          const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39","code_93","qr_code","data_matrix","itf","aztec"];
+          const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
+          const fmts = allFmts.filter(f => supported.includes(f));
+          const hits = await new BarcodeDetector({ formats: fmts.length ? fmts : allFmts }).detect(canvas); // canvas, NOT img
           if (hits.length) { resolve(hits[0].rawValue); return; }
         } catch (_) {}
       }
@@ -293,15 +314,12 @@ function CameraScanner({ onScan, onClose }) {
 
 /* ========= INBOUND ========= */
 function Inbound({ goTo, pushToast }) {
-  const [received, setReceived] = useState([
-    { sku: "TH-APP-001", name: "เสื้อยืดคอกลม Cotton 100% สีขาว", qty: 80, loc: "A-02-03", t: "09:24" },
-    { sku: "TH-APP-002", name: "เสื้อยืดคอกลม Cotton 100% สีดำ",  qty: 60, loc: "A-02-04", t: "09:25" },
-    { sku: "TH-HOM-220", name: "หมอนรองคอ Memory Foam สีเทา",     qty: 50, loc: "C-03-02", t: "10:55" },
-    { sku: "TH-FOD-405", name: "กาแฟดริปอาราบิก้า 250g (ห่อ)",     qty: 120, loc: "E-02-07", t: "10:58" }
-  ]);
+  const [received, setReceived] = useState([]);
   const [scan, setScan] = useState("");
   const [flash, setFlash] = useState(null);
   const [camOpen, setCamOpen] = useState(false);
+  const [closeConfirm, setCloseConfirm] = useState(null); // null | { changes }
+  const [closed, setClosed] = useState(false); // true once job is committed
   const inputRef = useRef(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -309,7 +327,13 @@ function Inbound({ goTo, pushToast }) {
   const submitScan = (override) => {
     const code = (override ?? scan).trim();
     if (!code) return;
-    const p = PRODUCTS.find(x => x.sku.toLowerCase() === code.toLowerCase()) || PRODUCTS[Math.floor(Math.random()*PRODUCTS.length)];
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === code.toLowerCase());
+    if (!p) {
+      setFlash({ sku: code, name: null, notFound: true });
+      setTimeout(() => setFlash(null), 2500);
+      setScan("");
+      return;
+    }
     const entry = { sku: p.sku, name: p.name, qty: 1, loc: p.loc, t: new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) };
     setReceived(prev => {
       const idx = prev.findIndex(r => r.sku === p.sku);
@@ -320,7 +344,7 @@ function Inbound({ goTo, pushToast }) {
       }
       return [entry, ...prev];
     });
-    setFlash({ sku: p.sku, name: p.name });
+    setFlash({ sku: p.sku, name: p.name, notFound: false });
     setTimeout(() => setFlash(null), 1200);
     setScan("");
     pushToast(`สแกนรับเข้า ${p.sku} สำเร็จ`);
@@ -337,7 +361,19 @@ function Inbound({ goTo, pushToast }) {
         </div>
         <div className="row">
           <button className="btn" onClick={() => alert("ดูประวัติการรับเข้าทั้งหมด")}><Icons.History/> ประวัติการรับเข้า</button>
-          <button className="btn btn-primary" onClick={() => pushToast("ปิดงานรับเข้าและอัปเดตสต็อกแล้ว")}><Icons.Check/> ปิดงานรับเข้า</button>
+          <button
+            className="btn btn-primary"
+            disabled={received.length === 0 || closed}
+            style={(received.length === 0 || closed) ? { opacity: 0.5, cursor: "not-allowed" } : {}}
+            onClick={() => {
+              if (received.length === 0 || closed) return;
+              setCloseConfirm({
+                changes: received.map(r => ({ label: r.sku, to: `+${r.qty} ชิ้น` }))
+              });
+            }}
+          >
+            <Icons.Check/> {closed ? "ปิดงานแล้ว" : "ปิดงานรับเข้า"}
+          </button>
         </div>
       </div>
 
@@ -385,9 +421,16 @@ function Inbound({ goTo, pushToast }) {
         </div>
 
         {flash && (
-          <div className="row" style={{ padding: "10px 14px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 10, fontSize: 13, fontWeight: 500 }}>
-            <Icons.Check size={18}/> รับเข้า {flash.sku} — {flash.name}
-          </div>
+          flash.notFound ? (
+            <div className="row" style={{ padding: "10px 14px", background: "var(--danger-soft)", color: "var(--danger)", borderRadius: 10, fontSize: 13, fontWeight: 500 }}>
+              <Icons.X size={18}/> ไม่พบ SKU: <span className="mono" style={{ marginLeft: 6 }}>{flash.sku}</span>
+              <span style={{ fontWeight: 400, marginLeft: 6, fontSize: 12 }}>— กรุณาตรวจสอบรหัสสินค้า</span>
+            </div>
+          ) : (
+            <div className="row" style={{ padding: "10px 14px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 10, fontSize: 13, fontWeight: 500 }}>
+              <Icons.Check size={18}/> รับเข้า {flash.sku} — {flash.name}
+            </div>
+          )
         )}
       </div>
 
@@ -476,6 +519,32 @@ function Inbound({ goTo, pushToast }) {
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={!!closeConfirm}
+        title="ยืนยันปิดงานรับเข้า"
+        description={`จะเพิ่มสต็อกจำนวน ${received.reduce((s,r)=>s+r.qty,0)} ชิ้น ใน ${received.length} SKU เข้าระบบทันที`}
+        changes={closeConfirm?.changes || []}
+        action="ยืนยันปิดงาน"
+        onCancel={() => setCloseConfirm(null)}
+        onConfirm={() => {
+          received.forEach(r => {
+            const p = PRODUCTS.find(x => x.sku === r.sku);
+            if (!p) return;
+            updateProductInStore(r.sku, { qty: p.qty + r.qty });
+          });
+          if (typeof recordChange === "function") {
+            recordChange({
+              entity: "inbound", action: "close",
+              summary: `ปิดงานรับเข้า — เพิ่มสต็อก ${received.length} SKU รวม ${received.reduce((s,r)=>s+r.qty,0)} ชิ้น`,
+              changes: received.map(r => ({ label: r.sku, to: `+${r.qty} ชิ้น` }))
+            });
+          }
+          setCloseConfirm(null);
+          setClosed(true);
+          pushToast(`ปิดงานรับเข้าแล้ว — อัปเดตสต็อก ${received.length} SKU`);
+        }}
+      />
     </div>
   );
 }
@@ -517,6 +586,9 @@ function Outbound({ goTo, pushToast }) {
   const [issueOpen, setIssueOpen] = useState(false);
   const [obBulkMenu, setObBulkMenu] = useState(null);
   const [obBulkConfirm, setObBulkConfirm] = useState(null);
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterCh, setFilterCh] = useState("all");
+  const [filterQ, setFilterQ] = useState("");
 
   // Persist orders + fire badge-refresh event on every change
   useEffect(() => { saveOrders(orders); }, [orders]);
@@ -551,8 +623,16 @@ function Outbound({ goTo, pushToast }) {
   const shippedCount   = orders.filter(o => o.status === "shipped" || o.status === "delivered").length;
   const pendingCount   = pickingCount + packedCount;
 
-  // Apply tab filter
-  const tabOrders = TAB_STATUS[tab] ? orders.filter(o => o.status === TAB_STATUS[tab]) : orders;
+  // Apply tab + optional channel/text filter
+  const tabOrders = (TAB_STATUS[tab] ? orders.filter(o => o.status === TAB_STATUS[tab]) : orders)
+    .filter(o => {
+      if (filterCh !== "all" && o.channel !== filterCh) return false;
+      if (filterQ.trim()) {
+        const q = filterQ.toLowerCase();
+        if (!o.id.toLowerCase().includes(q) && !(o.customer || "").toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
 
   // Status display helpers
   const STATUS_LABEL = { picking: "กำลังหยิบ", packed: "พร้อมส่ง", shipped: "ส่งแล้ว", delivered: "จัดส่งสำเร็จ" };
@@ -567,11 +647,7 @@ function Outbound({ goTo, pushToast }) {
 
     if (data.mode === "bundle") {
       const { bundle } = data;
-      const adj = getStockAdj();
-      bundle.items.forEach(item => {
-        adj[item.sku] = (adj[item.sku] || 0) - item.qty * totalQty;
-      });
-      applyStockAdj(adj);
+      deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * totalQty })));
       if (typeof recordChange === "function") {
         recordChange({
           entity: "bundle", entityId: bundle.id, action: "update",
@@ -597,6 +673,15 @@ function Outbound({ goTo, pushToast }) {
       return;
     }
 
+    deductStockAndPersist(data.sku, totalQty);
+    if (typeof recordChange === "function") {
+      recordChange({
+        entity: "product", entityId: data.sku, action: "deduct",
+        summary: `ตัดสต็อก ${data.sku} จำนวน ${totalQty} ชิ้น ผ่านหน้าจัดส่ง`,
+        changes: [{ label: data.sku, to: `−${totalQty} ชิ้น` }],
+        note: `ออร์เดอร์ ${id} · ${channelLabel}`
+      });
+    }
     setOrders(prev => [{
       id, channel: channelLabel, customer: data.customer || "ลูกค้าใหม่",
       items: data.deductions.length, status: "picking", carrier: "—", tracking: "—",
@@ -671,8 +756,23 @@ function Outbound({ goTo, pushToast }) {
           <div className="page-sub">ออร์เดอร์ทั้งหมด {orders.length} รายการ · ค้างส่ง {pendingCount} · ส่งแล้ว {shippedCount}</div>
         </div>
         <div className="row">
-          <button className="btn" onClick={() => alert("เปิดตัวกรองออร์เดอร์")}><Icons.Filter/> ตัวกรอง</button>
-          <button className="btn" onClick={() => alert("พิมพ์รายการหยิบสินค้า (Pick List)")}><Icons.Print/> รายการหยิบสินค้า</button>
+          <button className={"btn" + ((filterCh !== "all" || filterQ) ? " btn-accent" : "")} onClick={() => setFilterOpen(o => !o)}>
+            <Icons.Filter/> ตัวกรอง{(filterCh !== "all" || filterQ) ? " •" : ""}
+          </button>
+          <button className="btn" onClick={() => {
+            const toPrint = pickedCount > 0 ? orders.filter(o => picked[o.id]) : tabOrders.filter(o => o.status === "picking");
+            if (!toPrint.length) { pushToast("ไม่มีออร์เดอร์ที่ต้องหยิบ"); return; }
+            const w = window.open("", "_blank");
+            w.document.write(`<!DOCTYPE html><html><head><title>Pick List</title>
+<style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 2px;font-size:18px}p{margin:0 0 16px;color:#666}button{padding:8px 18px;cursor:pointer;margin-bottom:16px;font-size:13px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}td{padding:8px 10px;border-bottom:1px solid #eee}tr:hover td{background:#fafafa}.mono{font-family:monospace;font-size:12px}@media print{button{display:none!important}}</style>
+</head><body>
+<h2>Pick List</h2><p>${new Date().toLocaleDateString("th-TH", { dateStyle:"full" })} · ${toPrint.length} ออร์เดอร์</p>
+<button onclick="window.print()">🖨 พิมพ์</button>
+<table><thead><tr><th>#</th><th>เลขออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>รายการ</th><th>ขนส่ง</th><th>สถานะ</th></tr></thead><tbody>
+${toPrint.map((o,i) => `<tr><td class="mono">${i+1}</td><td class="mono">${o.id}</td><td>${o.customer||"—"}</td><td>${o.channel||"—"}</td><td style="text-align:center">${o.items}</td><td>${o.carrier||"—"}</td><td>${{picking:"กำลังหยิบ",packed:"พร้อมส่ง"}[o.status]||o.status}</td></tr>`).join("")}
+</tbody></table></body></html>`);
+            w.document.close();
+          }}><Icons.Print/> รายการหยิบสินค้า</button>
           <button className="btn" onClick={() => setIssueOpen(true)}><Icons.Out size={14}/> ตัดสต็อก</button>
           <button className="btn btn-primary" onClick={() => goTo("labels")}><Icons.Tag/> สร้างฉลากส่ง</button>
         </div>
@@ -713,6 +813,29 @@ function Outbound({ goTo, pushToast }) {
         </div>
       </div>
 
+      {filterOpen && (
+        <div className="card card-tight" style={{ padding:"14px 18px", animation:"modalin 0.14s ease-out" }}>
+          <div className="row" style={{ gap:12, flexWrap:"wrap", alignItems:"flex-end" }}>
+            <div style={{ flex:"1 1 200px" }}>
+              <div style={{ fontSize:11, fontWeight:600, color:"var(--muted)", marginBottom:4 }}>ค้นหา</div>
+              <input className="input" placeholder="เลขออร์เดอร์, ชื่อลูกค้า..." value={filterQ} onChange={e => setFilterQ(e.target.value)} autoFocus/>
+            </div>
+            <div style={{ flex:"0 1 180px" }}>
+              <div style={{ fontSize:11, fontWeight:600, color:"var(--muted)", marginBottom:4 }}>ช่องทางขาย</div>
+              <select className="input" value={filterCh} onChange={e => setFilterCh(e.target.value)}>
+                <option value="all">ทั้งหมด</option>
+                {CHANNEL_LIST.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+              </select>
+            </div>
+            {(filterCh !== "all" || filterQ) && (
+              <button className="btn btn-ghost btn-sm" onClick={() => { setFilterCh("all"); setFilterQ(""); }}>
+                ✕ ล้างตัวกรอง
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="tabs">
         {TABS.map((t, i) => {
           const cnt = TAB_STATUS[i] ? orders.filter(o => o.status === TAB_STATUS[i]).length : orders.length;
@@ -744,7 +867,12 @@ function Outbound({ goTo, pushToast }) {
           <div className="row" style={{ gap: 6, position: "relative" }}>
             <BulkBtn icon={<Icons.Truck size={13}/>} label="อัปเดตสถานะ" onClick={() => setObBulkMenu(obBulkMenu === "status" ? null : "status")}/>
             <BulkBtn icon={<Icons.Tag size={13}/>}   label="สร้างฉลาก" onClick={() => { queueLabelsAndGo(orders.filter(o => picked[o.id]), goTo); pushToast(`สร้างฉลาก ${pickedCount} ใบ`); }}/>
-            <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์ pick list" onClick={() => pushToast(`พิมพ์ ${pickedCount} ใบหยิบสินค้า`)}/>
+            <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์ pick list" onClick={() => {
+              const toPrint = orders.filter(o => picked[o.id]);
+              const w = window.open("", "_blank");
+              w.document.write(`<!DOCTYPE html><html><head><title>Pick List</title><style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 2px}p{margin:0 0 16px;color:#666}button{padding:8px 18px;cursor:pointer;margin-bottom:16px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600}td{padding:8px 10px;border-bottom:1px solid #eee}.mono{font-family:monospace;font-size:12px}@media print{button{display:none!important}}</style></head><body><h2>Pick List</h2><p>${new Date().toLocaleDateString("th-TH",{dateStyle:"full"})} · ${toPrint.length} ออร์เดอร์</p><button onclick="window.print()">🖨 พิมพ์</button><table><thead><tr><th>#</th><th>เลขออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>รายการ</th><th>ขนส่ง</th></tr></thead><tbody>${toPrint.map((o,i)=>`<tr><td class="mono">${i+1}</td><td class="mono">${o.id}</td><td>${o.customer||"—"}</td><td>${o.channel||"—"}</td><td style="text-align:center">${o.items}</td><td>${o.carrier||"—"}</td></tr>`).join("")}</tbody></table></body></html>`);
+              w.document.close();
+            }}/>
             <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDeleteOrders} danger/>
             {obBulkMenu === "status" && (
               <div ref={null} style={{
@@ -1825,9 +1953,14 @@ function ProductDrawer({ product, onClose, pushToast }) {
           product={PRODUCTS.find(p => p.sku === product.sku) || product}
           onClose={() => setAdjOpen(false)}
           onApply={(delta, reason) => {
-            const adj = (typeof getStockAdj === "function") ? getStockAdj() : {};
-            adj[product.sku] = (adj[product.sku] || 0) + delta;
-            if (typeof applyStockAdj === "function") applyStockAdj(adj);
+            const cur = PRODUCTS.find(p => p.sku === product.sku);
+            const newQty = Math.max(0, (cur?.qty ?? product.qty) + delta);
+            updateProductInStore(product.sku, { qty: newQty });
+            try {
+              const a = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
+              delete a[product.sku];
+              localStorage.setItem("ims_stock_adj", JSON.stringify(a));
+            } catch (e) {}
             pushToast(`ปรับสต็อก ${product.sku} ${delta > 0 ? "+" : ""}${delta} ชิ้น`);
             if (typeof recordChange === "function") {
               recordChange({
@@ -2361,15 +2494,15 @@ function SellProductModal({ onClose, onSellComplete }) {
   const shipValid = ship.name.trim() && ship.phone.trim() && ship.addr1.trim();
 
   const submitOrder = () => {
-    const adj = typeof getStockAdj === "function" ? getStockAdj() : {};
+    const allDeductions = [];
     cart.forEach(item => {
       if (item.type === "product") {
-        adj[item.sku] = (adj[item.sku] || 0) - item.qty;
+        allDeductions.push({ sku: item.sku, qty: item.qty });
       } else {
-        item.items.forEach(ci => { adj[ci.sku] = (adj[ci.sku] || 0) - ci.qty * item.qty; });
+        item.items.forEach(ci => { allDeductions.push({ sku: ci.sku, qty: ci.qty * item.qty }); });
       }
     });
-    if (typeof applyStockAdj === "function") applyStockAdj(adj);
+    deductManyAndPersist(allDeductions);
 
     const orderId = "SO-" + Math.floor(Math.random() * 90000000 + 10000000);
     const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });

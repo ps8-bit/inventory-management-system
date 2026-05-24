@@ -407,11 +407,7 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
     .map(c => ({ ...c, qty: channels[c.id].qty }));
 
   const confirmSell = () => {
-    const adj = getStockAdj();
-    bundle.items.forEach(item => {
-      adj[item.sku] = (adj[item.sku] || 0) - item.qty * sellQty;
-    });
-    applyStockAdj(adj);
+    deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })));
     if (typeof recordChange === "function") {
       recordChange({
         entity: "bundle",

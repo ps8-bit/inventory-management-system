@@ -857,9 +857,12 @@ function MProductDetail({ ctx }) {
     setEditOpen(false);
   };
   const doAdjust = (delta, reason) => {
-    const a = (typeof getStockAdj === "function") ? getStockAdj() : {};
-    a[p.sku] = (a[p.sku] || 0) + delta;
-    if (typeof applyStockAdj === "function") applyStockAdj(a);
+    updateProductInStore(p.sku, { qty: Math.max(0, p.qty + delta) });
+    try {
+      const a = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
+      delete a[p.sku];
+      localStorage.setItem("ims_stock_adj", JSON.stringify(a));
+    } catch (e) {}
     ctx.pushToast(`ปรับสต็อก ${p.sku} ${delta > 0 ? "+" : ""}${delta} ชิ้น`);
     if (typeof recordChange === "function") {
       recordChange({
@@ -1059,13 +1062,11 @@ function MIssue({ ctx }) {
 
   const submit = () => {
     if (!canSubmit) return;
-    const adj = (typeof getStockAdj === "function") ? getStockAdj() : {};
     if (isBundle) {
-      bundle.items.forEach(it => { adj[it.sku] = (adj[it.sku] || 0) - it.qty * total; });
+      deductManyAndPersist(bundle.items.map(it => ({ sku: it.sku, qty: it.qty * total })));
     } else {
-      adj[skuId] = (adj[skuId] || 0) - total;
+      deductStockAndPersist(skuId, total);
     }
-    if (typeof applyStockAdj === "function") applyStockAdj(adj);
 
     const id = "SO-" + Math.floor(Math.random() * 90000000 + 10000000);
     const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
