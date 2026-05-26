@@ -81,20 +81,33 @@ function ImportPage({ pushToast, goTo }) {
 
         if (ext === "csv") {
           /* ── CSV encoding detection ──
-             Thai CSV files from Windows/Excel use Windows-874 (TIS-620).
-             1. Check for UTF-8 BOM (EF BB BF) → read as UTF-8
-             2. Decode as UTF-8; if replacement chars (U+FFFD) appear → re-decode as Windows-874
-             3. Fall back to iso-8859-11 if windows-874 label not supported  */
-          const hasBOM = rawBytes[0] === 0xEF && rawBytes[1] === 0xBB && rawBytes[2] === 0xBF;
+             Thai CSV files from Windows/Excel can be saved in several encodings:
+               • UTF-8 with BOM  (EF BB BF)  — modern Excel / Google Sheets
+               • UTF-16 LE BOM   (FF FE)      — Excel "Unicode CSV" / "Save as UTF-16"
+               • UTF-16 BE BOM   (FE FF)      — rare but possible
+               • Windows-874 / TIS-620        — no BOM, bytes 0xA0-0xFB for Thai
+             Strategy: check for each BOM first, then probe UTF-8 quality.
+             Use � escape (not literal char) so this works regardless of source editor encoding. */
+          const hasBOM_UTF8    = rawBytes[0] === 0xEF && rawBytes[1] === 0xBB && rawBytes[2] === 0xBF;
+          const hasBOM_UTF16LE = rawBytes[0] === 0xFF && rawBytes[1] === 0xFE;
+          const hasBOM_UTF16BE = rawBytes[0] === 0xFE && rawBytes[1] === 0xFF;
           let csvText;
-          if (hasBOM) {
+          if (hasBOM_UTF8) {
             csvText = new TextDecoder("utf-8").decode(rawBytes);
+          } else if (hasBOM_UTF16LE) {
+            csvText = new TextDecoder("utf-16le").decode(rawBytes);
+          } else if (hasBOM_UTF16BE) {
+            csvText = new TextDecoder("utf-16be").decode(rawBytes);
           } else {
+            // No BOM — try UTF-8 first
             const utf8 = new TextDecoder("utf-8").decode(rawBytes);
             if (utf8.includes("�")) {
-              // Garbled Thai — try Windows-874 (TIS-620)
+              // Contains invalid UTF-8 sequences → likely Windows-874 (Thai Windows/Excel)
               try { csvText = new TextDecoder("windows-874").decode(rawBytes); }
-              catch { csvText = new TextDecoder("iso-8859-11").decode(rawBytes); }
+              catch (e1) {
+                try { csvText = new TextDecoder("iso-8859-11").decode(rawBytes); }
+                catch (e2) { csvText = utf8; }
+              }
             } else {
               csvText = utf8;
             }
