@@ -93,7 +93,7 @@ function CameraScanner({ onScan, onClose }) {
       const m = ua.match(/OS (\d+)[_.](\d+)/);
       return m ? parseFloat(m[1] + "." + m[2]) : 0;
     })();
-    const hasDetector = ("BarcodeDetector" in window) && (!isIOS || iosVer >= 17.4);
+    const hasDetector = "BarcodeDetector" in window;
     const hasZXing    = !!(window.ZXing?.MultiFormatReader);
 
     if (!hasDetector && !hasZXing) {
@@ -106,8 +106,12 @@ function CameraScanner({ onScan, onClose }) {
       return;
     }
 
-    /* Non-HTTPS LAN: getUserMedia is blocked by browser policy.
-       Fall straight to photo mode — works over plain HTTP. */
+    /* iOS: live-video BarcodeDetector silently returns empty results in
+       Safari even on 17.5. Photo mode (capture="environment") gives a
+       sharp still image that decodes reliably using the native iOS camera. */
+    if (isIOS) { setPhase("photo"); return; }
+
+    /* Non-HTTPS / no camera: fall to photo mode */
     if (!isSecure || !hasCamera) { setPhase("photo"); return; }
 
     let dead = false;
@@ -215,38 +219,58 @@ function CameraScanner({ onScan, onClose }) {
     };
   }, []);
 
-  /* Decode a File using BarcodeDetector or ZXing */
-  const decodeImageFile = (file) => new Promise((resolve) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = async () => {
-      URL.revokeObjectURL(url);
-      const canvas = document.createElement("canvas");
-      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0);
-      if ("BarcodeDetector" in window) {
-        try {
-          const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39","code_93","qr_code","data_matrix","itf","aztec"];
-          const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
-          const fmts = allFmts.filter(f => supported.includes(f));
-          const hits = await new BarcodeDetector({ formats: fmts.length ? fmts : allFmts }).detect(canvas); // canvas, NOT img
-          if (hits.length) { resolve(hits[0].rawValue); return; }
-        } catch (_) {}
-      }
-      if (window.ZXing?.MultiFormatReader) {
-        try {
-          const id  = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const lum = new ZXing.RGBLuminanceSource(id.data, canvas.width, canvas.height);
-          resolve(new ZXing.MultiFormatReader().decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText());
-          return;
-        } catch (_) {}
-      }
-      resolve(null);
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
-    img.src = url;
-  });
+  /* Decode a File/Blob using BarcodeDetector or ZXing.
+     Strategy:
+       1. BarcodeDetector with raw Blob — no canvas, no size limit, fastest on iOS
+       2. BarcodeDetector with ImageBitmap — explicit snapshot fallback
+       3. ZXing with canvas scaled to ≤1600px — handles 48MP iPhone photos safely */
+  const decodeImageFile = async (file) => {
+    const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
+                     "code_93","qr_code","data_matrix","itf","aztec","codabar"];
+
+    if ("BarcodeDetector" in window) {
+      try {
+        const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
+        const fmts = allFmts.filter(f => supported.includes(f));
+        const bd = new BarcodeDetector({ formats: fmts.length ? fmts : allFmts });
+
+        /* Pass Blob directly — avoids full-res canvas, works on iOS */
+        const hits = await bd.detect(file).catch(() => []);
+        if (hits.length) return hits[0].rawValue;
+
+        /* Fallback: ImageBitmap snapshot */
+        const bmp = await createImageBitmap(file).catch(() => null);
+        if (bmp) {
+          const bmpHits = await bd.detect(bmp).catch(() => []);
+          bmp.close();
+          if (bmpHits.length) return bmpHits[0].rawValue;
+        }
+      } catch (_) {}
+    }
+
+    /* ZXing: scale down to ≤1600px so 48MP iPhone photos don't crash canvas */
+    if (window.ZXing?.MultiFormatReader) {
+      try {
+        const bmp = await createImageBitmap(file);
+        const MAX = 1600;
+        const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+        const w = Math.round(bmp.width * scale);
+        const h = Math.round(bmp.height * scale);
+        const cv  = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(bmp, 0, 0, w, h);
+        bmp.close();
+        const id  = ctx.getImageData(0, 0, w, h);
+        const hints = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
+        const reader = new ZXing.MultiFormatReader();
+        reader.setHints(hints);
+        const lum = new ZXing.RGBLuminanceSource(id.data, w, h);
+        return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
+      } catch (_) {}
+    }
+    return null;
+  };
 
   const handlePhoto = async (e) => {
     const file = e.target.files?.[0];
@@ -290,28 +314,38 @@ function CameraScanner({ onScan, onClose }) {
         </div>
       )}
 
-      {/* Mode B: photo capture — works over plain HTTP on LAN */}
+      {/* Mode B: photo capture (iOS always uses this) */}
       {phase === "photo" && (
-        <div style={{ width:"100%", maxWidth:400, textAlign:"center" }}>
-          <div style={{ fontSize:52, marginBottom:12, lineHeight:1 }}>📸</div>
-          <div style={{ color:"white", fontSize:16, fontWeight:600, marginBottom:6 }}>สแกนผ่านกล้องถ่ายรูป</div>
-          <div style={{ color:"rgba(255,255,255,0.5)", fontSize:12, marginBottom:20, lineHeight:1.7 }}>
-            กดปุ่มด้านล่าง แล้วเล็งกล้องที่บาร์โค้ดให้ชัด<br/>
-            ระบบอ่านบาร์โค้ดจากภาพให้อัตโนมัติ
+        <div style={{ width:"100%", maxWidth:420, textAlign:"center" }}>
+          <div style={{ fontSize:64, marginBottom:8, lineHeight:1 }}>📷</div>
+          <div style={{ color:"white", fontSize:18, fontWeight:700, marginBottom:6 }}>กดปุ่มด้านล่าง → ถ่ายบาร์โค้ด</div>
+          <div style={{ color:"rgba(255,255,255,0.55)", fontSize:13, marginBottom:24, lineHeight:1.8 }}>
+            เล็งกล้องให้บาร์โค้ดอยู่ตรงกลาง ชัดเจน ไม่สั่น<br/>
+            รองรับ EAN-13 · Code 128 · QR Code · และอื่นๆ
           </div>
           {errMsg && (
-            <div style={{ padding:"10px 16px", background:"rgba(255,80,80,0.15)", border:"1px solid rgba(255,80,80,0.3)", borderRadius:10, color:"#ff9090", fontSize:12, marginBottom:16, lineHeight:1.5 }}>
-              {errMsg}
+            <div style={{ padding:"12px 16px", background:"rgba(255,80,80,0.15)", border:"1px solid rgba(255,80,80,0.4)", borderRadius:12, color:"#ffaaaa", fontSize:13, marginBottom:20, lineHeight:1.6 }}>
+              ⚠️ {errMsg}<br/>
+              <span style={{ fontSize:11, opacity:0.7 }}>ลองถ่ายใหม่ ให้บาร์โค้ดชัดและตั้งตรง</span>
             </div>
           )}
           <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display:"none" }} onChange={handlePhoto}/>
           <button
             onClick={() => { setErrMsg(""); fileRef.current?.click(); }}
             disabled={scanning}
-            style={{ padding:"14px 0", borderRadius:999, background:scanning?"#333":"white", color:scanning?"#666":"#111", border:"none", fontSize:15, fontWeight:600, cursor:scanning?"default":"pointer", width:"100%", transition:"background 0.15s" }}
+            style={{ padding:"18px 0", borderRadius:999,
+              background: scanning ? "#333" : "white",
+              color: scanning ? "#888" : "#111",
+              border:"none", fontSize:17, fontWeight:700,
+              cursor: scanning ? "default" : "pointer",
+              width:"100%", transition:"background 0.15s",
+              boxShadow: scanning ? "none" : "0 4px 20px rgba(255,255,255,0.2)" }}
           >
-            {scanning ? "⏳  กำลังสแกน…" : "📷  ถ่ายรูปบาร์โค้ด / QR Code"}
+            {scanning ? "⏳  กำลังวิเคราะห์ภาพ…" : "📸  เปิดกล้องสแกน"}
           </button>
+          <div style={{ color:"rgba(255,255,255,0.3)", fontSize:11, marginTop:14 }}>
+            iPhone: ถ่ายรูปปกติ → ระบบอ่านบาร์โค้ดให้อัตโนมัติ
+          </div>
         </div>
       )}
 
