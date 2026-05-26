@@ -219,115 +219,109 @@ function CameraScanner({ onScan, onClose }) {
     };
   }, []);
 
-  /* Read EXIF orientation tag from a JPEG file (returns 1–8, default 1) */
-  const getExifOrientation = (file) => new Promise(resolve => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const view = new DataView(e.target.result);
-        if (view.getUint16(0, false) !== 0xFFD8) { resolve(1); return; }
-        let offset = 2;
-        while (offset < view.byteLength) {
-          const marker = view.getUint16(offset, false);
-          offset += 2;
-          if (marker === 0xFFE1) {
-            if (view.getUint32(offset + 2, false) !== 0x45786966) { resolve(1); return; }
-            const little = view.getUint16(offset + 8, false) === 0x4949;
-            const ifd = offset + 8 + view.getUint32(offset + 12, little);
-            const entries = view.getUint16(ifd, little);
-            for (let i = 0; i < entries; i++) {
-              if (view.getUint16(ifd + 2 + i * 12, little) === 0x0112) {
-                resolve(view.getUint16(ifd + 2 + i * 12 + 8, little)); return;
-              }
-            }
-            resolve(1); return;
-          }
-          offset += view.getUint16(offset, false);
-        }
-        resolve(1);
-      } catch (_) { resolve(1); }
-    };
-    reader.onerror = () => resolve(1);
-    reader.readAsArrayBuffer(file.slice(0, 65536)); // only need first 64KB
-  });
-
-  /* Draw img onto canvas respecting EXIF orientation (fixes iPhone photos) */
-  const drawWithOrientation = (img, orientation) => {
+  /* Draw image onto canvas at a given rotation, scaled to MAX dim ≤ 1600 */
+  const rotateToCanvas = (img, deg) => {
     const w = img.naturalWidth, h = img.naturalHeight;
     const MAX = 1600;
-    const scale = Math.min(1, MAX / Math.max(w, h));
-    const sw = Math.round(w * scale), sh = Math.round(h * scale);
+    const s = Math.min(1, MAX / Math.max(w, h));
+    const sw = Math.round(w * s), sh = Math.round(h * s);
     const canvas = document.createElement("canvas");
+    const rad = (deg * Math.PI) / 180;
+    if (deg === 90 || deg === 270) { canvas.width = sh; canvas.height = sw; }
+    else                            { canvas.width = sw; canvas.height = sh; }
     const ctx = canvas.getContext("2d");
-    /* orientations 5-8 swap width/height */
-    if (orientation >= 5) { canvas.width = sh; canvas.height = sw; }
-    else                   { canvas.width = sw; canvas.height = sh; }
     ctx.save();
-    switch (orientation) {
-      case 2: ctx.transform(-1,0,0,1,sw,0); break;
-      case 3: ctx.transform(-1,0,0,-1,sw,sh); break;
-      case 4: ctx.transform(1,0,0,-1,0,sh); break;
-      case 5: ctx.transform(0,1,1,0,0,0); break;
-      case 6: ctx.transform(0,1,-1,0,sh,0); break;
-      case 7: ctx.transform(0,-1,-1,0,sh,sw); break;
-      case 8: ctx.transform(0,-1,1,0,0,sw); break;
-    }
-    ctx.drawImage(img, 0, 0, sw, sh);
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(rad);
+    ctx.drawImage(img, -sw / 2, -sh / 2, sw, sh);
     ctx.restore();
     return canvas;
   };
 
-  /* Decode a photo File — handles EXIF rotation, large resolution, HEIC */
-  const decodeImageFile = async (file) => {
+  /* Decode a photo File — try multiple orientations to handle EXIF /
+     rotation issues on iPhone and other devices */
+  const decodeImageFile = async (file, onProgress) => {
     const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
-                     "code_93","qr_code","data_matrix","itf","aztec","codabar"];
+                     "code_93","qr_code","data_matrix","itf","aztec","codabar","pdf417"];
 
-    /* Load via <img> — Safari applies EXIF orientation visually */
-    const img = await new Promise((res, rej) => {
+    /* Load via <img> — Safari handles HEIC + JPEG, applies EXIF for img */
+    const img = await new Promise((res) => {
       const el = new Image();
       const url = URL.createObjectURL(file);
       el.onload  = () => { URL.revokeObjectURL(url); res(el); };
-      el.onerror = () => { URL.revokeObjectURL(url); rej(); };
+      el.onerror = () => { URL.revokeObjectURL(url); res(null); };
       el.src = url;
-    }).catch(() => null);
+    });
     if (!img) return null;
 
-    /* BarcodeDetector: pass <img> element directly — browser already applied
-       EXIF orientation here, so the image is always right-side up */
+    /* Cache supported formats / detector */
+    let bd = null;
     if ("BarcodeDetector" in window) {
       try {
         const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
         const fmts = allFmts.filter(f => supported.includes(f));
-        const bd = new BarcodeDetector({ formats: fmts.length ? fmts : allFmts });
-        const hits = await bd.detect(img).catch(() => []);
-        if (hits.length) return hits[0].rawValue;
+        bd = new BarcodeDetector({ formats: fmts.length ? fmts : allFmts });
       } catch (_) {}
     }
+    const hints = new Map([[window.ZXing?.DecodeHintType.TRY_HARDER, true]]);
 
-    /* ZXing: draw to canvas with manual EXIF correction, scale to ≤1600px */
-    if (window.ZXing?.MultiFormatReader) {
-      try {
-        const orientation = await getExifOrientation(file);
-        const canvas = drawWithOrientation(img, orientation);
-        const ctx    = canvas.getContext("2d");
-        const id     = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const hints  = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
-        const reader = new ZXing.MultiFormatReader();
-        reader.setHints(hints);
-        const lum = new ZXing.RGBLuminanceSource(id.data, canvas.width, canvas.height);
-        return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
-      } catch (_) {}
+    const tryDecode = async (input, isCanvas) => {
+      if (bd) {
+        const hits = await bd.detect(input).catch(() => []);
+        if (hits.length) return hits[0].rawValue;
+      }
+      if (isCanvas && window.ZXing?.MultiFormatReader) {
+        try {
+          const ctx = input.getContext("2d");
+          const id  = ctx.getImageData(0, 0, input.width, input.height);
+          const reader = new ZXing.MultiFormatReader();
+          reader.setHints(hints);
+          const lum = new ZXing.RGBLuminanceSource(id.data, input.width, input.height);
+          return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
+        } catch (_) {}
+      }
+      return null;
+    };
+
+    /* Step 1: pass <img> directly (browser handles EXIF) */
+    onProgress?.("กำลังวิเคราะห์ภาพ…");
+    let result = await tryDecode(img, false);
+    if (result) return result;
+
+    /* Step 2: try canvas at 0° (covers case where browser didn't apply EXIF) */
+    onProgress?.("กำลังลองมุมที่ 1/4…");
+    result = await tryDecode(rotateToCanvas(img, 0), true);
+    if (result) return result;
+
+    /* Step 3: try the other 3 rotations */
+    for (const deg of [90, 180, 270]) {
+      onProgress?.(`กำลังลองมุมที่ ${{90:2,180:3,270:4}[deg]}/4…`);
+      result = await tryDecode(rotateToCanvas(img, deg), true);
+      if (result) return result;
     }
     return null;
   };
 
+  const [scanProgress, setScanProgress] = useState("");
+  const [scanDebug, setScanDebug] = useState("");
+
   const handlePhoto = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setScanning(true); setErrMsg("");
-    const val = await decodeImageFile(file);
+    setScanning(true); setErrMsg(""); setScanProgress("กำลังโหลดภาพ…"); setScanDebug("");
+    const t0 = performance.now();
+    const val = await decodeImageFile(file, setScanProgress);
+    const elapsed = Math.round(performance.now() - t0);
     if (val) { onScan(val); return; }
     setScanning(false);
+    setScanProgress("");
+    /* Show debug info to help diagnose why detection failed */
+    setScanDebug(
+      `ขนาดไฟล์ ${(file.size/1024).toFixed(0)} KB · ` +
+      `BarcodeDetector ${"BarcodeDetector" in window ? "✓" : "✗"} · ` +
+      `ZXing ${window.ZXing?.MultiFormatReader ? "✓" : "✗"} · ` +
+      `เวลา ${elapsed}ms`
+    );
     setErrMsg("ไม่พบบาร์โค้ดในภาพ — ลองถ่ายให้ใกล้ขึ้น ชัดขึ้น หรือเปิดไฟมากขึ้น");
     if (fileRef.current) fileRef.current.value = "";
   };
@@ -373,9 +367,19 @@ function CameraScanner({ onScan, onClose }) {
             รองรับ EAN-13 · Code 128 · QR Code · และอื่นๆ
           </div>
           {errMsg && (
-            <div style={{ padding:"12px 16px", background:"rgba(255,80,80,0.15)", border:"1px solid rgba(255,80,80,0.4)", borderRadius:12, color:"#ffaaaa", fontSize:13, marginBottom:20, lineHeight:1.6 }}>
+            <div style={{ padding:"12px 16px", background:"rgba(255,80,80,0.15)", border:"1px solid rgba(255,80,80,0.4)", borderRadius:12, color:"#ffaaaa", fontSize:13, marginBottom:14, lineHeight:1.6 }}>
               ⚠️ {errMsg}<br/>
               <span style={{ fontSize:11, opacity:0.7 }}>ลองถ่ายใหม่ ให้บาร์โค้ดชัดและตั้งตรง</span>
+              {scanDebug && (
+                <div style={{ fontSize:10, opacity:0.5, marginTop:8, fontFamily:"monospace", letterSpacing:0.3 }}>
+                  {scanDebug}
+                </div>
+              )}
+            </div>
+          )}
+          {scanning && scanProgress && (
+            <div style={{ padding:"10px 14px", background:"rgba(120,180,255,0.15)", border:"1px solid rgba(120,180,255,0.4)", borderRadius:10, color:"#aaccff", fontSize:12, marginBottom:14, lineHeight:1.5 }}>
+              ⏳ {scanProgress}
             </div>
           )}
           <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display:"none" }} onChange={handlePhoto}/>
