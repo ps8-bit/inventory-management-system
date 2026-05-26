@@ -7,3 +7,5 @@ uploads/
 # OS noise
 .DS_Store
 Thumbs.db
+
+.vercel

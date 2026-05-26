@@ -1,0 +1,8 @@
+# Files that should not be uploaded to Cloudflare Pages
+server.js
+deploy-cf.ps1
+deploy.ps1
+.git/
+.claude/
+*.sql
+node_modules/
