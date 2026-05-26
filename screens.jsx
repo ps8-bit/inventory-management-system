@@ -567,6 +567,11 @@ function Inbound({ goTo, pushToast }) {
           <button className="btn btn-sm" style={{ margin: "4px 2px", gap: 5 }} onClick={() => setCamOpen(true)} title="สแกนด้วยกล้อง">
             <Icons.Camera size={15}/> กล้อง
           </button>
+          <button className="btn btn-sm" style={{ margin: "4px 2px", gap: 5, borderColor: "var(--accent)", color: "var(--accent)" }}
+            onClick={() => setQuickAdd({ sku: scan.trim() || "" })}
+            title="เพิ่มสินค้าใหม่ที่ยังไม่มีในระบบ">
+            <Icons.Plus size={15}/> สินค้าใหม่
+          </button>
           <button className="btn btn-accent" style={{ margin: 4 }} onClick={() => submitScan()}>บันทึก</button>
         </div>
         {camOpen && <CameraScanner onScan={code => { submitScan(code); setCamOpen(false); }} onClose={() => setCamOpen(false)}/>}
