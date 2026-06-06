@@ -377,7 +377,8 @@ table.t tbody tr:last-child td { border-bottom: none; }
   border-radius: var(--r-lg);
   padding: 28px;
   display: grid;
-  place-items: center;
+  align-items: start;
+  justify-items: center;
   min-height: 600px;
 }
 .label-paper {
@@ -579,7 +580,7 @@ table.t tbody tr:last-child td { border-bottom: none; }
 .wh-cell.fill1 { background: oklch(0.97 0.02 150); border-color: oklch(0.88 0.04 150); }
 .wh-cell.fill2 { background: oklch(0.93 0.05 150); border-color: oklch(0.8 0.07 150); }
 .wh-cell.fill3 { background: oklch(0.87 0.08 75); border-color: oklch(0.75 0.12 75); }
-.wh-cell.fill4 { background: oklch(0.82 0.12 30); border-color: oklch(0.7 0.16 30); color: white; }
+.wh-cell.fill4 { background: oklch(0.82 0.12 30); border-color: oklch(0.7 0.16 30); color: var(--fg); }
 .wh-cell .lab { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: 10px; }
 .wh-cell .pct { font-family: "IBM Plex Sans", sans-serif; font-weight: 600; font-size: 11px; }
 
@@ -1172,8 +1173,11 @@ html, body {
 }
 .m-btn-big.dark { background: var(--fg); }
 .m-btn-big.outline { background: var(--surface); color: var(--fg); border: 1px solid var(--border); box-shadow: none; }
+.m-btn-big.success { background: var(--success); box-shadow: 0 6px 20px oklch(0.58 0.13 150 / 0.3); }
+.m-btn-big.warn { background: var(--warning); color: oklch(0.28 0.05 70); box-shadow: 0 6px 20px oklch(0.7 0.14 75 / 0.32); }
+.m-btn-big.danger { background: var(--danger); box-shadow: 0 6px 20px oklch(0.58 0.18 25 / 0.3); }
 .m-btn-big:active { transform: scale(0.98); }
-.m-btn-big:disabled { opacity: 0.5; }
+.m-btn-big:disabled { opacity: 0.5; box-shadow: none; }
 
 /* Bulk action bar (mobile) */
 .m-bulk-bar {
@@ -1447,3 +1451,486 @@ html[data-mobile="1"], html[data-mobile="1"] body {
   max-width: 100%;
   margin: 0;
 }
+
+/* ============================================================
+   BRAND REFRESH — Orange × Black, multi-color accents
+   Layered last so it wins. Recolors the muted blue theme into a
+   warm, lively palette while keeping the clean SaaS structure.
+   ============================================================ */
+
+:root {
+  /* hero accent — brand orange (replaces muted blue) */
+  --accent:      oklch(0.685 0.185 47);
+  --accent-fg:   #ffffff;
+  --accent-soft: oklch(0.965 0.045 58);
+  --accent-ring: oklch(0.86 0.10 50);
+
+  /* signature orange→tangerine brand gradient */
+  --brand-grad:  linear-gradient(135deg, oklch(0.745 0.165 62), oklch(0.635 0.205 38));
+  --brand-grad-strong: linear-gradient(135deg, oklch(0.70 0.18 55), oklch(0.58 0.21 32));
+
+  /* multi-color palette for KPIs / charts / accents */
+  --c-orange: oklch(0.70 0.185 47);
+  --c-blue:   oklch(0.62 0.155 245);
+  --c-green:  oklch(0.66 0.150 156);
+  --c-pink:   oklch(0.64 0.205 348);
+  --c-amber:  oklch(0.78 0.150 80);
+  --c-violet: oklch(0.58 0.190 290);
+
+  /* slightly warmed neutrals so the grays don't feel cold */
+  --surface-2: oklch(0.972 0.006 70);
+  --surface-3: oklch(0.952 0.008 65);
+}
+
+/* Warm, multi-tone background mesh (orange + pink + violet wash) */
+html, body {
+  background:
+    radial-gradient(1100px 620px at 12% -8%,  oklch(0.92 0.085 58 / 0.55), transparent 60%),
+    radial-gradient(900px 560px at 92% 4%,    oklch(0.91 0.075 350 / 0.45), transparent 62%),
+    radial-gradient(820px 600px at 60% 110%,  oklch(0.93 0.06 280 / 0.35), transparent 60%),
+    linear-gradient(180deg, oklch(0.987 0.006 70), oklch(0.962 0.012 60));
+  background-attachment: fixed;
+}
+
+/* ---- Brand mark + sidebar ---- */
+.brand-mark {
+  background: var(--brand-grad);
+  color: #fff;
+  box-shadow: 0 4px 12px oklch(0.66 0.2 45 / 0.32);
+}
+
+/* Active nav: orange gradient pill (was solid black) */
+.nav-item.active {
+  background: var(--brand-grad);
+  color: #fff;
+  box-shadow: 0 4px 14px oklch(0.66 0.2 45 / 0.28);
+}
+.nav-item.active .nav-icon { color: #fff; }
+.nav-item.active .nav-badge {
+  background: oklch(1 0 0 / 0.22);
+  color: #fff;
+}
+/* keep idle icons subtly tinted for warmth */
+.nav-item:hover { color: var(--fg); }
+
+/* Colored dots on the section group headers for a multi-color feel */
+.nav-group { display: flex; align-items: center; gap: 7px; }
+.nav-group::before {
+  content: "";
+  width: 6px; height: 6px; border-radius: 999px;
+  background: var(--c-orange);
+}
+.nav-group:nth-of-type(2)::before { background: var(--c-blue); }
+.nav-group:nth-of-type(3)::before { background: var(--c-green); }
+.nav-group:nth-of-type(4)::before { background: var(--c-pink); }
+.nav-group:nth-of-type(5)::before { background: var(--c-violet); }
+
+.avatar { background: var(--brand-grad); }
+
+/* ---- Buttons: black stays primary; accent becomes orange ---- */
+.btn-accent {
+  background: var(--brand-grad);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 1px 0 oklch(1 0 0 / 0.18) inset, 0 4px 14px oklch(0.66 0.2 45 / 0.3);
+}
+.btn-accent:hover { filter: brightness(1.05); }
+.btn-edit-on { background: var(--accent-soft); border-color: var(--accent); color: oklch(0.5 0.18 45); }
+
+/* ---- Tabs / segmented active → orange ---- */
+.tab.active {
+  background: var(--brand-grad);
+  color: #fff !important;
+}
+
+/* ---- KPI cards: rotating colored top stripe (multi-color) ---- */
+.kpi { position: relative; overflow: hidden; }
+.kpi::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--c-orange);
+}
+.kpi-grid > .kpi:nth-child(4n+1)::before { background: var(--c-orange); }
+.kpi-grid > .kpi:nth-child(4n+2)::before { background: var(--c-blue); }
+.kpi-grid > .kpi:nth-child(4n+3)::before { background: var(--c-green); }
+.kpi-grid > .kpi:nth-child(4n+4)::before { background: var(--c-pink); }
+
+/* Dashboard KPI widget: color each of the 4 big numbers differently */
+.win-body > div > div:nth-child(4n+1) > .kpi-value,
+.win-body > div > div:nth-child(4n+1) .kpi-value { color: var(--c-orange); }
+.win-body > div > div:nth-child(4n+2) .kpi-value { color: var(--c-blue); }
+.win-body > div > div:nth-child(4n+3) .kpi-value { color: var(--c-green); }
+.win-body > div > div:nth-child(4n+4) .kpi-value { color: var(--c-pink); }
+
+/* Mobile KPI cards: colored top stripe too */
+.m-kpi { position: relative; overflow: hidden; }
+.m-kpi::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: var(--c-orange);
+}
+.m-kpi-row > .m-kpi:nth-child(2n)::before { background: var(--c-blue); }
+
+/* ---- Sparkline bars: warm orange gradient + alternating hue ---- */
+.bars .bar {
+  background: linear-gradient(180deg, oklch(0.82 0.13 55), oklch(0.70 0.18 45));
+  border-radius: 3px;
+}
+.bars .bar:nth-child(3n+2) { background: linear-gradient(180deg, oklch(0.80 0.10 250), oklch(0.66 0.15 248)); }
+.bars .bar:nth-child(3n+3) { background: linear-gradient(180deg, oklch(0.82 0.11 158), oklch(0.68 0.15 156)); }
+
+/* ---- Progress bars use the brand gradient ---- */
+.prog > span { background: var(--brand-grad); }
+
+/* ---- Card head gets a faint warm tint so sections read warmer ---- */
+.card-head { background: linear-gradient(180deg, oklch(0.985 0.01 60 / 0.6), transparent); }
+
+/* ---- Auth screen: warm logo + warm hero mesh ---- */
+.auth-logo {
+  background: var(--brand-grad-strong);
+  box-shadow: 0 12px 26px oklch(0.66 0.2 45 / 0.34);
+}
+.auth-page {
+  background:
+    radial-gradient(1000px 700px at 28% 8%,  oklch(0.92 0.09 58 / 0.5), transparent 64%),
+    radial-gradient(820px 620px at 84% 92%,  oklch(0.90 0.08 348 / 0.42), transparent 64%),
+    linear-gradient(180deg, oklch(0.975 0.008 60), oklch(0.95 0.014 55));
+  background-attachment: fixed;
+}
+
+/* ---- Mobile primary button glow tied to orange ---- */
+.m-btn-big { box-shadow: 0 6px 20px oklch(0.66 0.2 45 / 0.32); }
+
+/* ---- Scan zone: warm tinted gradient ---- */
+.scan-zone {
+  background: linear-gradient(180deg, oklch(0.975 0.03 58), var(--surface));
+}
+
+/* ============================================================
+   DESKTOP ⇄ MOBILE SYNC
+   Warm the shared --bg token and the translucent chrome so the
+   phone view matches the desktop's warm multi-color mesh exactly.
+   ============================================================ */
+
+:root {
+  /* warm near-white base — used by .m-app, .m-sheet, etc. */
+  --bg: oklch(0.987 0.006 70);
+}
+
+/* Mobile app shell: same warm multi-color mesh as the desktop body */
+.m-app {
+  background:
+    radial-gradient(680px 420px at 8% -6%,  oklch(0.92 0.085 58 / 0.55), transparent 62%),
+    radial-gradient(560px 420px at 96% 2%,  oklch(0.91 0.075 350 / 0.42), transparent 64%),
+    radial-gradient(560px 460px at 60% 108%, oklch(0.93 0.06 280 / 0.32), transparent 62%),
+    linear-gradient(180deg, oklch(0.987 0.006 70), oklch(0.964 0.012 60));
+}
+
+/* Warm the translucent mobile top/tab bars (were cool hue 250) */
+.m-topbar {
+  background: oklch(0.99 0.006 70 / 0.85);
+}
+.m-tabbar {
+  background: oklch(0.99 0.006 70 / 0.88);
+  border-top-color: oklch(0.91 0.01 60 / 0.7);
+}
+
+/* Warm the desktop chrome to match, so both views share one tone */
+.topbar  { background: oklch(0.99 0.006 70 / 0.72); }
+.sidebar { background: oklch(0.99 0.006 70 / 0.7); }
+
+/* Selected mobile filter chip → brand orange (mirrors desktop active tab) */
+.m-chip.on {
+  background: var(--brand-grad);
+  border-color: transparent;
+  color: #fff;
+}
+
+/* Active mobile tab pill gets a soft orange halo behind the icon */
+.m-tab.on .m-tab-icon {
+  background: var(--accent-soft);
+}
+
+/* ============================================================
+   CLEAN LIGHT — bright white background, orange × black brand
+   Appended last so these tokens win over every earlier :root.
+   Crisp white surfaces, dark text, orange accent, multi-color KPIs.
+   ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* surfaces — bright & clean (white cards on a near-white page) */
+  --bg:           oklch(0.989 0.0025 255);
+  --surface:      #ffffff;
+  --surface-2:    oklch(0.975 0.004 255);
+  --surface-3:    oklch(0.953 0.006 255);
+  --border:       oklch(0.912 0.005 255);
+  --border-strong:oklch(0.850 0.007 255);
+
+  /* text — near-black, high legibility */
+  --fg:    oklch(0.205 0.012 260);
+  --fg-2:  oklch(0.400 0.012 260);
+  --muted: oklch(0.550 0.010 258);
+  --faint: oklch(0.720 0.006 258);
+
+  /* accent — brand orange */
+  --accent:      oklch(0.655 0.190 47);
+  --accent-fg:   #ffffff;
+  --accent-soft: oklch(0.958 0.050 58);
+  --accent-ring: oklch(0.860 0.100 50);
+
+  /* brand gradient — orange → tangerine */
+  --brand-grad:        linear-gradient(135deg, oklch(0.720 0.170 60), oklch(0.620 0.205 38));
+  --brand-grad-strong: linear-gradient(135deg, oklch(0.700 0.180 55), oklch(0.580 0.210 32));
+
+  /* status — vivid fg, soft light fills */
+  --success:      oklch(0.580 0.130 150);  --success-soft: oklch(0.950 0.050 150);
+  --warning:      oklch(0.700 0.140 75);   --warning-soft: oklch(0.965 0.060 75);
+  --danger:       oklch(0.580 0.180 25);   --danger-soft:  oklch(0.950 0.050 25);
+  --info:         oklch(0.600 0.100 230);  --info-soft:    oklch(0.950 0.040 230);
+
+  /* multi-color KPI palette */
+  --c-orange: oklch(0.660 0.190 47);
+  --c-blue:   oklch(0.550 0.160 250);
+  --c-green:  oklch(0.580 0.140 156);
+  --c-pink:   oklch(0.580 0.200 350);
+  --c-amber:  oklch(0.720 0.150 78);
+  --c-violet: oklch(0.550 0.190 292);
+
+  /* shadows — soft, light */
+  --shadow-sm: 0 1px 2px oklch(0.3 0.02 60 / 0.05);
+  --shadow-md: 0 4px 14px oklch(0.3 0.02 60 / 0.07), 0 1px 2px oklch(0.3 0.02 60 / 0.05);
+  --shadow-lg: 0 24px 60px oklch(0.3 0.03 60 / 0.13), 0 4px 10px oklch(0.3 0.02 60 / 0.06);
+}
+
+/* Page background — clean & bright white (no dull tints) */
+html, body {
+  background: linear-gradient(180deg, #ffffff 0%, oklch(0.984 0.003 255) 100%);
+  background-attachment: fixed;
+  color: var(--fg);
+}
+
+/* Translucent chrome — white glass */
+.topbar {
+  background: oklch(1 0 0 / 0.72);
+  border-bottom: 1px solid var(--border);
+}
+.sidebar {
+  background: oklch(1 0 0 / 0.80);
+  border-right: 1px solid var(--border);
+  box-shadow: 1px 0 0 oklch(0.93 0.005 255 / 0.5);
+}
+
+/* Cards / panels — soft elevation on white */
+.card, .kpi, .win, .m-card, .m-kpi, .m-list {
+  box-shadow: var(--shadow-sm);
+}
+.card-head {
+  background: linear-gradient(180deg, oklch(0.985 0.012 60 / 0.6), transparent);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Primary button → premium black CTA on white */
+.btn-primary {
+  background: linear-gradient(180deg, oklch(0.30 0.012 260), oklch(0.17 0.012 260));
+  color: #ffffff;
+  border-color: oklch(0.17 0.012 260);
+}
+.btn-primary:hover {
+  background: linear-gradient(180deg, oklch(0.36 0.012 260), oklch(0.22 0.012 260));
+}
+.btn-edit-on { background: var(--accent-soft); border-color: var(--accent); color: oklch(0.50 0.18 45); }
+
+/* Toast → dark pill on light bg */
+.toast {
+  background: var(--fg);
+  color: oklch(0.99 0.003 250);
+  border: none;
+}
+
+/* Backdrops */
+.drawer-backdrop { background: oklch(0.2 0.01 250 / 0.30); }
+.m-sheet-backdrop { background: oklch(0 0 0 / 0.40); }
+
+/* Scan zone — faint warm tint on white */
+.scan-zone {
+  background: linear-gradient(180deg, oklch(0.985 0.025 58), var(--surface));
+  border-color: var(--border-strong);
+}
+
+/* Label stage — light gray so the white shipping label pops */
+.label-stage { background: oklch(0.94 0.005 80); border-color: var(--border); }
+
+/* Auth screen — light glass card on a soft, bright hero */
+.auth-page {
+  background:
+    radial-gradient(1000px 700px at 28% 8%, oklch(0.95 0.06 58 / 0.5), transparent 64%),
+    radial-gradient(820px 620px at 84% 92%, oklch(0.95 0.05 348 / 0.4), transparent 64%),
+    linear-gradient(180deg, oklch(0.99 0.004 60), oklch(0.97 0.008 55));
+  background-attachment: fixed;
+}
+.auth-card {
+  background: oklch(1 0 0 / 0.85);
+  border: 1px solid oklch(1 0 0 / 0.6);
+  box-shadow:
+    0 32px 80px oklch(0.3 0.05 252 / 0.16),
+    0 8px 20px oklch(0.3 0.05 252 / 0.08),
+    inset 0 1px 0 oklch(1 0 0 / 0.6);
+}
+
+/* Warning badge — dark text on soft fill */
+.badge-warning { color: oklch(0.50 0.13 65); }
+
+/* ---- Mobile chrome + surfaces — bright white ---- */
+.m-app {
+  background: linear-gradient(180deg, #ffffff 0%, oklch(0.985 0.004 60) 100%);
+}
+.m-topbar {
+  background: oklch(1 0 0 / 0.85);
+}
+.m-tabbar {
+  background: oklch(1 0 0 / 0.90);
+  border-top: 1px solid var(--border);
+}
+/* Bulk bar → premium black pill on white (orange badge set inline) */
+.m-bulk-bar {
+  background: var(--fg);
+  color: oklch(0.99 0.003 250);
+  border-top: none;
+  box-shadow: 0 -8px 24px oklch(0.2 0.01 250 / 0.18);
+}
+/* Mobile "dark" big button stays near-black for contrast on white */
+.m-btn-big.dark {
+  background: var(--fg);
+  color: #ffffff;
+  border: none;
+}
+
+/* ============================================================
+   DEPTH & ELEVATION — cards/tiles float off the page
+   Layered soft shadows + a hover lift. Background stays bright
+   white but gets a whisper of tone so white cards pop.
+   ============================================================ */
+
+:root {
+  /* a whisper of tone so #fff cards lift off it (still reads white) */
+  --bg: oklch(0.974 0.003 255);
+
+  /* layered ambient + key shadows for genuine lift */
+  --elev-1:
+    0 1px 2px  oklch(0.32 0.02 262 / 0.05),
+    0 4px 10px oklch(0.32 0.02 262 / 0.06),
+    0 12px 26px oklch(0.32 0.02 262 / 0.05);
+  --elev-2:
+    0 2px 4px  oklch(0.32 0.02 262 / 0.06),
+    0 10px 22px oklch(0.32 0.02 262 / 0.10),
+    0 26px 50px oklch(0.32 0.02 262 / 0.09);
+  --sheen: inset 0 1px 0 oklch(1 0 0 / 0.75);
+}
+
+/* Bright white page with a soft top spotlight for subtle depth */
+html, body {
+  background:
+    radial-gradient(1200px 720px at 50% -12%, #ffffff, transparent 58%),
+    linear-gradient(180deg, oklch(0.983 0.003 255), oklch(0.962 0.005 255));
+  background-attachment: fixed;
+}
+
+/* Resting elevation — cards, KPI tiles, dashboard widgets, mobile cards */
+.card, .kpi, .win, .m-card, .m-kpi, .m-list {
+  box-shadow: var(--elev-1), var(--sheen);
+  border-color: oklch(0.922 0.004 255);
+  transition: transform 0.18s cubic-bezier(0.2, 0.7, 0.3, 1), box-shadow 0.18s;
+}
+
+/* Lift the interactive tiles on hover */
+.kpi:hover,
+.win:hover,
+.widget-pill:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--elev-2), var(--sheen);
+}
+.m-card:active,
+.m-kpi:active { transform: translateY(-1px) scale(0.997); }
+
+/* KPI hover gets a soft colored glow matching its accent stripe */
+.kpi-grid > .kpi:nth-child(4n+1):hover { box-shadow: var(--elev-2), 0 18px 38px oklch(0.66 0.19 47 / 0.18), var(--sheen); }
+.kpi-grid > .kpi:nth-child(4n+2):hover { box-shadow: var(--elev-2), 0 18px 38px oklch(0.55 0.16 250 / 0.18), var(--sheen); }
+.kpi-grid > .kpi:nth-child(4n+3):hover { box-shadow: var(--elev-2), 0 18px 38px oklch(0.58 0.14 156 / 0.18), var(--sheen); }
+.kpi-grid > .kpi:nth-child(4n+4):hover { box-shadow: var(--elev-2), 0 18px 38px oklch(0.58 0.20 350 / 0.18), var(--sheen); }
+
+/* Buttons rise off the surface */
+.btn {
+  box-shadow: 0 1px 2px oklch(0.3 0.02 262 / 0.08), 0 1px 1px oklch(0.3 0.02 262 / 0.04);
+  transition: background 0.12s, border-color 0.12s, transform 0.12s, box-shadow 0.16s;
+}
+.btn:hover { transform: translateY(-1px); box-shadow: 0 5px 12px oklch(0.3 0.02 262 / 0.14); }
+.btn:active { transform: translateY(0); }
+.btn-ghost { box-shadow: none; }
+.btn-ghost:hover { box-shadow: none; }
+.btn-primary { box-shadow: 0 2px 6px oklch(0.2 0.01 260 / 0.26), var(--sheen); }
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 9px 20px oklch(0.2 0.01 260 / 0.32), var(--sheen); }
+.btn-accent { box-shadow: 0 1px 0 oklch(1 0 0 / 0.28) inset, 0 6px 16px oklch(0.66 0.19 47 / 0.34); }
+.btn-accent:hover { transform: translateY(-1px); box-shadow: 0 1px 0 oklch(1 0 0 / 0.28) inset, 0 11px 26px oklch(0.66 0.19 47 / 0.42); }
+
+/* Chrome lifts off the content area */
+.topbar  { box-shadow: 0 1px 0 var(--border), 0 8px 24px oklch(0.3 0.02 262 / 0.05); }
+.sidebar { box-shadow: 1px 0 0 var(--border), 10px 0 30px oklch(0.3 0.02 262 / 0.04); }
+
+/* Overlays float highest */
+.modal, .drawer, .popover { box-shadow: var(--elev-2), var(--sheen); }
+
+/* Active nav pill floats with an orange glow */
+.nav-item.active { box-shadow: 0 6px 16px oklch(0.66 0.19 47 / 0.30); }
+
+/* Mobile floating chrome + tiles */
+.m-tabbar { box-shadow: 0 -6px 22px oklch(0.3 0.02 262 / 0.07); }
+.m-btn-big { box-shadow: 0 8px 22px oklch(0.66 0.19 47 / 0.34); }
+.m-btn-big:active { transform: translateY(1px) scale(0.99); }
+.m-fab,
+.m-action.accent { box-shadow: 0 6px 16px oklch(0.66 0.19 47 / 0.34); }
+
+/* ============================================================
+   MOBILE DEPTH PARITY — match the desktop float on phones
+   The phone canvas was near-pure-white, so white cards' shadows
+   had nothing to separate against. Tone the app bg, strengthen
+   the float, and add tactile press-depth (no hover on touch).
+   ============================================================ */
+
+/* Tone the phone background (still bright) so m-cards lift off it */
+.m-app {
+  background:
+    radial-gradient(640px 380px at 50% -6%, #ffffff, transparent 62%),
+    linear-gradient(180deg, oklch(0.984 0.003 255) 0%, oklch(0.959 0.006 255) 100%);
+}
+
+/* Clearer float on the smaller mobile canvas */
+.m-card,
+.m-list {
+  box-shadow:
+    0 1px 2px  oklch(0.32 0.02 262 / 0.06),
+    0 6px 16px oklch(0.32 0.02 262 / 0.09),
+    0 14px 30px oklch(0.32 0.02 262 / 0.06),
+    var(--sheen);
+  border-color: oklch(0.922 0.004 255);
+}
+.m-kpi {
+  box-shadow:
+    0 1px 2px  oklch(0.32 0.02 262 / 0.06),
+    0 6px 16px oklch(0.32 0.02 262 / 0.10),
+    var(--sheen);
+  border-color: oklch(0.922 0.004 255);
+}
+
+/* Tactile press depth — the touch equivalent of the desktop hover lift */
+.m-card:active,
+.m-kpi:active,
+.m-chip:active {
+  transform: translateY(1px) scale(0.992);
+  transition: transform 0.08s ease;
+}
+
+/* Sticky top bar floats over scrolling content */
+.m-topbar { box-shadow: 0 4px 18px oklch(0.32 0.02 262 / 0.05); }

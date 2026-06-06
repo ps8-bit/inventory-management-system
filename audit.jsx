@@ -172,8 +172,16 @@ function HistoryPage({ pushToast }) {
     return n;
   });
 
-  const clearLog = () => {
+  const clearLog = async () => {
     if (!confirm("ลบประวัติทั้งหมดออกจากระบบ?")) return;
+    // RLS allows clearing audit_log for admins only — block others up front so we
+    // don't wipe the local cache while the DB rows survive and re-sync on reload.
+    const role = (window.__currentUser && window.__currentUser.role) || "staff";
+    if (role !== "admin") { pushToast("ล้างประวัติได้เฉพาะผู้ดูแลระบบ"); return; }
+    if (window.dbDeleteAuditLog) {
+      const res = await dbDeleteAuditLog();
+      if (res && res.error) { pushToast("ล้างประวัติไม่สำเร็จ: " + res.error); return; }
+    }
     try { localStorage.removeItem(AUDIT_KEY); } catch (e) {}
     window._DB_AUDIT_LOG = [];
     window.dispatchEvent(new CustomEvent("ims-audit-change"));
@@ -188,7 +196,7 @@ function HistoryPage({ pushToast }) {
           <div className="page-sub">บันทึกการเปลี่ยนแปลงทั้งหมด — ใครเปลี่ยนอะไร เมื่อไหร่</div>
         </div>
         <div className="row">
-          <button className="btn" onClick={() => { const csv = "Date,User,Action,Entity,Details\n" + entries.map(e => `${new Date(e.at).toLocaleString()},${e.user},${e.action},${e.entity},${e.summary}`).join("\n"); const blob = new Blob([csv], {type: "text/csv"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "audit.csv"; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>
+          <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const csv = "Date,User,Action,Entity,Details\n" + filtered.map(e => [new Date(e.ts).toLocaleString("th-TH"), e.user?.name || "ระบบ", e.action, e.entity, e.summary].map(esc).join(",")).join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "audit.csv"; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>
           <button className="btn btn-danger" onClick={clearLog}><Icons.Trash size={14}/> ล้างประวัติ</button>
         </div>
       </div>

@@ -4,11 +4,16 @@ const { useState: useBndState, useEffect: useBndEffect, useRef: useBndRef, useMe
 
 /* ── stock adjustment layer ── */
 function getStockAdj() {
+  // Cloud copy (synced via app_state) wins so concurrent sellers see the same
+  // effective stock; fall back to localStorage when offline / pre-hydration.
+  if (window._DB_STOCK_ADJ && typeof window._DB_STOCK_ADJ === "object") return window._DB_STOCK_ADJ;
   try { return JSON.parse(localStorage.getItem("ims_stock_adj") || "{}"); } catch { return {}; }
 }
 function applyStockAdj(adj) {
   try { localStorage.setItem("ims_stock_adj", JSON.stringify(adj)); } catch {}
+  window._DB_STOCK_ADJ = adj;
   window.dispatchEvent(new CustomEvent("ims-stock-adj-change"));
+  if (window.dbSaveState) dbSaveState("stock_adj", adj).catch(() => {});
 }
 function getEffectiveQty(sku) {
   const base = PRODUCTS.find(p => p.sku === sku)?.qty ?? 0;
@@ -17,40 +22,7 @@ function getEffectiveQty(sku) {
 }
 
 /* ── bundle storage ── */
-const DEFAULT_BUNDLES = [
-  {
-    id: "BND-001",
-    name: "ชุดสกินแคร์ยอดนิยม",
-    desc: "เซรั่มวิตามินซี + ครีมกันแดด เซตคู่หน้าใสสำหรับกลางวัน",
-    price: 1180,
-    items: [{ sku: "TH-BTY-310", qty: 1 }, { sku: "TH-BTY-311", qty: 1 }],
-    createdAt: "2026-05-01"
-  },
-  {
-    id: "BND-002",
-    name: "ชุดเสื้อสีขาว+สีดำ",
-    desc: "เสื้อยืดคอกลม Cotton 100% ครบทั้งสองสี",
-    price: 520,
-    items: [{ sku: "TH-APP-001", qty: 1 }, { sku: "TH-APP-002", qty: 1 }],
-    createdAt: "2026-05-05"
-  },
-  {
-    id: "BND-003",
-    name: "ชุดเครื่องดื่มออร์แกนิก",
-    desc: "กาแฟดริปอาราบิก้า + ชาเขียวมัทฉะออร์แกนิก คู่สุดคลาสสิก",
-    price: 680,
-    items: [{ sku: "TH-FOD-405", qty: 2 }, { sku: "TH-FOD-406", qty: 1 }],
-    createdAt: "2026-05-10"
-  },
-  {
-    id: "BND-004",
-    name: "ชุดนอนสบาย",
-    desc: "หมอนรองคอ Memory Foam + ผ้าห่มขนแกะ Microfiber เซตคู่พักผ่อน",
-    price: 1380,
-    items: [{ sku: "TH-HOM-220", qty: 1 }, { sku: "TH-HOM-221", qty: 1 }],
-    createdAt: "2026-05-12"
-  }
-];
+const DEFAULT_BUNDLES = [];
 
 function loadBundles() {
   if (window._DB_BUNDLES) return window._DB_BUNDLES;
@@ -59,17 +31,40 @@ function loadBundles() {
     return raw ? JSON.parse(raw) : DEFAULT_BUNDLES;
   } catch { return DEFAULT_BUNDLES; }
 }
-function saveBundles(bundles) {
-  // Detect and delete removed bundles from DB
+async function saveBundles(bundles) {
   const prev = window._DB_BUNDLES;
-  if (prev && window.dbDeleteBundle) {
-    const newIds = new Set(bundles.map(b => b.id));
-    prev.filter(b => !newIds.has(b.id)).forEach(b => dbDeleteBundle(b.id).catch(() => {}));
-  }
+  // Optimistic local update (instant UI)
   try { localStorage.setItem("ims_bundles", JSON.stringify(bundles)); } catch {}
   window._DB_BUNDLES = bundles;
   window.dispatchEvent(new CustomEvent("ims-bundles-change"));
-  if (window.dbUpsertBundles) dbUpsertBundles(bundles).catch(() => {});
+
+  // Persist: delete removed bundles, then upsert the rest. Check each result so
+  // an RLS-blocked write (staff/viewer) doesn't silently revert on next sync.
+  let err = null;
+  if (prev && window.dbDeleteBundle) {
+    const newIds = new Set(bundles.map(b => b.id));
+    for (const b of prev.filter(b => !newIds.has(b.id))) {
+      const r = await dbDeleteBundle(b.id);
+      if (r && r.error) err = r.error;
+    }
+  }
+  if (!err && window.dbUpsertBundles && bundles.length) {
+    const r = await dbUpsertBundles(bundles);
+    if (r && r.error) err = r.error;
+  }
+
+  if (err) {
+    // Roll back to canonical server state so the UI doesn't lie.
+    if (window.dbLoadBundles) {
+      const fresh = await dbLoadBundles();
+      if (fresh) { window._DB_BUNDLES = fresh; try { localStorage.setItem("ims_bundles", JSON.stringify(fresh)); } catch {} }
+    }
+    window.dispatchEvent(new CustomEvent("ims-bundles-change"));
+    return { ok: false, error: err === 'PERMISSION_OR_MISSING'
+      ? 'ไม่มีสิทธิ์แก้ไข/ลบชุดสินค้า (ต้องเป็นผู้ดูแลระบบหรือผู้จัดการ)'
+      : 'บันทึกชุดสินค้าไม่สำเร็จ: ' + err };
+  }
+  return { ok: true };
 }
 
 /* ── helpers ── */
@@ -603,7 +598,7 @@ function BundlePage({ pushToast }) {
     };
   }, []);
 
-  const setBundles = (next) => { setBundlesRaw(next); saveBundles(next); };
+  const setBundles = (next) => { setBundlesRaw(next); return saveBundles(next); };
 
   const filtered = useBndMemo(() => {
     const lq = q.toLowerCase();
@@ -615,21 +610,25 @@ function BundlePage({ pushToast }) {
 
   const activeBundle = bundles.find(b => b.id === activeId) || null;
 
-  const handleCreate = (data) => {
+  const handleCreate = async (data) => {
     const nb = { id: newBundleId(bundles), ...data, createdAt: new Date().toISOString().slice(0, 10) };
-    setBundles([...bundles, nb]);
     setFormBundle(null);
+    const res = await setBundles([...bundles, nb]);
+    if (res && res.ok === false) { pushToast(res.error); return; }
     pushToast("สร้างชุดสินค้า \"" + nb.name + "\" สำเร็จ");
   };
-  const handleEdit = (data) => {
-    setBundles(bundles.map(b => b.id === formBundle.id ? { ...b, ...data } : b));
+  const handleEdit = async (data) => {
+    const id = formBundle.id;
     setFormBundle(null);
+    const res = await setBundles(bundles.map(b => b.id === id ? { ...b, ...data } : b));
+    if (res && res.ok === false) { pushToast(res.error); return; }
     pushToast("บันทึกการแก้ไขชุดสินค้าสำเร็จ");
   };
-  const handleDelete = (id) => {
+  const handleDelete = async (id) => {
     if (!confirm("ลบชุดสินค้านี้?")) return;
-    setBundles(bundles.filter(b => b.id !== id));
     if (activeId === id) setActiveId(null);
+    const res = await setBundles(bundles.filter(b => b.id !== id));
+    if (res && res.ok === false) { pushToast(res.error); return; }
     pushToast("ลบชุดสินค้าสำเร็จ");
   };
 

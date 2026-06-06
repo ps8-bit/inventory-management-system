@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workflow: Google Sheet ⇄ เว็บแอป (PS STOCK)</title>
+<style>
+  :root{
+    --sheet:#0f9d58; --supa:#3ecf8e; --app:#6366f1;
+    --ink:#0f172a; --muted:#64748b; --line:#cbd5e1;
+    --bgA:#ecfdf5; --bgB:#eef2ff; --card:#ffffff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:"Segoe UI","Sarabun",system-ui,sans-serif;
+    background:linear-gradient(160deg,#f8fafc,#eef2f7);
+    color:var(--ink);padding:32px 18px;min-height:100vh;
+  }
+  .wrap{max-width:1080px;margin:0 auto}
+  h1{font-size:26px;font-weight:800;letter-spacing:-.5px}
+  .sub{color:var(--muted);margin:6px 0 28px;font-size:15px}
+
+  /* the 3 main pillars */
+  .pillars{
+    display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;
+    align-items:stretch;margin-bottom:10px;
+  }
+  .pillar{
+    background:var(--card);border:2px solid var(--line);border-radius:18px;
+    padding:20px 18px;text-align:center;position:relative;
+    box-shadow:0 6px 20px rgba(15,23,42,.06);
+  }
+  .pillar .ico{font-size:34px;line-height:1}
+  .pillar h2{font-size:17px;margin-top:8px}
+  .pillar p{font-size:12.5px;color:var(--muted);margin-top:4px}
+  .pillar.sheet{border-color:var(--sheet)}
+  .pillar.supa{border-color:var(--supa)}
+  .pillar.app{border-color:var(--app)}
+  .col-gap{display:flex;align-items:center;justify-content:center}
+
+  /* flow rows */
+  .flow{
+    background:var(--card);border-radius:18px;padding:22px 24px;
+    margin-top:22px;box-shadow:0 6px 20px rgba(15,23,42,.06);
+    border-left:6px solid var(--c);
+  }
+  .flow.a{--c:var(--sheet);background:linear-gradient(0deg,var(--card),var(--card))}
+  .flow.b{--c:var(--app)}
+  .flow .tag{
+    display:inline-block;font-size:12px;font-weight:700;color:#fff;
+    background:var(--c);padding:3px 11px;border-radius:999px;margin-bottom:12px;
+  }
+  .flow h3{font-size:18px;margin-bottom:14px}
+  .steps{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+  .step{
+    flex:1;min-width:150px;background:#f8fafc;border:1px solid var(--line);
+    border-radius:14px;padding:14px 14px;position:relative;
+  }
+  .step .n{
+    position:absolute;top:-10px;left:14px;width:24px;height:24px;border-radius:50%;
+    background:var(--c);color:#fff;font-size:13px;font-weight:700;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .step .t{font-size:14px;font-weight:700;margin-top:6px}
+  .step .d{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.5}
+  .step code{background:#e2e8f0;padding:1px 5px;border-radius:5px;font-size:11px}
+  .arrow{display:flex;align-items:center;justify-content:center;font-size:22px;color:var(--c);padding:0 4px}
+
+  .note{
+    margin-top:26px;background:#fffbeb;border:1px solid #fde68a;border-radius:14px;
+    padding:16px 18px;font-size:13.5px;color:#92400e;line-height:1.7;
+  }
+  .note b{color:#78350f}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:18px;font-size:12.5px;color:var(--muted)}
+  .legend span{display:flex;align-items:center;gap:6px}
+  .dot{width:12px;height:12px;border-radius:50%;display:inline-block}
+  @media(max-width:720px){
+    .pillars{grid-template-columns:1fr}
+    .col-gap{transform:rotate(90deg);padding:6px 0}
+    .arrow{transform:rotate(90deg);padding:6px 0}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔄 Workflow: Google Sheet ⇄ เว็บแอป PS STOCK</h1>
+  <p class="sub">เชื่อม Google Sheet กับระบบคลังแบบสองทาง — พิมพ์ในชีตขึ้นแอป, ส่งของในแอปติ๊ก "ส่งแล้ว" กลับมาในชีต</p>
+
+  <!-- 3 pillars -->
+  <div class="pillars">
+    <div class="pillar sheet">
+      <div class="ico">📗</div>
+      <h2>Google Sheet</h2>
+      <p>พิมพ์ข้อมูล / เช็คสถานะส่ง<br>(คนในทีมใช้ง่าย)</p>
+    </div>
+    <div class="col-gap"></div>
+    <div class="pillar supa">
+      <div class="ico">🟢</div>
+      <h2>Supabase (ฐานข้อมูล)</h2>
+      <p>ตาราง products / orders<br>+ Realtime อยู่แล้ว</p>
+    </div>
+  </div>
+  <div class="pillars" style="grid-template-columns:1fr 1fr 1fr">
+    <div></div><div></div>
+    <div class="pillar app" style="margin-top:14px">
+      <div class="ico">🟣</div>
+      <h2>เว็บแอป psstock.vercel.app</h2>
+      <p>อัปเดตทันที (realtime)<br>ไม่ต้องแก้โค้ดแอปเลย</p>
+    </div>
+  </div>
+
+  <!-- FLOW A -->
+  <div class="flow a">
+    <span class="tag">① ขาเข้า — Sheet ➜ แอป</span>
+    <h3>พิมพ์ข้อมูลในชีต แล้วขึ้นที่เว็บแอปแบบ real-time</h3>
+    <div class="steps">
+      <div class="step"><span class="n">1</span><div class="t">📗 พิมพ์ในชีต</div><div class="d">เพิ่มสินค้า / เติมสต็อก ลงแถวในชีต</div></div>
+      <div class="arrow">➜</div>
+      <div class="step"><span class="n">2</span><div class="t">⚙️ Apps Script</div><div class="d">ส่งแถวขึ้น Supabase ผ่าน REST <code>POST /products</code> (upsert ตาม sku)</div></div>
+      <div class="arrow">➜</div>
+      <div class="step"><span class="n">3</span><div class="t">🟢 Supabase</div><div class="d">บันทึกแถว → ยิง <code>postgres_changes</code></div></div>
+      <div class="arrow">➜</div>
+      <div class="step"><span class="n">4</span><div class="t">🟣 เว็บแอปอัปเดต</div><div class="d">ทุกหน้าจอที่เปิดอยู่ refresh เอง ทันที</div></div>
+    </div>
+  </div>
+
+  <!-- FLOW B -->
+  <div class="flow b">
+    <span class="tag">② ขากลับ — แอป ➜ Sheet</span>
+    <h3>พอส่งสินค้าในแอป → ติ๊ก "✅ ส่งแล้ว" กลับเข้าชีตให้อัตโนมัติ</h3>
+    <div class="steps">
+      <div class="step"><span class="n">1</span><div class="t">🟣 ส่งของในแอป</div><div class="d">ใส่เลขพัสดุ → สถานะ = <code>shipped</code></div></div>
+      <div class="arrow">➜</div>
+      <div class="step"><span class="n">2</span><div class="t">🟢 Supabase</div><div class="d">แถว order อัปเดต tracking / carrier / status</div></div>
+      <div class="arrow">➜</div>
+      <div class="step"><span class="n">3</span><div class="t">⚙️ Apps Script (ตั้งเวลา)</div><div class="d">ทุก 5 นาที อ่าน <code>status=shipped</code> จับคู่ด้วย SO-id</div></div>
+      <div class="arrow">➜</div>
+      <div class="step"><span class="n">4</span><div class="t">📗 ชีตติ๊กให้</div><div class="d">เติมคอลัมน์ <b>✅ ส่งแล้ว · เลขพัสดุ · ขนส่ง · วันที่</b></div></div>
+    </div>
+  </div>
+
+  <div class="note">
+    🔑 <b>กุญแจสำคัญ 2 อย่าง</b><br>
+    • <b>คีย์จับคู่แถว:</b> ใช้ <b>SO-id</b> (คอลัมน์แรกของชีต) เป็นตัวเชื่อมว่าแถวไหน = ออเดอร์ไหน<br>
+    • <b>ความปลอดภัย:</b> ใส่ <b>service_role key</b> ไว้ใน Apps Script (ฝั่ง Google) เท่านั้น — ห้ามใส่ในโค้ดเว็บ/ไม่ commit ลง git
+  </div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--sheet)"></i> Google Sheet (ทีมพิมพ์/เช็ค)</span>
+    <span><i class="dot" style="background:var(--supa)"></i> Supabase (ฐานข้อมูล + realtime)</span>
+    <span><i class="dot" style="background:var(--app)"></i> เว็บแอป (อัปเดตอัตโนมัติ)</span>
+    <span>⚙️ Apps Script = ตัวกลางที่ผมจะเขียนให้</span>
+  </div>
+</div>
+</body>
+</html>

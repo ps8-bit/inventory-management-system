@@ -1,13 +1,25 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="th">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>à¸„à¸¥à¸±à¸‡à¸žà¸£à¹‰à¸­à¸¡à¸ªà¹ˆà¸‡ â€” Inventory Management System</title>
+  <title>คลังพร้อมส่ง — Inventory Management System</title>
+
+  <!-- PWA: installable / add-to-home-screen as a standalone app -->
+  <link rel="manifest" href="/manifest.webmanifest"/>
+  <meta name="theme-color" content="#ffffff"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <!-- iOS standalone app behavior -->
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
+  <meta name="apple-mobile-web-app-title" content="PS STOCK"/>
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png"/>
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png"/>
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png"/>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="styles.css?v=20260527c"/>
+  <link rel="stylesheet" href="styles.css?v=20260606l"/>
   <style>
     /* Print: only labels print, with proper paper sizing */
     @media print {
@@ -36,24 +48,39 @@
   <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
   <!-- html5-qrcode: photo-mode scanning (ZXing-based, handles EXIF orientation) -->
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <!-- qrcode-generator: real, scannable QR encoding (exposes global `qrcode`) -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 
-  <script type="text/babel" src="tweaks-panel.jsx?v=20260527c"></script>
-  <script type="text/babel" src="data.jsx?v=20260527c"></script>
-  <script type="text/babel" src="supabase.jsx?v=20260527c"></script>
-  <script type="text/babel" src="icons.jsx?v=20260527c"></script>
-  <script type="text/babel" src="product-images.jsx?v=20260527c"></script>
-  <script type="text/babel" src="screens.jsx?v=20260527c"></script>
-  <script type="text/babel" src="dashboard.jsx?v=20260527c"></script>
-  <script type="text/babel" src="labels.jsx?v=20260527c"></script>
-  <script type="text/babel" src="settings.jsx?v=20260527c"></script>
-  <script type="text/babel" src="audit.jsx?v=20260527c"></script>
-  <script type="text/babel" src="tracking.jsx?v=20260527c"></script>
-  <script type="text/babel" src="analytics.jsx?v=20260527c"></script>
-  <script type="text/babel" src="handheld.jsx?v=20260527c"></script>
-  <script type="text/babel" src="import.jsx?v=20260527c"></script>
-  <script type="text/babel" src="bundles.jsx?v=20260527c"></script>
-  <script type="text/babel" src="auth.jsx?v=20260527c"></script>
-  <script type="text/babel" src="app.jsx?v=20260527c"></script>
+  <script type="text/babel" src="tweaks-panel.jsx?v=20260606l"></script>
+  <script type="text/babel" src="data.jsx?v=20260606l"></script>
+  <script type="text/babel" src="supabase.jsx?v=20260606l"></script>
+  <script type="text/babel" src="icons.jsx?v=20260606l"></script>
+  <script type="text/babel" src="product-images.jsx?v=20260606l"></script>
+  <script type="text/babel" src="screens.jsx?v=20260606l"></script>
+  <script type="text/babel" src="dashboard.jsx?v=20260606l"></script>
+  <script type="text/babel" src="labels.jsx?v=20260606l"></script>
+  <script type="text/babel" src="settings.jsx?v=20260606l"></script>
+  <script type="text/babel" src="audit.jsx?v=20260606l"></script>
+  <script type="text/babel" src="tracking.jsx?v=20260606l"></script>
+  <script type="text/babel" src="analytics.jsx?v=20260606l"></script>
+  <script type="text/babel" src="handheld.jsx?v=20260606l"></script>
+  <script type="text/babel" src="import.jsx?v=20260606l"></script>
+  <script type="text/babel" src="bundles.jsx?v=20260606l"></script>
+  <script type="text/babel" src="auth.jsx?v=20260606l"></script>
+  <script type="text/babel" src="app.jsx?v=20260606l"></script>
+
+  <!-- Register service worker so the app is installable as a standalone PWA -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("/sw.js").catch(function (err) {
+          console.warn("SW registration failed:", err);
+        });
+      });
+    }
+  </script>
 </body>
 </html>
+
+
 

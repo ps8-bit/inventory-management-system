@@ -7,24 +7,27 @@ const { useState: useStateImg, useEffect: useEffectImg, useRef: useRefImg } = Re
 const PI_KEY = "ims_product_images";
 
 function loadProductImages() {
+  // Cloud copy (synced via app_state "img:<sku>" rows) wins so every device shows
+  // the same images; localStorage is an offline fallback / seed.
+  if (window._DB_PRODUCT_IMAGES && typeof window._DB_PRODUCT_IMAGES === "object") return window._DB_PRODUCT_IMAGES;
   try { return JSON.parse(localStorage.getItem(PI_KEY) || "{}"); }
   catch { return {}; }
 }
 
-function saveProductImages(map) {
-  try { localStorage.setItem(PI_KEY, JSON.stringify(map)); }
-  catch (e) {
-    // localStorage quota might be hit if many images; trim oldest
-    console.warn("Image storage failed", e);
-  }
-  window.dispatchEvent(new CustomEvent("ims-images-change"));
-}
-
 function setProductImage(sku, dataUrl) {
-  const m = loadProductImages();
+  const prev = loadProductImages();
+  // Fresh object ref so useProductImages' setImages() actually re-renders.
+  const m = { ...prev };
   if (dataUrl === null || dataUrl === undefined) delete m[sku];
   else m[sku] = dataUrl;
-  saveProductImages(m);
+  window._DB_PRODUCT_IMAGES = m;
+  try { localStorage.setItem(PI_KEY, JSON.stringify(m)); }
+  catch (e) { console.warn("Image storage failed", e); } // quota — cloud still has it
+  // Sync to Supabase (per-SKU app_state row); null clears it for every device.
+  if (typeof dbSaveState === "function") {
+    dbSaveState("img:" + sku, (dataUrl === undefined ? null : dataUrl)).catch(() => {});
+  }
+  window.dispatchEvent(new CustomEvent("ims-images-change"));
 }
 
 function useProductImages() {

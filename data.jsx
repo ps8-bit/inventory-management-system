@@ -1,19 +1,6 @@
-/* Mock data for the IMS */
+/* Product catalog — populated from Supabase on login, falls back to localStorage */
 
-const PRODUCTS = [
-  { sku: "TH-APP-001", name: "เสื้อยืดคอกลม Cotton 100% สีขาว", cat: "เสื้อผ้า", cost: 165, price: 290, qty: 248, reserved: 18, reorder: 50, loc: "A-02-03", supplier: "บางกอกแฟชั่น" },
-  { sku: "TH-APP-002", name: "เสื้อยืดคอกลม Cotton 100% สีดำ", cat: "เสื้อผ้า", cost: 165, price: 290, qty: 12,  reserved: 4,  reorder: 50, loc: "A-02-04", supplier: "บางกอกแฟชั่น" },
-  { sku: "TH-ELE-118", name: "หูฟังบลูทูธ ANC รุ่น Air Pro 2", cat: "อิเล็กทรอนิกส์", cost: 990, price: 1890, qty: 86, reserved: 8, reorder: 30, loc: "B-01-12", supplier: "Tech Wave Co." },
-  { sku: "TH-ELE-119", name: "สายชาร์จ USB-C 65W 1.2 เมตร", cat: "อิเล็กทรอนิกส์", cost: 220, price: 390, qty: 0, reserved: 0, reorder: 100, loc: "B-01-08", supplier: "Tech Wave Co." },
-  { sku: "TH-HOM-220", name: "หมอนรองคอ Memory Foam สีเทา", cat: "ของใช้ในบ้าน", cost: 320, price: 590, qty: 145, reserved: 22, reorder: 40, loc: "C-03-02", supplier: "Comfort Living" },
-  { sku: "TH-HOM-221", name: "ผ้าห่มขนแกะ Microfiber 180×220", cat: "ของใช้ในบ้าน", cost: 480, price: 890, qty: 67, reserved: 5, reorder: 25, loc: "C-03-05", supplier: "Comfort Living" },
-  { sku: "TH-BTY-310", name: "เซรั่ม Vitamin C 30ml", cat: "ความงาม", cost: 340, price: 690, qty: 32, reserved: 12, reorder: 40, loc: "D-01-01", supplier: "Glow Lab" },
-  { sku: "TH-BTY-311", name: "ครีมกันแดด SPF50 PA++++ 50ml", cat: "ความงาม", cost: 290, price: 590, qty: 198, reserved: 14, reorder: 50, loc: "D-01-04", supplier: "Glow Lab" },
-  { sku: "TH-FOD-405", name: "กาแฟดริปอาราบิก้า 250g (ห่อ)", cat: "อาหารและเครื่องดื่ม", cost: 160, price: 290, qty: 412, reserved: 32, reorder: 80, loc: "E-02-07", supplier: "Doi Coffee" },
-  { sku: "TH-FOD-406", name: "ชาเขียวมัทฉะออร์แกนิก 100g", cat: "อาหารและเครื่องดื่ม", cost: 250, price: 450, qty: 21, reserved: 6, reorder: 30, loc: "E-02-09", supplier: "Doi Coffee" },
-  { sku: "TH-ACC-512", name: "กระเป๋าสะพายข้าง Canvas สีกากี", cat: "เครื่องประดับ", cost: 440, price: 790, qty: 54, reserved: 9, reorder: 20, loc: "A-04-01", supplier: "Urban Goods" },
-  { sku: "TH-ACC-513", name: "หมวกแก๊ปแฟชั่น Unisex สีเบจ", cat: "เครื่องประดับ", cost: 210, price: 390, qty: 128, reserved: 12, reorder: 40, loc: "A-04-06", supplier: "Urban Goods" }
-];
+const PRODUCTS = [];
 
 const stockStatus = (p) => {
   if (p.qty === 0) return { key: "out", label: "หมดสต็อก", cls: "badge-danger" };
@@ -42,7 +29,27 @@ const stockStatus = (p) => {
 function saveProductStore() {
   try { localStorage.setItem("ims_products", JSON.stringify(PRODUCTS)); } catch (e) {}
   window.dispatchEvent(new CustomEvent("ims-products-change"));
-  if (window.dbUpsertProducts) dbUpsertProducts([...PRODUCTS]).catch(() => {});
+  if (!window.dbUpsertProducts) return;
+  dbUpsertProducts([...PRODUCTS]).then(res => {
+    if (!res || !res.error) return;
+    const perm = res.error === 'PERMISSION_OR_MISSING';
+    // Don't fail silently: surface via the global toast bridge (app.jsx listens).
+    window.dispatchEvent(new CustomEvent('ims-toast', {
+      detail: perm ? 'บันทึกไม่สำเร็จ: บัญชีนี้ไม่มีสิทธิ์แก้ไขสินค้า'
+                   : 'บันทึกสินค้าไม่สำเร็จ: ' + res.error
+    }));
+    // A permission block can never persist this edit → reload canonical server
+    // state so the UI stops showing a change that didn't save. (Network errors
+    // are left alone — the local copy retries on the next save.)
+    if (perm && window.dbLoadProducts) {
+      dbLoadProducts().then(fresh => {
+        if (!fresh) return;
+        PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p));
+        try { localStorage.setItem("ims_products", JSON.stringify(PRODUCTS)); } catch (e) {}
+        window.dispatchEvent(new CustomEvent("ims-products-change"));
+      }).catch(() => {});
+    }
+  }).catch(() => {});
 }
 function addProductToStore(p) {
   PRODUCTS.unshift({ reserved: 0, ...p });
@@ -58,17 +65,88 @@ function updateManyProducts(skus, changes) {
   PRODUCTS.forEach(p => { if (set.has(p.sku)) Object.assign(p, changes); });
   saveProductStore();
 }
-function removeProductsFromStore(skus) {
+async function removeProductsFromStore(skus) {
   const set = new Set(Array.isArray(skus) ? skus : [skus]);
+  // Optimistic local removal (instant UI). Note: we deliberately do NOT call
+  // saveProductStore() here — that would upsert the whole catalog and trigger a
+  // realtime reload that races the delete and flickers the row back.
+  const removed = [];
   for (let i = PRODUCTS.length - 1; i >= 0; i--) {
-    if (set.has(PRODUCTS[i].sku)) PRODUCTS.splice(i, 1);
+    if (set.has(PRODUCTS[i].sku)) { removed.push(PRODUCTS[i]); PRODUCTS.splice(i, 1); }
   }
-  saveProductStore();
-  if (window.dbDeleteProducts) dbDeleteProducts([...set]).catch(() => {});
+  if (!removed.length) return { ok: true };
+  try { localStorage.setItem("ims_products", JSON.stringify(PRODUCTS)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-products-change"));
+
+  if (!window.dbDeleteProducts) return { ok: true };
+  const res = await dbDeleteProducts([...set]);
+  if (res && res.error) {
+    // Delete didn't persist (no permission, etc.) → restore canonical server
+    // state so the UI doesn't lie about what was removed.
+    if (window.dbLoadProducts) {
+      const fresh = await dbLoadProducts();
+      if (fresh) { PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p)); }
+    } else {
+      removed.forEach(p => PRODUCTS.push(p));
+    }
+    try { localStorage.setItem("ims_products", JSON.stringify(PRODUCTS)); } catch (e) {}
+    window.dispatchEvent(new CustomEvent("ims-products-change"));
+    const msg = res.error === 'PERMISSION_OR_MISSING'
+      ? 'ลบไม่สำเร็จ: บัญชีนี้ไม่มีสิทธิ์ลบสินค้า (ต้องเป็นผู้ดูแลระบบหรือผู้จัดการ)'
+      : 'ลบไม่สำเร็จ: ' + res.error;
+    return { ok: false, error: msg };
+  }
+  return { ok: true };
 }
 function resetProductStore() {
   try { localStorage.removeItem("ims_products"); } catch (e) {}
   window.location.reload();
+}
+
+/* ── Category store ──
+   A separate ordered list so admins can add/rename/delete categories
+   without touching individual products. Falls back to deriving from
+   the current PRODUCTS array on first load (migration-free). */
+function loadCategories() {
+  // Cloud copy (synced via app_state) wins so every device shares one list.
+  if (Array.isArray(window._DB_CATEGORIES) && window._DB_CATEGORIES.length) return window._DB_CATEGORIES;
+  try {
+    const s = localStorage.getItem("ims_categories");
+    if (s) { const a = JSON.parse(s); if (Array.isArray(a) && a.length) return a; }
+  } catch (e) {}
+  // First run: derive from existing products + deduplicate
+  return [...new Set(PRODUCTS.map(p => p.cat).filter(Boolean))].sort();
+}
+function saveCategories(cats) {
+  try { localStorage.setItem("ims_categories", JSON.stringify(cats)); } catch (e) {}
+  window._DB_CATEGORIES = cats;
+  window.dispatchEvent(new CustomEvent("ims-categories-change"));
+  if (window.dbSaveState) dbSaveState("categories", cats).catch(() => {});
+}
+function addCategory(name) {
+  const cats = loadCategories();
+  if (!name.trim() || cats.includes(name.trim())) return false;
+  saveCategories([...cats, name.trim()]);
+  return true;
+}
+function renameCategory(oldName, newName) {
+  if (!newName.trim() || oldName === newName.trim()) return false;
+  const cats = loadCategories().map(c => c === oldName ? newName.trim() : c);
+  saveCategories(cats);
+  // Update all products that use the old category name
+  PRODUCTS.forEach(p => { if (p.cat === oldName) p.cat = newName.trim(); });
+  saveProductStore();
+  return true;
+}
+function deleteCategory(name, fallback = "ทั่วไป") {
+  const cats = loadCategories().filter(c => c !== name);
+  // Reassign products in the deleted category to the fallback
+  let changed = false;
+  PRODUCTS.forEach(p => { if (p.cat === name) { p.cat = fallback; changed = true; } });
+  if (changed) saveProductStore();
+  if (!cats.includes(fallback)) cats.unshift(fallback);
+  saveCategories(cats);
+  return true;
 }
 
 /* ── Persistent stock deduction helpers ──
@@ -80,10 +158,8 @@ function deductStockAndPersist(sku, qty) {
   if (!p) return;
   p.qty = Math.max(0, p.qty - qty);
   saveProductStore();
-  try {
-    const adj = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
-    if (sku in adj) { delete adj[sku]; localStorage.setItem("ims_stock_adj", JSON.stringify(adj)); }
-  } catch (e) {}
+  const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
+  if (sku in adj) { delete adj[sku]; if (typeof applyStockAdj === "function") applyStockAdj(adj); }
 }
 function deductManyAndPersist(deductions) {
   deductions.forEach(({ sku, qty }) => {
@@ -91,12 +167,10 @@ function deductManyAndPersist(deductions) {
     if (p) p.qty = Math.max(0, p.qty - qty);
   });
   saveProductStore();
-  try {
-    const adj = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
-    let changed = false;
-    deductions.forEach(({ sku }) => { if (sku in adj) { delete adj[sku]; changed = true; } });
-    if (changed) localStorage.setItem("ims_stock_adj", JSON.stringify(adj));
-  } catch (e) {}
+  const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
+  let changed = false;
+  deductions.forEach(({ sku }) => { if (sku in adj) { delete adj[sku]; changed = true; } });
+  if (changed && typeof applyStockAdj === "function") applyStockAdj(adj);
 }
 
 /* ── Persistent order store ──
@@ -127,24 +201,9 @@ function saveOrders(orders) {
   if (window.dbUpsertOrders) dbUpsertOrders(orders).catch(() => {});
 }
 
-const INBOUND = [
-  { id: "GR-26051901", po: "PO-2025-0488", supplier: "บางกอกแฟชั่น", items: 6, qty: 320, status: "received", ts: "09:24" },
-  { id: "GR-26051902", po: "PO-2025-0489", supplier: "Tech Wave Co.", items: 3, qty: 80, status: "in-progress", ts: "10:55" },
-  { id: "GR-26051903", po: "PO-2025-0490", supplier: "Doi Coffee", items: 4, qty: 240, status: "scheduled", ts: "14:00" },
-  { id: "GR-26051904", po: "PO-2025-0491", supplier: "Glow Lab", items: 8, qty: 410, status: "scheduled", ts: "15:30" }
-];
+const INBOUND = [];
 
-const OUTBOUND = [
-  { id: "SO-26051921", channel: "Shopee",  customer: "คุณ ปิยะนุช สวัสดิ์ชาติ", phone: "081-552-0917", items: 2, status: "packed",    carrier: "Kerry",     tracking: "TH8842919012", ts: "11:02", date: "19 พ.ค. 2569", dateIso: "2026-05-19" },
-  { id: "SO-26051922", channel: "Lazada",  customer: "คุณ ธนวัฒน์ กิตติพันธ์", phone: "094-228-1170", items: 1, status: "picking",   carrier: "Flash",     tracking: "",            ts: "11:18", date: "19 พ.ค. 2569", dateIso: "2026-05-19" },
-  { id: "SO-26051923", channel: "TikTok",  customer: "คุณ ศิริพร มงคลชัย",     phone: "086-771-1129", items: 4, status: "shipped",   carrier: "Thai Post", tracking: "EX554210099TH", ts: "09:44", date: "19 พ.ค. 2569", dateIso: "2026-05-19" },
-  { id: "SO-26051924", channel: "Shopee",  customer: "คุณ ณัฐภัทร วงศ์ดี",     phone: "092-808-4421", items: 1, status: "picking",   carrier: "J&T",       tracking: "",            ts: "11:42", date: "19 พ.ค. 2569", dateIso: "2026-05-19" },
-  { id: "SO-26051925", channel: "เว็บไซต์", customer: "คุณ ปวีณา ทองสุข",       phone: "089-114-2208", items: 3, status: "packed",    carrier: "Kerry",     tracking: "TH8842919013", ts: "11:50", date: "19 พ.ค. 2569", dateIso: "2026-05-19" },
-  { id: "SO-26051926", channel: "TikTok",  customer: "คุณ อรรถพล จันทร์เพ็ญ",  phone: "065-902-3344", items: 2, status: "shipped",   carrier: "Flash",     tracking: "FX99214470TH", ts: "08:30", date: "19 พ.ค. 2569", dateIso: "2026-05-19" },
-  { id: "SO-26051820", channel: "Shopee",  customer: "คุณ ภัทรพล สวัสดิ์",      phone: "088-330-7712", items: 2, status: "delivered", carrier: "Kerry",     tracking: "TH8842918845", ts: "16:12", date: "18 พ.ค. 2569", dateIso: "2026-05-18" },
-  { id: "SO-26051815", channel: "Lazada",  customer: "คุณ พรนภา ใจดี",          phone: "061-449-2210", items: 1, status: "delivered", carrier: "Flash",     tracking: "FX99214412TH", ts: "14:55", date: "18 พ.ค. 2569", dateIso: "2026-05-18" },
-  { id: "SO-26051611", channel: "TikTok",  customer: "คุณ ปิยะวัฒน์ ก.",        phone: "095-118-2240", items: 4, status: "delivered", carrier: "Thai Post", tracking: "EX554208816TH", ts: "11:32", date: "16 พ.ค. 2569", dateIso: "2026-05-16" }
-];
+const OUTBOUND = [];
 
 const TODAY_ISO = new Date().toISOString().slice(0, 10);
 
@@ -156,7 +215,7 @@ const isoToThai = (iso) => {
 };
 
 const CARRIERS = [
-  { id: "kerry",    name: "Kerry Express",    color: "oklch(0.62 0.2 30)" },
+  { id: "kerry",    name: "KEX",              color: "oklch(0.62 0.2 30)" },
   { id: "flash",    name: "Flash Express",    color: "oklch(0.6 0.18 70)" },
   { id: "jt",       name: "J&T Express",      color: "oklch(0.55 0.15 25)" },
   { id: "thaipost", name: "Thai Post (EMS)",  color: "oklch(0.5 0.18 145)" },
@@ -165,16 +224,7 @@ const CARRIERS = [
   { id: "best",     name: "Best Express",     color: "oklch(0.45 0.05 250)" }
 ];
 
-const ACTIVITY = [
-  { t: "11:50", type: "out",  text: "หยิบสินค้า SO-26051925 — 3 รายการ", who: "ภาณุพงศ์" },
-  { t: "11:42", type: "out",  text: "สร้างใบจัดส่ง SO-26051924", who: "ระบบ" },
-  { t: "11:18", type: "out",  text: "เริ่มหยิบสินค้า SO-26051922", who: "วรรณา" },
-  { t: "11:02", type: "out",  text: "แพ็คสินค้าเสร็จ SO-26051921 — Kerry TH8842919012", who: "ภาณุพงศ์" },
-  { t: "10:55", type: "in",   text: "รับเข้า GR-26051902 — Tech Wave Co. (กำลังตรวจนับ)", who: "สมชาย" },
-  { t: "10:14", type: "move", text: "ย้ายสต็อก B-01-08 → B-01-12 (40 ชิ้น)", who: "สมชาย" },
-  { t: "09:44", type: "out",  text: "ส่งมอบให้ไปรษณีย์ไทย — SO-26051923", who: "ระบบ" },
-  { t: "09:24", type: "in",   text: "รับเข้า GR-26051901 — 320 ชิ้น เข้าโซน A", who: "สมชาย" }
-];
+const ACTIVITY = [];
 
 const LOCATIONS = [
   // 8 cols × 4 rows; some empty, varying fill
@@ -195,6 +245,62 @@ for (let r = 0; r < 5; r++) {
   }
 }
 
+/* ── Storage-location store ──
+   Editable registry of warehouse bins, persisted to localStorage. Seeded from
+   the generated map on first run (migration-free). `skus` is computed live from
+   PRODUCTS by the screens; `fill` is an owner-set utilisation %. */
+function loadLocations() {
+  if (Array.isArray(window._DB_LOCATIONS) && window._DB_LOCATIONS.length) return window._DB_LOCATIONS;
+  try {
+    const s = localStorage.getItem("ims_locations");
+    if (s) { const a = JSON.parse(s); if (Array.isArray(a) && a.length) return a; }
+  } catch (e) {}
+  return LOCATIONS.map(l => ({ code: l.code, fill: l.fill }));
+}
+function saveLocations(locs) {
+  try { localStorage.setItem("ims_locations", JSON.stringify(locs)); } catch (e) {}
+  window._DB_LOCATIONS = locs;
+  window.dispatchEvent(new CustomEvent("ims-locations-change"));
+  if (window.dbSaveState) dbSaveState("locations", locs).catch(() => {});
+}
+function addLocation(code, fill) {
+  const c = String(code || "").trim().toUpperCase();
+  if (!c) return false;
+  const locs = loadLocations();
+  if (locs.some(l => l.code === c)) return false;
+  locs.push({ code: c, fill: Math.max(0, Math.min(100, Number(fill) || 0)) });
+  locs.sort((a, b) => a.code.localeCompare(b.code));
+  saveLocations(locs);
+  return true;
+}
+function updateLocation(code, changes) {
+  const locs = loadLocations().map(l => l.code === code ? { ...l, ...changes } : l);
+  saveLocations(locs);
+}
+/* Capability: hard-delete of records is reserved for admin/manager (mirrors the
+   Supabase DELETE RLS policy). Locations live in the app_state blob, where a
+   delete is persisted by dbSaveState as an UPDATE of the blob — which staff IS
+   allowed to do — so the row-level DELETE policy can't stop them. The app must
+   gate it instead. */
+function canDeleteData() {
+  const role = (window.__currentUser && window.__currentUser.role) || "viewer";
+  return role === "admin" || role === "manager";
+}
+function removeLocation(code) {
+  // Authoritative guard for every call site (desktop + mobile): a staff/viewer
+  // delete would otherwise silently persist through the app_state blob update.
+  if (!canDeleteData()) {
+    try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เฉพาะผู้ดูแลระบบหรือผู้จัดการเท่านั้นที่ลบตำแหน่งได้" })); } catch (e) {}
+    return false;
+  }
+  saveLocations(loadLocations().filter(l => l.code !== code));
+  return true;
+}
+// Live SKU count for a bin = products whose loc matches the code.
+function skusInLocation(code) {
+  return PRODUCTS.filter(p => (p.loc || "") === code).length;
+}
+
 /* Sales channels — used for outbound deduction + per-channel stock tracking */
 const CHANNEL_LIST = [
   { id: "shopee", name: "Shopee",        color: "oklch(0.62 0.2 30)",  short: "SP" },
@@ -206,23 +312,46 @@ const CHANNEL_LIST = [
 ];
 
 const CHANNELS = [
-  { id: "shopee", name: "Shopee",       today: 124, pct: 42 },
-  { id: "lazada", name: "Lazada",       today: 78,  pct: 26 },
-  { id: "tiktok", name: "TikTok Shop",  today: 61,  pct: 21 },
-  { id: "web",    name: "เว็บไซต์",     today: 22,  pct: 7 },
-  { id: "line",   name: "LINE Shopping", today: 10, pct: 3 },
-  { id: "other",  name: "ออฟไลน์ / อื่นๆ", today: 0, pct: 1 }
+  { id: "shopee", name: "Shopee",          today: 0, pct: 0 },
+  { id: "lazada", name: "Lazada",          today: 0, pct: 0 },
+  { id: "tiktok", name: "TikTok Shop",     today: 0, pct: 0 },
+  { id: "web",    name: "เว็บไซต์",        today: 0, pct: 0 },
+  { id: "line",   name: "LINE Shopping",   today: 0, pct: 0 },
+  { id: "other",  name: "ออฟไลน์ / อื่นๆ", today: 0, pct: 0 }
 ];
 
-/* Deterministic per-SKU channel breakdown */
-const channelStockFor = (sku) => {
-  let seed = 0; for (const c of sku) seed = (seed * 131 + c.charCodeAt(0)) >>> 0;
-  const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0xffffffff; };
-  return CHANNEL_LIST.map(c => ({
-    ...c,
-    sold30d: Math.floor(rng() * 80),
-    reserved: Math.floor(rng() * 6)
-  }));
+/* Per-SKU sales by channel over the last N days — REAL, derived from orders.
+   Each order's matching-SKU units are attributed to the order's channel(s):
+   via `deductions` (per-channel split) when present, else the order's channel
+   name. Returns [{ ...channel, sold }] for every channel (0 when none). */
+const channelSalesFor = (sku, days = 30) => {
+  const orders = (typeof loadOrders === "function" ? loadOrders() : []) || [];
+  let cutoff = "";
+  try {
+    const today = (typeof bangkokDateStr === "function") ? bangkokDateStr() : new Date().toISOString().slice(0, 10);
+    const [y, m, d] = today.split("-").map(Number);
+    cutoff = new Date(Date.UTC(y, m - 1, d - days + 1)).toISOString().slice(0, 10);
+  } catch (e) {}
+  const byId = {}; const nameToId = {};
+  CHANNEL_LIST.forEach(c => { byId[c.id] = 0; nameToId[c.name] = c.id; });
+  for (const o of orders) {
+    if (!o || !Array.isArray(o.lineItems) || !o.lineItems.length) continue;
+    if (cutoff && o.dateIso && o.dateIso < cutoff) continue;
+    const units = o.lineItems.reduce((s, li) => s + (li && li.sku === sku ? (Number(li.qty) || 0) : 0), 0);
+    if (!units) continue;
+    const ded = Array.isArray(o.deductions) ? o.deductions.filter(d => Number(d.qty) > 0) : [];
+    if (ded.length) {
+      const tot = ded.reduce((s, d) => s + (Number(d.qty) || 0), 0) || 1;
+      ded.forEach(d => {
+        const id = Object.prototype.hasOwnProperty.call(byId, d.id) ? d.id : (nameToId[d.name] || "other");
+        byId[id] += units * (Number(d.qty) || 0) / tot;
+      });
+    } else {
+      const id = nameToId[(o.channel || "").trim()] || "other";
+      byId[id] += units;
+    }
+  }
+  return CHANNEL_LIST.map(c => ({ ...c, sold: Math.round(byId[c.id] || 0) }));
 };
 
 const LABEL_SIZES = [
@@ -232,58 +361,10 @@ const LABEL_SIZES = [
   { id: "a6",      label: "A6 (105 × 148 mm)", w: 105, h: 148, desc: "กระดาษ A6" }
 ];
 
-const SAMPLE_LABELS = [
-  {
-    id: "L1", soId: "SO-26051921",
-    sender: { name: "คลังสินค้า BangkokFulfill", addr1: "199/4 ถ.พระราม 9 แขวงห้วยขวาง", addr2: "เขตห้วยขวาง กรุงเทพฯ 10310", phone: "02-555-0188" },
-    recipient: { name: "คุณ ปิยะนุช สวัสดิ์ชาติ", addr1: "88/12 ซ.รามคำแหง 24", addr2: "แขวงหัวหมาก เขตบางกะปิ กรุงเทพฯ 10240", phone: "081-552-0917" },
-    carrier: "Kerry Express", tracking: "TH8842919012", cod: 0, weight: "0.6 kg",
-    items: [
-      { sku: "TH-APP-001", name: "เสื้อยืดคอกลม Cotton 100% สีขาว — Size M", qty: 1 },
-      { sku: "TH-APP-002", name: "เสื้อยืดคอกลม Cotton 100% สีดำ — Size L", qty: 1 }
-    ]
-  },
-  {
-    id: "L2", soId: "SO-26051925",
-    sender: { name: "คลังสินค้า BangkokFulfill", addr1: "199/4 ถ.พระราม 9 แขวงห้วยขวาง", addr2: "เขตห้วยขวาง กรุงเทพฯ 10310", phone: "02-555-0188" },
-    recipient: { name: "คุณ ปวีณา ทองสุข", addr1: "45 หมู่ 3 ต.บางพระ อ.ศรีราชา", addr2: "จ.ชลบุรี 20110", phone: "089-114-2208" },
-    carrier: "Kerry Express", tracking: "TH8842919013", cod: 1280, weight: "1.4 kg",
-    items: [
-      { sku: "TH-HOM-220", name: "หมอนรองคอ Memory Foam สีเทา", qty: 2 },
-      { sku: "TH-BTY-311", name: "ครีมกันแดด SPF50 PA++++ 50ml", qty: 1 }
-    ]
-  },
-  {
-    id: "L3", soId: "SO-26051926",
-    sender: { name: "คลังสินค้า BangkokFulfill", addr1: "199/4 ถ.พระราม 9 แขวงห้วยขวาง", addr2: "เขตห้วยขวาง กรุงเทพฯ 10310", phone: "02-555-0188" },
-    recipient: { name: "คุณ อรรถพล จันทร์เพ็ญ", addr1: "120/8 ถ.นิมมานเหมินทร์ ซ.7", addr2: "ต.สุเทพ อ.เมือง จ.เชียงใหม่ 50200", phone: "065-902-3344" },
-    carrier: "Flash Express", tracking: "FX99214470TH", cod: 0, weight: "0.9 kg",
-    items: [
-      { sku: "TH-ELE-118", name: "หูฟังบลูทูธ ANC รุ่น Air Pro 2 — สีดำ", qty: 1 },
-      { sku: "TH-FOD-405", name: "กาแฟดริปอาราบิก้า 250g (ห่อ)", qty: 1 }
-    ]
-  },
-  {
-    id: "L4", soId: "SO-26051923",
-    sender: { name: "คลังสินค้า BangkokFulfill", addr1: "199/4 ถ.พระราม 9 แขวงห้วยขวาง", addr2: "เขตห้วยขวาง กรุงเทพฯ 10310", phone: "02-555-0188" },
-    recipient: { name: "คุณ ศิริพร มงคลชัย", addr1: "78 ม.4 ต.บางบ่อ อ.บางบ่อ", addr2: "จ.สมุทรปราการ 10560", phone: "086-771-1129" },
-    carrier: "Thai Post EMS", tracking: "EX554210099TH", cod: 0, weight: "0.4 kg",
-    items: [
-      { sku: "TH-ACC-513", name: "หมวกแก๊ปแฟชั่น Unisex สีเบจ", qty: 2 },
-      { sku: "TH-BTY-310", name: "เซรั่ม Vitamin C 30ml", qty: 1 },
-      { sku: "TH-ACC-512", name: "กระเป๋าสะพายข้าง Canvas สีกากี", qty: 1 }
-    ]
-  }
-];
+const SAMPLE_LABELS = [];
 
-/* Users & roles for auth */
-const USERS = [
-  { id: 1, name: "สมชาย ภูมิดี",      email: "somchai@bangkokfulfill.co",   role: "admin",   active: true,  lastSeen: "เมื่อ 2 นาที",    avatar: "สม", joined: "15 ม.ค. 2566" },
-  { id: 2, name: "ภาณุพงศ์ จันทร์ดี",  email: "panupong@bangkokfulfill.co",  role: "manager", active: true,  lastSeen: "เมื่อ 18 นาที",   avatar: "ภณ", joined: "02 มี.ค. 2566" },
-  { id: 3, name: "วรรณา รัตนะ",       email: "wanna@bangkokfulfill.co",    role: "staff",   active: true,  lastSeen: "วันนี้ 11:18",      avatar: "วร", joined: "20 มิ.ย. 2566" },
-  { id: 4, name: "ปวีณา ทองสุข",      email: "paveena@bangkokfulfill.co",  role: "staff",   active: true,  lastSeen: "เมื่อวาน",          avatar: "ปว", joined: "14 ก.ย. 2566" },
-  { id: 5, name: "ณัฐภัทร วงศ์ดี",    email: "natthapat@bangkokfulfill.co", role: "viewer",  active: false, lastSeen: "1 สัปดาห์ก่อน",    avatar: "นภ", joined: "08 ม.ค. 2567" }
-];
+/* Users loaded from Supabase Auth — this array is populated by UserManagement component */
+const USERS = [];
 
 const ROLES = [
   { id: "admin",   label: "ผู้ดูแลระบบ", desc: "เข้าถึงและจัดการทุกฟีเจอร์ รวมถึงผู้ใช้งานและสิทธิ์", color: "oklch(0.55 0.2 25)",  badge: "badge-danger" },
@@ -293,16 +374,238 @@ const ROLES = [
 ];
 
 const ROLE_NAV = {
-  admin:   ["dashboard","inbound","outbound","inventory","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
-  manager: ["dashboard","inbound","outbound","inventory","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
-  staff:   ["dashboard","inbound","outbound","inventory","locations","bundles","labels","tracking","handheld"],
+  admin:   ["dashboard","inbound","outbound","inventory","stocktake","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
+  manager: ["dashboard","inbound","outbound","inventory","stocktake","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
+  staff:   ["dashboard","inbound","outbound","inventory","stocktake","locations","bundles","labels","tracking","handheld"],
   viewer:  ["dashboard","inventory","locations","bundles","labels","tracking","analytics"]
 };
 
+/* ── Working-hours access window ──
+   Admin-configured, per-weekday open/close schedule (stored in store.workHours,
+   synced via store_settings). Restricts the configured roles to their allowed
+   window so staff can't sign in and key stock at odd hours; admin/manager are
+   normally left unrestricted. Enforced client-side (login gate + session poll)
+   against SERVER time (see dbServerTimeMs) so a changed device clock can't
+   bypass it. Times are evaluated in Asia/Bangkok regardless of device timezone. */
+const WORKHOURS_DAY_LABELS = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
+
+function defaultWorkHours() {
+  const days = {};
+  for (let d = 0; d < 7; d++) days[d] = { on: d >= 1 && d <= 6, open: "08:00", close: "18:00" };
+  // exceptions: { <userId>: "YYYY-MM-DD" } — a per-user "allow outside hours"
+  // pass that is valid only for that Bangkok date, then auto-expires at midnight.
+  return { enabled: false, roles: ["staff", "viewer"], days, exceptions: {} };
+}
+
+// "YYYY-MM-DD" for an epoch-ms timestamp, in Asia/Bangkok (used for today-only
+// exceptions). en-CA formats as YYYY-MM-DD.
+function bangkokDateStr(nowMs) {
+  const d = new Date(typeof nowMs === "number" ? nowMs : Date.now());
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit"
+    }).format(d);
+  } catch (e) {
+    return d.toISOString().slice(0, 10);
+  }
+}
+
+// The raw exception date stored for a user (or null).
+function workHoursExceptionDate(store, userId) {
+  const ex = store && store.workHours && store.workHours.exceptions;
+  return (ex && userId && ex[userId]) || null;
+}
+
+// True when a user currently holds a valid (today) outside-hours pass.
+function hasActiveWorkHoursException(store, userId, nowMs) {
+  const ex = workHoursExceptionDate(store, userId);
+  return !!ex && ex === bangkokDateStr(nowMs);
+}
+
+// "HH:MM" → minutes since midnight, or null if malformed.
+function hmToMinutes(s) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s == null ? "" : s).trim());
+  if (!m) return null;
+  const h = +m[1], mi = +m[2];
+  if (h > 23 || mi > 59) return null;
+  return h * 60 + mi;
+}
+
+// Weekday (0=Sun) + minutes-of-day in Asia/Bangkok for an epoch-ms timestamp.
+function bangkokParts(nowMs) {
+  const d = new Date(typeof nowMs === "number" ? nowMs : Date.now());
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Bangkok", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false
+    }).formatToParts(d);
+    const map = {};
+    parts.forEach(p => { map[p.type] = p.value; });
+    const wk = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    let hour = parseInt(map.hour, 10);
+    if (hour === 24 || isNaN(hour)) hour = 0;       // some engines emit "24" for midnight
+    const min = parseInt(map.minute, 10) || 0;
+    const day = wk[map.weekday];
+    return { day: day == null ? d.getDay() : day, minutes: hour * 60 + min };
+  } catch (e) {
+    // Intl unavailable → fall back to device-local time.
+    return { day: d.getDay(), minutes: d.getHours() * 60 + d.getMinutes() };
+  }
+}
+
+/* Evaluate the schedule for one role at a given moment.
+   Returns { restricted, allowed, dayLabel, open, close, closedDay }.
+   restricted=false → this role isn't governed (always allowed). */
+function workHoursStatus(store, role, nowMs) {
+  const wh = store && store.workHours;
+  if (!wh || !wh.enabled || !Array.isArray(wh.roles) || !wh.roles.includes(role)) {
+    return { restricted: false, allowed: true };
+  }
+  const { day, minutes } = bangkokParts(nowMs);
+  const cfg = wh.days && wh.days[day];           // numeric key coerces to "0".."6" after JSON
+  const dayLabel = WORKHOURS_DAY_LABELS[day];
+  if (!cfg || !cfg.on) return { restricted: true, allowed: false, dayLabel, closedDay: true };
+  const open = hmToMinutes(cfg.open), close = hmToMinutes(cfg.close);
+  if (open == null || close == null) return { restricted: true, allowed: true, dayLabel }; // misconfigured → fail open
+  const within = close > open
+    ? (minutes >= open && minutes < close)
+    : (minutes >= open || minutes < close);      // close<=open ⇒ overnight window
+  return { restricted: true, allowed: within, dayLabel, open: cfg.open, close: cfg.close };
+}
+
+// User-facing Thai reason for an outside-window block.
+function workHoursMessage(st) {
+  if (!st || st.allowed) return "";
+  if (st.closedDay) {
+    return `วันนี้ (วัน${st.dayLabel}) เป็นวันหยุด อยู่นอกวันทำการที่กำหนด — ระบบเปิดให้เข้าใช้งานเฉพาะวันและเวลาทำการเท่านั้น หากจำเป็นต้องเข้าใช้งาน กรุณาติดต่อผู้ดูแลระบบ`;
+  }
+  return `ขณะนี้อยู่นอกเวลาทำการ (วัน${st.dayLabel} เปิดให้ใช้งาน ${st.open}–${st.close} น.) กรุณาเข้าใช้งานในเวลาทำการ หากจำเป็น กรุณาติดต่อผู้ดูแลระบบ`;
+}
+
+/* Schedule status for a SPECIFIC user — the role-based window with that user's
+   today-only exception applied. When blocked but a valid exception exists, the
+   user is allowed and the result is flagged { exception:true }. Used by the
+   login/session gate and by the User Management screen's status column. */
+function workHoursStatusForUser(store, role, userId, nowMs) {
+  const base = workHoursStatus(store, role, nowMs);
+  if (!base.restricted || base.allowed) return base;
+  if (hasActiveWorkHoursException(store, userId, nowMs)) {
+    return { ...base, allowed: true, exception: true };
+  }
+  return base;
+}
+
+/* ---------- Scan feedback sound (Web Audio, no asset / offline) ----------
+   Shared lazily-created AudioContext (one per page), reused for every beep.
+   Guarded everywhere so audio failure can never break the scan flow.
+   Mute via localStorage "ims_scan_sound" = "off" (defaults on) — ready for a
+   future Settings toggle without touching the scan call sites. */
+let __scanAudioCtx = null;
+let __lastBeepAt = 0;
+function __getAudioCtx() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!__scanAudioCtx) __scanAudioCtx = new AC();
+  if (__scanAudioCtx.state === "suspended") { try { __scanAudioCtx.resume(); } catch (e) {} }
+  return __scanAudioCtx;
+}
+function __beep({ freq = 880, dur = 0.1, type = "square", gain = 0.06 } = {}) {
+  try {
+    if (localStorage.getItem("ims_scan_sound") === "off") return;
+    const now = Date.now();
+    if (now - __lastBeepAt < 100) return;   // throttle rapid repeats
+    __lastBeepAt = now;
+    const ctx = __getAudioCtx();
+    if (!ctx) return;
+    const t0 = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    // short attack + decay envelope so it sounds like a clean "beep", no click
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(gain, t0 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g).connect(ctx.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  } catch (e) { /* never let sound break scanning */ }
+}
+/* Success: single bright high beep */
+function playScanBeep() { __beep({ freq: 880, dur: 0.1 }); }
+/* Not-found / error: lower double tone (distinct from success) */
+function playScanErrorBeep() {
+  __beep({ freq: 300, dur: 0.12, type: "sawtooth", gain: 0.07 });
+  setTimeout(() => { __lastBeepAt = 0; __beep({ freq: 250, dur: 0.14, type: "sawtooth", gain: 0.07 }); }, 130);
+}
+
+/* Collision-resistant order id (timestamp base36 + random suffix, de-duped
+   against stored orders). True multi-user guarantees still need the server,
+   but this removes the realistic Math.random() clash window the old
+   8-digit scheme had when several people sell at once. */
+function genOrderId() {
+  let existing = new Set();
+  try { existing = new Set((typeof loadOrders === "function" ? loadOrders() : []).map(o => o.id)); } catch (e) {}
+  let id, attempts = 0;
+  do {
+    const t = Date.now().toString(36).toUpperCase();
+    const r = Math.floor(Math.random() * 1296).toString(36).toUpperCase().padStart(2, "0");
+    id = "SO-" + t + r;
+    if (++attempts > 20) break; // safety: never spin forever
+  } while (existing.has(id));
+  return id;
+}
+
+// Snapshot a sold line item with the product's price/cost AT SALE TIME, so
+// revenue analytics stay accurate even if the catalog price changes later or
+// the SKU is removed. Shape stays backward-compatible: {sku,name,qty} + price,cost.
+function snapLineItem(sku, name, qty) {
+  const p = PRODUCTS.find(x => x.sku === sku);
+  const price = p ? (Number(p.price) || 0) : 0;
+  const cost  = p ? (p.cost ?? Math.round(price * 0.6)) : 0;
+  return { sku, name: name || (p ? p.name : sku), qty, price, cost };
+}
+
+/* ── Stock take / cycle count ───────────────────────────────────────────
+   The in-progress count ({sku: countedQty}) is kept in localStorage so it
+   survives a refresh and is shared between the desktop and mobile screens
+   (same browser). Applying it reconciles each SKU's qty to the counted value. */
+const STOCKTAKE_KEY = "ims_stocktake_v1";
+function loadStockTake() {
+  try { const o = JSON.parse(localStorage.getItem(STOCKTAKE_KEY) || "{}"); return (o && typeof o === "object") ? o : {}; }
+  catch (e) { return {}; }
+}
+function saveStockTake(counts) {
+  try { localStorage.setItem(STOCKTAKE_KEY, JSON.stringify(counts || {})); } catch (e) {}
+}
+// Reconcile system stock to the physical count. counts = { sku: countedQty }.
+// Returns the list of actual changes [{ sku, name, from, to, delta }] and
+// persists once (localStorage + Supabase) via saveProductStore().
+function applyStockCounts(counts) {
+  if (!counts) return [];
+  const changes = [];
+  Object.keys(counts).forEach(sku => {
+    const raw = counts[sku];
+    if (raw === "" || raw == null) return;          // not counted → skip
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (!p) return;
+    const to = Math.max(0, Math.round(Number(raw) || 0));
+    if (to === p.qty) return;                        // no change
+    changes.push({ sku, name: p.name, from: p.qty, to, delta: to - p.qty });
+    p.qty = to;
+  });
+  if (changes.length) saveProductStore();
+  return changes;
+}
+
 Object.assign(window, {
-  PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelStockFor, LABEL_SIZES, SAMPLE_LABELS,
+  playScanBeep, playScanErrorBeep, genOrderId, snapLineItem,
+  loadStockTake, saveStockTake, applyStockCounts,
+  PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, isoToThai,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
-  loadOrders, saveOrders
+  loadOrders, saveOrders,
+  loadLocations, saveLocations, addLocation, updateLocation, removeLocation, skusInLocation, canDeleteData,
+  defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,
+  bangkokDateStr, workHoursExceptionDate, hasActiveWorkHoursException, workHoursStatusForUser
 });

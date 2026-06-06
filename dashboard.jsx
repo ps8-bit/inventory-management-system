@@ -22,18 +22,21 @@ function KPIWidget({ goTo }) {
     };
   }, []);
 
-  const totalSkus  = PRODUCTS.length;
-  const totalQty   = PRODUCTS.reduce((s, p) => s + p.qty, 0);
-  const lowStock   = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder).length;
-  const outOfStock = PRODUCTS.filter(p => p.qty === 0).length;
+  const totalSkus   = PRODUCTS.length;
+  const totalQty    = PRODUCTS.reduce((s, p) => s + p.qty, 0);
+  const lowStock    = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder).length;
+  const outOfStock  = PRODUCTS.filter(p => p.qty === 0).length;
+  const allOrders   = typeof loadOrders === "function" ? loadOrders() : [];
+  const pending     = allOrders.filter(o => o.status === "picking" || o.status === "packed").length;
+  const todayOrders = allOrders.filter(o => o.dateIso === new Date().toISOString().slice(0, 10)).length;
   return (
     <div style={{ padding: 18, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
       <div>
         <div className="kpi-label">SKU ทั้งหมด</div>
         <div className="kpi-value" style={{ marginTop: 4 }}>{totalSkus}</div>
-        <div className="kpi-delta"><span className="up">+4</span> สัปดาห์นี้</div>
+        <div className="kpi-delta" style={{ color: "var(--muted)" }}>{totalSkus} รายการในคลัง</div>
         <div className="bars" style={{ marginTop: 8 }}>
-          {[3,5,4,6,7,6,8,9,7,9,8,9].map((v,i) => <div key={i} className="bar" style={{ height: (v/9*100)+"%" }}/>)}
+          {Array(12).fill(1).map((_, i) => <div key={i} className="bar" style={{ height: "30%" }}/>)}
         </div>
       </div>
       <div>
@@ -42,26 +45,28 @@ function KPIWidget({ goTo }) {
           <span className="kpi-value">{totalQty.toLocaleString()}</span>
           <span style={{ color: "var(--muted)", fontSize: 12 }}>ชิ้น</span>
         </div>
-        <div className="kpi-delta"><span className="up">+128</span> วันนี้</div>
+        <div className="kpi-delta" style={{ color: "var(--muted)" }}>ใน {totalSkus} SKU</div>
         <div className="bars" style={{ marginTop: 8 }}>
-          {[12,14,13,16,18,17,15,20,19,22,21,24].map((v,i) => <div key={i} className="bar" style={{ height: (v/24*100)+"%" }}/>)}
+          {Array(12).fill(1).map((_, i) => <div key={i} className="bar" style={{ height: "30%" }}/>)}
         </div>
       </div>
       <div>
         <div className="kpi-label">สั่งซื้อค้างส่ง</div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 4 }}>
-          <span className="kpi-value">32</span>
+          <span className="kpi-value">{pending}</span>
           <span style={{ color: "var(--muted)", fontSize: 12 }}>ออร์เดอร์</span>
         </div>
-        <div className="kpi-delta">เป้า 50 ออร์เดอร์/วัน</div>
+        <div className="kpi-delta" style={{ color: "var(--muted)" }}>
+          {todayOrders > 0 ? `${todayOrders} ออร์เดอร์วันนี้` : "ไม่มีออร์เดอร์ใหม่วันนี้"}
+        </div>
         <div className="bars" style={{ marginTop: 8 }}>
-          {[8,12,10,14,18,22,25,28,30,29,32,32].map((v,i) => <div key={i} className="bar" style={{ height: (v/32*100)+"%" }}/>)}
+          {Array(12).fill(1).map((_, i) => <div key={i} className="bar" style={{ height: "30%" }}/>)}
         </div>
       </div>
       <div>
         <div className="kpi-label">ต้องสั่งซื้อ</div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 4 }}>
-          <span className="kpi-value" style={{ color: "var(--danger)" }}>{lowStock + outOfStock}</span>
+          <span className="kpi-value" style={{ color: (lowStock + outOfStock) > 0 ? "var(--danger)" : "var(--fg)" }}>{lowStock + outOfStock}</span>
           <span style={{ color: "var(--muted)", fontSize: 12 }}>SKU</span>
         </div>
         <div className="kpi-delta">{outOfStock} หมด · {lowStock} ต่ำ</div>
@@ -72,16 +77,26 @@ function KPIWidget({ goTo }) {
 }
 
 function ActivityWidget() {
+  const log = typeof loadAuditLog === "function" ? loadAuditLog().slice(0, 6) : [];
+  if (!log.length) return (
+    <div style={{ padding: "32px 18px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+      ยังไม่มีกิจกรรม — จะแสดงเมื่อเริ่มรับเข้า/ตัดสต็อก
+    </div>
+  );
   return (
     <div style={{ padding: "6px 12px 12px" }}>
-      {ACTIVITY.slice(0, 6).map((a, i) => (
-        <div key={i} style={{ display: "grid", gridTemplateColumns: "52px 24px 1fr auto", gap: 10, alignItems: "center", padding: "9px 8px", borderBottom: i < 5 ? "1px solid var(--border)" : "none" }}>
-          <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{a.t}</div>
-          <ActivityDot type={a.type}/>
-          <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.text}</div>
-          <div style={{ fontSize: 11, color: "var(--muted)" }}>{a.who}</div>
-        </div>
-      ))}
+      {log.map((e, i) => {
+        const t = e.ts ? new Date(e.ts).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "";
+        const type = e.action === "delete" ? "out" : e.entity === "inbound" ? "in" : "out";
+        return (
+          <div key={e.id || i} style={{ display: "grid", gridTemplateColumns: "52px 24px 1fr auto", gap: 10, alignItems: "center", padding: "9px 8px", borderBottom: i < log.length - 1 ? "1px solid var(--border)" : "none" }}>
+            <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{t}</div>
+            <ActivityDot type={type}/>
+            <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.summary || e.entityId}</div>
+            <div style={{ fontSize: 11, color: "var(--muted)" }}>{e.user?.name || "ระบบ"}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -110,7 +125,7 @@ function ChannelsWidget() {
       <div className="divider"/>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)" }}>
         <span>ออร์เดอร์ที่ต้องส่งวันนี้</span>
-        <span><span className="tnum" style={{ color: "var(--fg)", fontWeight: 500 }}>32</span> รออัปเดต</span>
+        <span style={{ color: "var(--muted)" }}>—</span>
       </div>
     </div>
   );
@@ -222,21 +237,28 @@ function TasksWidget() {
 }
 
 function CalendarWidget() {
-  const today = 19;
+  const now   = new Date();
+  const today = now.getDate();
+  const year  = now.getFullYear();
+  const month = now.getMonth(); // 0-based
+  const thaiMonths = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+  const thaiDays   = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"];
+  const dayName = thaiDays[now.getDay()];
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
   const days = ["จ", "อ", "พ", "พฤ", "ศ", "ส", "อา"];
   return (
     <div style={{ padding: 18 }}>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
         <div>
-          <div style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.03em", fontFamily: "IBM Plex Sans, sans-serif" }}>พฤษภาคม 2569</div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>วันอังคารที่ 19 พฤษภาคม</div>
+          <div style={{ fontSize: 28, fontWeight: 600, letterSpacing: "-0.03em", fontFamily: "IBM Plex Sans, sans-serif" }}>{thaiMonths[month]} {year + 543}</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>วัน{dayName}ที่ {today} {thaiMonths[month]}</div>
         </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginTop: 6 }}>
         {days.map(d => (
           <div key={d} style={{ fontSize: 10, color: "var(--muted)", textAlign: "center", padding: "4px 0", fontWeight: 500 }}>{d}</div>
         ))}
-        {[...Array(31)].map((_, i) => {
+        {[...Array(daysInMonth)].map((_, i) => {
           const d = i + 1;
           const isToday = d === today;
           return (
@@ -259,13 +281,13 @@ function CalendarWidget() {
 /* ===== Widget registry ===== */
 const WIDGET_DEFS = {
   kpi:          { title: "ภาพรวมวันนี้",         sub: "KPI หลัก",                 defaultSpan: 12, render: (p) => <KPIWidget {...p}/> },
-  channels:     { title: "ออร์เดอร์ตามช่องทาง", sub: "วันนี้ • 295 ออร์เดอร์",   defaultSpan: 4, render: (p) => <ChannelsWidget {...p}/> },
+  channels:     { title: "ออร์เดอร์ตามช่องทาง", sub: "แบ่งตามช่องทาง",           defaultSpan: 4, render: (p) => <ChannelsWidget {...p}/> },
   activity:     { title: "กิจกรรมล่าสุด",       sub: "ความเคลื่อนไหวของสต็อก",  defaultSpan: 8, render: (p) => <ActivityWidget {...p}/> },
   lowstock:     { title: "ต้องสั่งซื้อเพิ่ม",   sub: "ต่ำกว่าจุดสั่งซื้อ",       defaultSpan: 7, render: (p) => <LowStockWidget {...p}/> },
   warehouse:    { title: "การใช้พื้นที่คลัง",   sub: "โซน A – E",                defaultSpan: 5, render: (p) => <WarehouseWidget {...p}/> },
   quickactions: { title: "ทางลัด",              sub: "งานที่ใช้บ่อย",            defaultSpan: 4, render: (p) => <QuickActionsWidget {...p}/> },
   tasks:        { title: "งานวันนี้",           sub: "Checklist ของฉัน",        defaultSpan: 5, render: (p) => <TasksWidget {...p}/> },
-  calendar:     { title: "ปฏิทิน",              sub: "พ.ค. 2569",               defaultSpan: 4, render: (p) => <CalendarWidget {...p}/> }
+  calendar:     { title: "ปฏิทิน",              sub: "",                        defaultSpan: 4, render: (p) => <CalendarWidget {...p}/> }
 };
 
 const DEFAULT_LAYOUT = [
@@ -377,7 +399,7 @@ function Dashboard({ goTo }) {
     <div>
       {/* Page header — iOS large title style */}
       <div style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 2 }}>วันอังคารที่ 19 พฤษภาคม 2569 · อัปเดต 2 นาทีที่แล้ว</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 2 }}>{(() => { const d=new Date(); const days=["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"]; const months=["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"]; return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()+543}`; })()}</div>
         <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
           <h1 className="page-title" style={{ fontSize: 32, marginBottom: 0 }}>หน้าหลัก</h1>
           <div className="dash-toolbar" style={{ marginBottom: 0 }}>

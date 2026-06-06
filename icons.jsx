@@ -42,6 +42,8 @@ const Icons = {
   Bundle:(p)=><Ico {...p}><rect x="2" y="7" width="9" height="9" rx="1.5"/><rect x="13" y="7" width="9" height="9" rx="1.5"/><path d="M7 7V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v3"/><path d="M7 12h10"/></Ico>,
   Cart:  (p)=><Ico {...p}><path d="M3 3h2l.4 2M7 13h10l4-8H5.4"/><circle cx="9" cy="19" r="1.5"/><circle cx="18" cy="19" r="1.5"/></Ico>,
   Camera:(p)=><Ico {...p}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></Ico>,
+  Spark:(p)=><Ico {...p}><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18 14l.8 2.2 2.2.8-2.2.8L18 20l-.8-2.2L15 17l2.2-.8z"/></Ico>,
+  Lock: (p) => <Ico {...p}><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></Ico>,
 };
 
 /* Barcode (Code128-ish visual) */
@@ -71,37 +73,55 @@ const Barcode = ({ value = "TH8842919012", height = 48, scale = 1 }) => {
   );
 };
 
-/* QR-like square pattern */
-const QR = ({ value = "X", size = 72 }) => {
-  const n = 17;
-  const cell = size / n;
-  let seed = 0;
-  for (let i = 0; i < value.length; i++) seed = (seed * 131 + value.charCodeAt(i)) >>> 0;
-  const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0xffffffff; };
-  const cells = [];
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      // corner finders
-      const inCorner =
-        (x < 4 && y < 4) || (x > n - 5 && y < 4) || (x < 4 && y > n - 5);
-      if (inCorner) {
-        const cx = x < 4 ? 0 : n - 4;
-        const cy = y < 4 ? 0 : n - 4;
-        const lx = x - cx, ly = y - cy;
-        const outer = lx === 0 || lx === 3 || ly === 0 || ly === 3;
-        const inner = lx >= 1 && lx <= 2 && ly >= 1 && ly <= 2;
-        if (outer || inner) cells.push([x, y]);
-        continue;
-      }
-      if (rng() < 0.5) cells.push([x, y]);
-    }
+/* Real, scannable QR via the qrcode-generator UMD lib (global `qrcode`).
+   Returns { n, darks:[[col,row],...] } or null if the encoder isn't available. */
+function qrModules(value) {
+  if (typeof qrcode !== "function") return null;
+  try {
+    const qr = qrcode(0, "M");          // type 0 = auto-fit smallest version, ECC level M
+    qr.addData(String(value == null ? "" : value));
+    qr.make();
+    const n = qr.getModuleCount();
+    const darks = [];
+    for (let r = 0; r < n; r++)
+      for (let c = 0; c < n; c++)
+        if (qr.isDark(r, c)) darks.push([c, r]);
+    return { n, darks };
+  } catch (e) { return null; }
+}
+
+/* QR as a standalone SVG markup string — for print windows / new tabs where
+   React isn't running. Same modules as the <QR> component. */
+function qrSvgMarkup(value, size = 480) {
+  const m = qrModules(value);
+  let inner = "";
+  if (m) {
+    const cell = size / m.n;
+    m.darks.forEach(([x, y]) => {
+      inner += `<rect x="${(x * cell).toFixed(2)}" y="${(y * cell).toFixed(2)}" width="${cell.toFixed(2)}" height="${cell.toFixed(2)}" fill="#111"/>`;
+    });
   }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg"><rect width="${size}" height="${size}" fill="white"/>${inner}</svg>`;
+}
+
+const QR = ({ value = "X", size = 72 }) => {
+  const m = qrModules(value);
+  if (!m) {
+    // Encoder not loaded — render a neutral placeholder rather than a fake code.
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} shapeRendering="crispEdges">
+        <rect width={size} height={size} fill="white"/>
+        <rect x={size*0.3} y={size*0.44} width={size*0.4} height={size*0.12} fill="#ccc"/>
+      </svg>
+    );
+  }
+  const cell = size / m.n;
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} shapeRendering="crispEdges">
       <rect width={size} height={size} fill="white"/>
-      {cells.map(([x,y], i) => <rect key={i} x={x*cell} y={y*cell} width={cell} height={cell} fill="#111"/>)}
+      {m.darks.map(([x,y], i) => <rect key={i} x={x*cell} y={y*cell} width={cell} height={cell} fill="#111"/>)}
     </svg>
   );
 };
 
-Object.assign(window, { Icons, Barcode, QR });
+Object.assign(window, { Icons, Barcode, QR, qrModules, qrSvgMarkup });
