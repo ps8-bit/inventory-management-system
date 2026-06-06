@@ -150,7 +150,13 @@ function parseRecipientBlob(raw) {
   let text = String(raw || "").replace(/\r/g, "").trim();
   if (!text) return null;
   const out = { name: "", phone: "", addr1: "", addr2: "" };
-  const addrKw = /(บ้านเลขที่|เลขที่|หมู่บ้าน|หมู่|ม\.|ซอย|ซ\.|ถนน|ถ\.|ตำบล|ต\.|แขวง|อำเภอ|อ\.|เขต|จังหวัด|จ\.|รหัสไปรษณีย์|\d{1,4}\/\d{1,4}|\d{5})/;
+  const addrKw = /(บ้านเลขที่|เลขที่|ห้อง|อาคาร|ตึก|ชั้น|หมู่บ้าน|หมู่|ม\.|ซอย|ซ\.|ถนน|ถ\.|ตำบล|ต\.|แขวง|อำเภอ|อ\.|เขต|จังหวัด|จ\.|รหัสไปรษณีย์|\d{1,4}\/\d{1,4}|\d{5})/;
+  // A leading chain of single-letter dotted groups is a Thai military/police/
+  // civil rank or title (ส.ต.ต. / จ.ส.อ. / พ.ต.ท. / ด.ต. / น.ส. …), NOT an
+  // address abbreviation. Mask it before address-keyword tests so its dots
+  // don't collide with ต./อ./จ. (critical for this shop's many ranked buyers).
+  const RANK = /(?:[ก-ฮ]{1,3}\.){2,}/g;
+  const looksAddr = (line) => addrKw.test(line.replace(RANK, " "));
 
   // 1) Phone — exact-length patterns so it can't bleed into an adjacent number.
   //    Mobile = 10 digits (0[689]+8), +66 mobile, or landline = 9 digits (0[2-7]+7).
@@ -181,13 +187,16 @@ function parseRecipientBlob(raw) {
     .replace(/(?:^|\n)[ \t]*(?:ชื่อผู้รับ|ชื่อ[ \-]?นามสกุล|ชื่อ|name|ผู้รับ)[ \t]*[:：][^\n]*/i, "")
     .replace(/(?:^|\n)[ \t]*(?:ที่อยู่จัดส่ง|ที่อยู่|address|จัดส่งที่|ที่จัดส่ง)[ \t]*[:：][^\n]*/i, "")
     .replace(/(?:^|\n)[ \t]*(?:เบอร์โทรศัพท์|เบอร์โทร|เบอร์|โทรศัพท์|โทร\.?|tel|phone|มือถือ)[ \t]*[:：][^\n]*/i, "")
+    // Orphan phone-label word left behind once its number was extracted
+    // (e.g. "โทร 0993164656" → "โทร"). Strip the bare label token too.
+    .replace(/(?:^|[\n\s])(?:เบอร์โทรศัพท์|เบอร์โทร|เบอร์|โทรศัพท์|โทร\.?|tel|phone|มือถือ)(?=$|[\n\s])/gi, " ")
     .trim();
 
   // 3) Fallback: line-based heuristics for whatever the labels didn't capture.
   if (!out.name || !addr) {
     const lines = rest.split(/\n+/).map(s => s.trim()).filter(Boolean);
     if (!out.name) {
-      const nameLine = lines.find(l => !addrKw.test(l));
+      const nameLine = lines.find(l => !looksAddr(l));
       if (nameLine) out.name = nameLine;
     }
     if (!addr) {
@@ -196,27 +205,45 @@ function parseRecipientBlob(raw) {
     }
   }
 
-  // Single line holding both name and address → split at the first address marker.
+  // Single line holding both name and address → split at the first address
+  // marker. Mask any leading rank/title first (preserving indices) so its dots
+  // aren't mistaken for the split point.
   if (out.name && !addr) {
-    const km = out.name.match(addrKw);
+    const masked = out.name.replace(RANK, m => " ".repeat(m.length));
+    const km = masked.match(addrKw);
     if (km && km.index > 0) { addr = out.name.slice(km.index).trim(); out.name = out.name.slice(0, km.index).trim(); }
   }
   out.name = out.name.replace(/\s+/g, " ").trim();
 
   // 4) Split the address across the label's two lines (main / subdistrict→postal).
+  //    Prefer the Thai-address gazetteer (data-anchored: validates against real
+  //    tambon/amphoe/province/postcode), falling back to the keyword/length
+  //    heuristic when it can't confidently anchor. Requires the index to be
+  //    loaded — callers await ensureThaiAddrIndex() before parsing.
   addr = addr.replace(/\s+/g, " ").trim();
   if (addr) {
-    const sk = addr.match(/(ตำบล|ต\.|แขวง)/);
-    if (sk && sk.index > 6) {
-      out.addr1 = addr.slice(0, sk.index).trim();
-      out.addr2 = addr.slice(sk.index).trim();
-    } else if (addr.length > 42) {
-      let cut = addr.lastIndexOf(" ", Math.floor(addr.length * 0.55));
-      if (cut < 10) cut = addr.indexOf(" ", Math.floor(addr.length * 0.5));
-      if (cut > 6) { out.addr1 = addr.slice(0, cut).trim(); out.addr2 = addr.slice(cut).trim(); }
-      else out.addr1 = addr;
+    let g = null;
+    if (typeof getThaiAddrIndex === "function" && getThaiAddrIndex() && typeof parseThaiAddrTail === "function") {
+      g = parseThaiAddrTail(addr);
+    }
+    if (g && (g.addr1 || g.addr2)) {
+      out.addr1 = g.addr1 || addr;
+      out.addr2 = g.addr2 || "";
+      out.tambon = g.tambon; out.amphoe = g.amphoe; out.province = g.province; out.zip = g.zip;
+      out.addrConfidence = g.confidence;
     } else {
-      out.addr1 = addr;
+      const sk = addr.match(/(ตำบล|ต\.|แขวง)/);
+      if (sk && sk.index > 6) {
+        out.addr1 = addr.slice(0, sk.index).trim();
+        out.addr2 = addr.slice(sk.index).trim();
+      } else if (addr.length > 42) {
+        let cut = addr.lastIndexOf(" ", Math.floor(addr.length * 0.55));
+        if (cut < 10) cut = addr.indexOf(" ", Math.floor(addr.length * 0.5));
+        if (cut > 6) { out.addr1 = addr.slice(0, cut).trim(); out.addr2 = addr.slice(cut).trim(); }
+        else out.addr1 = addr;
+      } else {
+        out.addr1 = addr;
+      }
     }
   }
 
@@ -362,7 +389,8 @@ function Labels({ pushToast, store }) {
   };
 
   // Paste a recipient blob → auto-split into the recipient fields.
-  const applyPaste = () => {
+  const applyPaste = async () => {
+    if (typeof ensureThaiAddrIndex === "function") { try { await ensureThaiAddrIndex(); } catch (e) {} }
     const parsed = parseRecipientBlob(pasteText);
     if (!parsed) { pushToast("ไม่พบข้อมูลให้คัดแยก"); return; }
     updateActive(l => ({
@@ -376,7 +404,11 @@ function Labels({ pushToast, store }) {
       },
     }));
     const got = [parsed.name && "ชื่อ", parsed.phone && "เบอร์", (parsed.addr1 || parsed.addr2) && "ที่อยู่"].filter(Boolean).join(" · ");
-    pushToast("คัดแยกแล้ว: " + (got || "—"));
+    const hasAddr = parsed.addr1 || parsed.addr2;
+    const tail = !hasAddr ? "" : parsed.addrConfidence === "high"
+      ? " · ✓ ตรงรหัสไปรษณีย์"
+      : " · ที่อยู่อาจไม่ครบ ลองปุ่ม AI";
+    pushToast("คัดแยกแล้ว: " + (got || "—") + tail);
     setPasteText("");
   };
 

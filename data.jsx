@@ -597,9 +597,211 @@ function applyStockCounts(counts) {
   return changes;
 }
 
+/* ── WooCommerce reference catalog ───────────────────────────────────────
+   A SKU-keyed master catalog imported from a WooCommerce product CSV export.
+   Kept SEPARATE from PRODUCTS (live stock): scanning an unknown SKU looks it
+   up here to auto-fill name / category / price / image instead of typing.
+   Shape: { [skuLower]: { sku, name, cat, price, image } }. Synced cloud-wide
+   via app_state key "woo_catalog" (same pattern as categories/locations), so a
+   catalog imported on desktop is instantly available to mobile scanning. */
+const WOO_CATALOG_KEY = "ims_woo_catalog";
+function loadWooCatalog() {
+  if (window._DB_WOO_CATALOG && typeof window._DB_WOO_CATALOG === "object") return window._DB_WOO_CATALOG;
+  try { const o = JSON.parse(localStorage.getItem(WOO_CATALOG_KEY) || "{}"); return (o && typeof o === "object") ? o : {}; }
+  catch (e) { return {}; }
+}
+function saveWooCatalog(map) {
+  const m = (map && typeof map === "object") ? map : {};
+  window._DB_WOO_CATALOG = m;
+  try { localStorage.setItem(WOO_CATALOG_KEY, JSON.stringify(m)); } catch (e) {} // quota — cloud still has it
+  if (typeof dbSaveState === "function") dbSaveState("woo_catalog", m).catch(() => {});
+  window.dispatchEvent(new CustomEvent("ims-woo-catalog-change"));
+}
+// Case-insensitive lookup by SKU. Returns { sku, name, cat, price, image } or null.
+function wooCatalogLookup(sku) {
+  if (!sku) return null;
+  const m = loadWooCatalog();
+  return m[String(sku).trim().toLowerCase()] || null;
+}
+// Upsert imported entries (array of {sku,name,cat,price,image}) by SKU.
+// Returns { added, updated, total }.
+function upsertWooCatalog(entries) {
+  const m = { ...loadWooCatalog() };
+  let added = 0, updated = 0;
+  (entries || []).forEach(e => {
+    if (!e || !e.sku) return;
+    const k = String(e.sku).trim().toLowerCase();
+    if (!k) return;
+    if (m[k]) updated++; else added++;
+    m[k] = {
+      sku:   String(e.sku).trim(),
+      name:  e.name ? String(e.name).trim() : "",
+      cat:   e.cat ? String(e.cat).trim() : "",
+      price: Number(e.price) || 0,
+      image: e.image ? String(e.image).trim() : ""
+    };
+  });
+  saveWooCatalog(m);
+  return { added, updated, total: Object.keys(m).length };
+}
+function clearWooCatalog() { saveWooCatalog({}); }
+function wooCatalogCount() { return Object.keys(loadWooCatalog()).length; }
+
+/* ── Thai address gazetteer — data-anchored address splitting (no AI) ──
+   `thai-address.json` is a list of [tambon, amphoe, province, zip] tuples
+   (also used by the screens.jsx autocomplete). We index it once, then anchor
+   the recipient parser on real postcode/district/sub-district/province data
+   instead of blind length/keyword heuristics. Fast, offline, deterministic —
+   a hedge for when the AI parse-recipient call is laggy. */
+const __BKK = "กรุงเทพมหานคร";
+function thaiProvinceVariants(prov) {
+  return prov === __BKK
+    ? [__BKK, "กรุงเทพมหานคร", "กรุงเทพฯ", "กรุงเทพ", "กทม.", "กทม"]
+    : [prov];
+}
+function buildThaiIndex(rows) {
+  const byZip = new Map(), byProvince = new Map(), provSet = new Set();
+  for (const r of rows) {
+    let z = byZip.get(r.zip); if (!z) { z = []; byZip.set(r.zip, z); } z.push(r);
+    let p = byProvince.get(r.province); if (!p) { p = []; byProvince.set(r.province, p); } p.push(r);
+    provSet.add(r.province);
+  }
+  const provVariants = [];
+  for (const prov of provSet) for (const v of thaiProvinceVariants(prov)) provVariants.push({ v, prov });
+  provVariants.sort((a, b) => b.v.length - a.v.length); // longest first → prefer specific
+  return { rows, byZip, byProvince, provVariants };
+}
+
+let __thaiIdx = null, __thaiIdxPromise = null;
+function ensureThaiAddrIndex() {
+  if (__thaiIdx) return Promise.resolve(__thaiIdx);
+  if (__thaiIdxPromise) return __thaiIdxPromise;
+  // Reuse the screens.jsx loader's mapped rows when present (single fetch);
+  // otherwise fetch + map the raw tuples ourselves.
+  const rowsP = (typeof window !== "undefined" && typeof window.loadThaiAddresses === "function")
+    ? Promise.resolve(window.loadThaiAddresses())
+    : fetch("thai-address.json").then(r => r.json())
+        .then(rows => rows.map(r => ({ tambon: r[0], amphoe: r[1], province: r[2], zip: String(r[3]) })));
+  __thaiIdxPromise = rowsP
+    .then(rows => { __thaiIdx = buildThaiIndex(rows || []); return __thaiIdx; })
+    .catch(() => { __thaiIdx = buildThaiIndex([]); return __thaiIdx; });
+  return __thaiIdxPromise;
+}
+function getThaiAddrIndex() { return __thaiIdx; }
+
+/* Split a one-line address tail into { addr1, addr2 } + structured fields by
+   anchoring on the gazetteer. Returns null when it can't confidently anchor
+   (caller then falls back to its own heuristic). */
+function parseThaiAddrTail(addr) {
+  const idx = __thaiIdx;
+  if (!idx || !idx.rows.length) return null;
+  const s = String(addr || "").replace(/\s+/g, " ").trim();
+  if (!s) return null;
+
+  // Postcode = last 5-digit group (addresses end with it).
+  const zipRe = /(?<!\d)(\d{5})(?!\d)/g;
+  let m, lastZip = null, lastZipIdx = -1;
+  while ((m = zipRe.exec(s)) !== null) { lastZip = m[1]; lastZipIdx = m.index; }
+
+  // Candidate rows: by zip (strongest), else by a detected province name.
+  let candidates = (lastZip && idx.byZip.get(lastZip)) || null;
+  if (!candidates) {
+    for (const { v, prov } of idx.provVariants) {
+      if (s.indexOf(v) !== -1) { candidates = idx.byProvince.get(prov) || null; break; }
+    }
+  }
+  if (!candidates) return null;
+
+  // Find a name, preferring a prefixed occurrence (ตำบล/ต./แขวง …). A prefixed
+  // hit is a far stronger signal than a bare one — it disambiguates Bangkok
+  // collisions where a sub-district and district share a name (e.g. แขวงจอมพล
+  // เขตจตุจักร, where "จตุจักร" is also a valid แขวง). Bare names fall back to
+  // the LAST occurrence so a road named after a tambon doesn't split too early.
+  const findName = (name, prefixes) => {
+    if (!name) return { idx: -1, prefixed: false };
+    for (const pre of prefixes) {
+      let i = s.indexOf(pre + name); if (i !== -1) return { idx: i, prefixed: true };
+      i = s.indexOf(pre + " " + name); if (i !== -1) return { idx: i, prefixed: true };
+    }
+    return { idx: s.lastIndexOf(name), prefixed: false };
+  };
+
+  let best = null;
+  for (const row of candidates) {
+    const t = findName(row.tambon, ["ตำบล", "ต.", "แขวง"]);
+    const a = findName(row.amphoe, ["อำเภอ", "อ.", "เขต"]);
+    let pIdx = -1;
+    for (const pv of thaiProvinceVariants(row.province)) { const i = s.lastIndexOf(pv); if (i !== -1) { pIdx = i; break; } }
+    let score = 0;
+    if (t.idx !== -1) score += t.prefixed ? 3 : 1;
+    if (a.idx !== -1) score += a.prefixed ? 3 : 1;
+    if (pIdx !== -1) score += 1;
+    if (lastZip && row.zip === lastZip) score += 1;
+    // Reward correct Thai ordering: tambon → amphoe → province.
+    if (t.idx !== -1 && a.idx !== -1 && t.idx < a.idx) score += 1;
+    if (a.idx !== -1 && pIdx !== -1 && a.idx < pIdx) score += 1;
+    if (!best || score > best.score) best = { row, score, tIdx: t.idx, aIdx: a.idx, pIdx };
+  }
+  if (!best || best.score < 3) return null; // too weak to trust → heuristic fallback
+
+  // Decide where addr1 ends. Robust to prefixes written with a dot ("ต."),
+  // without a dot ("ต "), as full words ("ตำบล/เขต"), combined ("แขวง/เขตX"),
+  // or omitted entirely (the gazetteer still anchors via zip + names).
+  const row = best.row;
+  let provIdx = -1;
+  for (const pv of thaiProvinceVariants(row.province)) { const i = s.lastIndexOf(pv); if (i !== -1) { provIdx = i; break; } }
+
+  // Earliest index where `name` sits right after a (dotted/dotless/word) prefix.
+  const prefixedIdx = (name, pres) => {
+    for (const pre of pres) { const i = s.indexOf(pre + name); if (i !== -1) return i; }
+    return -1;
+  };
+  const tPre = prefixedIdx(row.tambon, ["ตำบล", "แขวง", "ต.", "ต "]);
+  const aPre = prefixedIdx(row.amphoe, ["อำเภอ", "เขต", "อ.", "อ "]);
+
+  const cands = [];
+  const kw = s.match(/แขวง|ตำบล|เขต|อำเภอ/);   // first full-word marker
+  if (kw && kw.index >= 1) cands.push(kw.index);
+  if (tPre >= 1) cands.push(tPre);
+  if (aPre >= 1) cands.push(aPre);
+  let split = cands.length ? Math.min(...cands) : -1;
+
+  // No prefix typed at all → locate by bare name, bounded right-to-left
+  // (tambon before amphoe before province/zip) so repeated names like
+  // "ตาคลี ตาคลี" still split at the tambon, not the amphoe.
+  if (split < 1) {
+    const bound = provIdx >= 0 ? provIdx : (lastZipIdx >= 0 ? lastZipIdx : s.length);
+    const aBare = s.lastIndexOf(row.amphoe, Math.max(0, bound - 1));
+    const tBound = aBare > 0 ? aBare : bound;
+    const tBare = s.lastIndexOf(row.tambon, Math.max(0, tBound - 1));
+    split = tBare >= 1 ? tBare : (aBare >= 1 ? aBare : (best.tIdx >= 1 ? best.tIdx : best.aIdx));
+  }
+  if (split == null || split < 1) return null;
+
+  const confidence = (best.tIdx >= 0 && best.aIdx >= 0 && lastZip) ? "high"
+    : (best.score >= 3 ? "medium" : "low");
+  const addr1 = s.slice(0, split).trim();
+  const addr2Raw = s.slice(split).trim();
+  // On a confident, zip-anchored match, rewrite the tail to the canonical
+  // form — fills in ต./อ./จ. (or แขวง/เขต for Bangkok) when the customer typed
+  // them dotless or omitted them, and fixes any out-of-order zip/province.
+  const addr2 = confidence === "high"
+    ? (best.row.province === __BKK
+        ? `แขวง${best.row.tambon} เขต${best.row.amphoe} กรุงเทพมหานคร ${best.row.zip}`
+        : `ต.${best.row.tambon} อ.${best.row.amphoe} จ.${best.row.province} ${best.row.zip}`)
+    : addr2Raw;
+  return {
+    addr1, addr2, addr2Raw,
+    tambon: best.row.tambon, amphoe: best.row.amphoe, province: best.row.province, zip: best.row.zip,
+    confidence,
+  };
+}
+
 Object.assign(window, {
+  ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem,
   loadStockTake, saveStockTake, applyStockCounts,
+  loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, isoToThai,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, removeProductsFromStore, resetProductStore,

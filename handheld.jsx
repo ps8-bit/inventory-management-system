@@ -1447,7 +1447,8 @@ function MSell({ ctx }) {
   const [pasteOpen, setPasteOpen] = useStateM(false);
   const [aiLoading, setAiLoading] = useStateM(false);
 
-  const applyParse = () => {
+  const applyParse = async () => {
+    if (typeof ensureThaiAddrIndex === "function") { try { await ensureThaiAddrIndex(); } catch (e) {} }
     const parsed = (typeof parseRecipientBlob === "function") ? parseRecipientBlob(pasteText) : null;
     if (!parsed || (!parsed.name && !parsed.phone && !parsed.addr1)) { ctx.pushToast("ไม่พบข้อมูลที่จะคัดแยก"); return; }
     setShipState(s => ({ ...s,
@@ -1457,7 +1458,10 @@ function MSell({ ctx }) {
       addr2: parsed.addr2 || s.addr2,
     }));
     setPasteText(""); setPasteOpen(false);
-    ctx.pushToast("คัดแยกข้อมูลแล้ว");
+    const hasAddr = parsed.addr1 || parsed.addr2;
+    ctx.pushToast(!hasAddr ? "คัดแยกข้อมูลแล้ว"
+      : parsed.addrConfidence === "high" ? "คัดแยกแล้ว · ✓ ตรงรหัสไปรษณีย์"
+      : "คัดแยกแล้ว · ที่อยู่อาจไม่ครบ ลอง AI");
   };
 
   const applyPasteAI = async () => {
@@ -2613,8 +2617,9 @@ function MLabelEdit({ ctx }) {
   const setField = (k, v) => setLabel(l => ({ ...l, [k]: v }));
   const setSender = (k, v) => setLabel(l => ({ ...l, sender: { ...(l.sender || {}), [k]: v } }));
 
-  /* paste auto-split — local heuristic (same parser as desktop) */
-  const applyParse = () => {
+  /* paste auto-split — local gazetteer parser (same parser as desktop) */
+  const applyParse = async () => {
+    if (typeof ensureThaiAddrIndex === "function") { try { await ensureThaiAddrIndex(); } catch (e) {} }
     const parsed = (typeof parseRecipientBlob === "function") ? parseRecipientBlob(pasteText) : {};
     if (!parsed.name && !parsed.phone && !parsed.addr1) { ctx.pushToast("ไม่พบข้อมูลที่จะคัดแยก"); return; }
     setLabel(l => ({ ...l, recipient: {
@@ -2624,7 +2629,10 @@ function MLabelEdit({ ctx }) {
       addr2: parsed.addr2 || l.recipient.addr2,
     }}));
     setPasteText(""); setPasteOpen(false);
-    ctx.pushToast("คัดแยกข้อมูลแล้ว");
+    const hasAddr = parsed.addr1 || parsed.addr2;
+    ctx.pushToast(!hasAddr ? "คัดแยกข้อมูลแล้ว"
+      : parsed.addrConfidence === "high" ? "คัดแยกแล้ว · ✓ ตรงรหัสไปรษณีย์"
+      : "คัดแยกแล้ว · ที่อยู่อาจไม่ครบ ลอง AI");
   };
 
   /* paste auto-split — AI (Edge Function, same as desktop) */
