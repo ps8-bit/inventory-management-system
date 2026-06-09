@@ -256,16 +256,21 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
             else if (deg === 270) { fCtx.translate(0, ch);  fCtx.rotate(-Math.PI / 2); }
             fCtx.drawImage(vid, 0, 0, sw, sh);
             fCtx.restore();
-            try {
-              const lum = new ZXing.HTMLCanvasElementLuminanceSource(fCanvas);
-              const bmp = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
-              // Fresh reader each call: a reused MultiFormatReader gets poisoned after a
-              // NotFound and stops decoding. Hints MUST be applied via setHints() —
-              // passing them as decode(bmp, hints) silently no-ops in this build.
-              const reader = new ZXing.MultiFormatReader();
-              reader.setHints(zHints);
-              return reader.decode(bmp).getText();
-            } catch (_) { return null; }
+            const lum = new ZXing.HTMLCanvasElementLuminanceSource(fCanvas);
+            // Fresh reader each attempt: a reused MultiFormatReader gets poisoned after a
+            // NotFound and stops decoding. Hints MUST be applied via setHints() — passing
+            // them as decode(bmp, hints) silently no-ops in this build. Two binarizers
+            // catch different conditions: Hybrid for QR / uneven light, GlobalHistogram
+            // for flat high-contrast 1D labels.
+            const Binarizers = [ZXing.HybridBinarizer, ZXing.GlobalHistogramBinarizer].filter(Boolean);
+            for (const Bin of Binarizers) {
+              try {
+                const reader = new ZXing.MultiFormatReader();
+                reader.setHints(zHints);
+                return reader.decode(new ZXing.BinaryBitmap(new Bin(lum))).getText();
+              } catch (_) {}
+            }
+            return null;
           };
 
           setPhase("ready");

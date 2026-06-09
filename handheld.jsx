@@ -732,6 +732,7 @@ function MOutbound({ ctx }) {
 function MInventory({ ctx }) {
   const [q, setQ] = useStateM("");
   const [cat, setCat] = useStateM("ทั้งหมด");
+  const [statusFilter, setStatusFilter] = useStateM("all"); // all | ok | low | out
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
   const [bulkOpen, setBulkOpen] = useStateM(false);
@@ -756,9 +757,16 @@ function MInventory({ ctx }) {
   const cats = useMemoM(() => ["ทั้งหมด", ...(typeof loadCategories === "function" ? loadCategories() : [...new Set(products.map(p => p.cat))])], [products]);
   const filtered = products.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
+    if (statusFilter !== "all" && stockStatus(p).key !== statusFilter) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
+  const STATUS_TABS = [
+    { id: "all", label: "ทุกสถานะ" },
+    { id: "ok",  label: "พร้อมขาย" },
+    { id: "low", label: "ต่ำ" },
+    { id: "out", label: "หมด" }
+  ];
 
   const selectedSkus = Object.keys(selected).filter(s => selected[s]);
   const selectedCount = selectedSkus.length;
@@ -808,15 +816,31 @@ function MInventory({ ctx }) {
           {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
         </div>
 
-        <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
+        <div className="m-chips-scroll" style={{ marginBottom: 8 }}>
           {cats.map(c => (
             <button key={c} className={"m-chip" + (cat === c ? " on" : "")} onClick={() => setCat(c)}>{c}</button>
           ))}
         </div>
 
-        <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8, padding: "0 4px" }}>
-          {filtered.length} จาก {products.length} รายการ
-          {selecting && <span> · แตะเพื่อเลือก</span>}
+        {/* Stock-status filter (mirrors desktop): พร้อมขาย / ต่ำ / หมด */}
+        <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
+          {STATUS_TABS.map(s => {
+            const dot = s.id === "ok" ? "var(--success)" : s.id === "low" ? "var(--warning)" : s.id === "out" ? "var(--danger)" : null;
+            return (
+              <button key={s.id} className={"m-chip" + (statusFilter === s.id ? " on" : "")} onClick={() => setStatusFilter(s.id)}>
+                {dot && <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 999, background: dot, marginRight: 5, verticalAlign: "middle" }}/>}
+                {s.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8, padding: "0 4px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>{filtered.length} จาก {products.length} รายการ{selecting && <span> · แตะเพื่อเลือก</span>}</span>
+          {(cat !== "ทั้งหมด" || statusFilter !== "all" || q) && (
+            <button onClick={() => { setCat("ทั้งหมด"); setStatusFilter("all"); setQ(""); }}
+              style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 11, cursor: "pointer", padding: 0 }}>ล้างตัวกรอง</button>
+          )}
         </div>
 
         <div className="m-list">
