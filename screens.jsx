@@ -185,9 +185,13 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
 
     (async () => {
       try {
-        /* ── Engine 1: native BarcodeDetector — Android Chrome, iOS 17.4+, desktop ──
-           Fast and hardware-accelerated. We drive a per-frame capture loop. */
-        if (hasDetector) {
+        /* ── Engine 1: per-frame capture loop ──
+           Uses native BarcodeDetector when present (fast, hardware-accelerated),
+           and ALWAYS runs the ZXing rotation fallback below — which is what lets us
+           read QR codes and 1D barcodes at any orientation. Critically this loop now
+           runs even when BarcodeDetector is ABSENT (iOS Safari < 17.4, many desktops),
+           so those devices get rotation + QR instead of the old no-rotation path. */
+        if (hasDetector || window.ZXing?.MultiFormatReader) {
           const stream = await navigator.mediaDevices.getUserMedia(CONSTRAINTS);
           if (dead) { stream.getTracks().forEach(t => t.stop()); return; }
           streamRef.current = stream;
@@ -203,29 +207,32 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
           if (v.readyState >= 1) tryPlay(); else v.onloadedmetadata = tryPlay;
           setupTrack();
 
-          const FMTS = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
-                        "code_93","qr_code","data_matrix","itf","aztec","codabar","pdf417"];
-          const supported = await BarcodeDetector.getSupportedFormats().catch(() => FMTS);
-          const fmts = FMTS.filter(f => supported.includes(f));
-          const bd = new BarcodeDetector({ formats: fmts.length ? fmts : FMTS });
+          // BarcodeDetector is the fast first-pass when available; otherwise bd stays
+          // null and decoding relies entirely on the ZXing rotation fallback below.
+          let bd = null;
+          if (hasDetector) {
+            const FMTS = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
+                          "code_93","qr_code","data_matrix","itf","aztec","codabar","pdf417"];
+            const supported = await BarcodeDetector.getSupportedFormats().catch(() => FMTS);
+            const fmts = FMTS.filter(f => supported.includes(f));
+            bd = new BarcodeDetector({ formats: fmts.length ? fmts : FMTS });
+          }
 
           /* ZXing fallback — runs only on frames where BarcodeDetector finds nothing.
              iOS Safari's BarcodeDetector frequently fails to decode 1D bars (EAN/Code128)
              even when sharp; ZXing reliably reads them from the same captured frame. */
           const fCanvas = document.createElement("canvas");
           const fCtx    = fCanvas.getContext("2d", { willReadFrequently: true });
-          let zFallback = null, zHints = null;
+          // TRY_HARDER only — letting MultiFormatReader consider ALL formats (1D + QR +
+          // DataMatrix). Setting POSSIBLE_FORMATS here silently breaks decoding in this
+          // ZXing build, which is why QR + rotated 1D never read before.
+          let zCapable = false, zHints = null;
           if (window.ZXing?.MultiFormatReader) {
             try {
-              const BF = ZXing.BarcodeFormat;
               zHints = new Map();
               zHints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-              zHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-                BF.EAN_13, BF.EAN_8, BF.UPC_A, BF.UPC_E, BF.CODE_128,
-                BF.CODE_39, BF.CODE_93, BF.ITF, BF.CODABAR, BF.QR_CODE, BF.DATA_MATRIX,
-              ]);
-              zFallback = new ZXing.MultiFormatReader();
-            } catch (_) { zFallback = null; }
+              zCapable = true;
+            } catch (_) { zCapable = false; }
           }
 
           /* Decode the current video frame with ZXing at a given rotation (0/90/180/270°).
@@ -252,7 +259,12 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
             try {
               const lum = new ZXing.HTMLCanvasElementLuminanceSource(fCanvas);
               const bmp = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
-              return zFallback.decode(bmp, zHints).getText();
+              // Fresh reader each call: a reused MultiFormatReader gets poisoned after a
+              // NotFound and stops decoding. Hints MUST be applied via setHints() —
+              // passing them as decode(bmp, hints) silently no-ops in this build.
+              const reader = new ZXing.MultiFormatReader();
+              reader.setHints(zHints);
+              return reader.decode(bmp).getText();
             } catch (_) { return null; }
           };
 
@@ -282,14 +294,16 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
               /* 1. BarcodeDetector straight on the <video> element — most reliable path,
                     avoids a canvas roundtrip that can drop borderline 1D detections. */
               let value = null;
-              try {
-                const hits = await bd.detect(vid);
-                if (hits.length) value = hits[0].rawValue;
-              } catch (_) {}
+              if (bd) {
+                try {
+                  const hits = await bd.detect(vid);
+                  if (hits.length) value = hits[0].rawValue;
+                } catch (_) {}
+              }
 
               /* 2. ZXing on the captured frame, tried at every 90° rotation — recovers 1D
                     barcodes BarcodeDetector missed, regardless of how the bars are turned. */
-              if (!value && zFallback) {
+              if (!value && zCapable) {
                 for (const deg of [0, 90, 180, 270]) {
                   value = decodeRotated(vid, deg);
                   if (value) break;
