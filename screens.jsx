@@ -113,10 +113,9 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   const onScanRef = useRef(onScan);
   onScanRef.current = onScan;
   const [lastScan, setLastScan] = useState(null);
-  // Small scan badge — confirms which build is running + live decode count.
-  const dbgRef = useRef({ build: "20260609w", engine: "init", bd: "?", mfr: "?", vid: "-", frames: 0, tries: 0, last: "-", via: "-" });
-  const [, forceDbg] = useState(0);
-  useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 600); return () => clearInterval(t); }, []);
+  // Internal scan telemetry (no longer shown on screen) — the decode paths still write
+  // to it; harmless and useful if we ever need to surface diagnostics again.
+  const dbgRef = useRef({ build: "20260609x", engine: "init", bd: "?", mfr: "?", vid: "-", frames: 0, tries: 0, last: "-", via: "-" });
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
   const [errMsg,   setErrMsg]  = useState("");
   const [scanning, setScanning] = useState(false);
@@ -507,11 +506,6 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   // inside a transformed/filtered ancestor (which would render it inline).
   return ReactDOM.createPortal((
     <div style={{ position:"fixed", inset:0, zIndex:99999, background:"rgba(0,0,0,0.93)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16, padding:16 }}>
-
-      {/* Build/scan badge — confirms which code is running + live decode state */}
-      <div style={{ position:"absolute", top:6, left:6, right:6, zIndex:30, fontFamily:"monospace", fontSize:11, color:"#8f8", background:"rgba(0,0,0,0.6)", padding:"5px 8px", borderRadius:6, lineHeight:1.5, pointerEvents:"none", textAlign:"left" }}>
-        v{dbgRef.current.build} · {dbgRef.current.engine} · {dbgRef.current.vid} · เฟรม{dbgRef.current.frames||0} ✓{dbgRef.current.tries} ({dbgRef.current.via}) · {String(dbgRef.current.last).slice(0,14)}
-      </div>
 
       {/* Continuous-scan pause overlay — shown after each decode; tap สแกนต่อ to keep going */}
       {continuous && lastScan && (
