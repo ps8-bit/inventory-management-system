@@ -113,9 +113,10 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   const onScanRef = useRef(onScan);
   onScanRef.current = onScan;
   const [lastScan, setLastScan] = useState(null);
-  // Lightweight scan telemetry (no longer shown on screen) — harmless ref the scan
-  // engines still write to; kept to avoid churn across the decode paths.
-  const dbgRef = useRef({ engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
+  // Small scan badge — confirms which build is running + live decode count.
+  const dbgRef = useRef({ build: "20260609t", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
+  const [, forceDbg] = useState(0);
+  useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 600); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
   const [errMsg,   setErrMsg]  = useState("");
   const [scanning, setScanning] = useState(false);
@@ -542,8 +543,15 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
     { bottom:0, right:0, borderBottom:"3px solid #fff", borderRight:"3px solid #fff", borderRadius:"0 0 4px 0" },
   ];
 
-  return (
-    <div style={{ position:"fixed", inset:0, zIndex:600, background:"rgba(0,0,0,0.93)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16, padding:16 }}>
+  // Render through a portal to <body> so the full-screen overlay can't be trapped
+  // inside a transformed/filtered ancestor (which would render it inline).
+  return ReactDOM.createPortal((
+    <div style={{ position:"fixed", inset:0, zIndex:99999, background:"rgba(0,0,0,0.93)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16, padding:16 }}>
+
+      {/* Build/scan badge — confirms which code is running + live decode state */}
+      <div style={{ position:"absolute", top:6, left:6, right:6, zIndex:30, fontFamily:"monospace", fontSize:11, color:"#8f8", background:"rgba(0,0,0,0.6)", padding:"5px 8px", borderRadius:6, lineHeight:1.5, pointerEvents:"none", textAlign:"left" }}>
+        v{dbgRef.current.build} · {dbgRef.current.engine} · สแกนได้ {dbgRef.current.tries} · ล่าสุด: {String(dbgRef.current.last).slice(0,18)}
+      </div>
 
       {/* Continuous-scan pause overlay — shown after each decode; tap สแกนต่อ to keep going */}
       {continuous && lastScan && (
@@ -664,7 +672,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
         #h5qr-live img{display:none!important}
         #h5qr-live::part(*){display:none}`}</style>
     </div>
-  );
+  ), document.body);
 }
 
 /* ========= INBOUND ========= */
@@ -944,6 +952,121 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
   );
 }
 
+/* Shown when a scanned code has NO exact match but is *almost* the same as an
+   existing stock/catalog SKU (see findSimilarSkus). Lets the operator reuse the
+   existing item — receive it (stock) or open the prefilled quick-add (catalog) —
+   instead of forking a duplicate, with an explicit "create new anyway" escape.
+   Shared by desktop Inbound and mobile MInbound (mobile renders as a sheet). */
+function ScanSimilarModal({ code, candidates, onUseExisting, onCreateNew, onClose, mobile }) {
+  const reasonLabel = (r) =>
+    r === "same"  ? "รหัสเดียวกัน — ต่างแค่เครื่องหมาย"
+    : r === "affix" ? "ต่างกันที่รหัสนำหน้า/ต่อท้าย"
+    : "คล้ายกันมาก — อาจสแกนหรือพิมพ์ผิด";
+
+  const list = (
+    <div style={{ display: "flex", flexDirection: "column", gap: mobile ? 8 : 10 }}>
+      {candidates.map((c) => (
+        <div key={c.sku} className="row" style={{ gap: mobile ? 10 : 12, alignItems: "center",
+          padding: mobile ? "10px 12px" : "12px 14px", background: "var(--surface-2)",
+          border: "1px solid var(--border)", borderRadius: 12 }}>
+          {c.image ? (
+            <img src={c.image} alt="" onError={e => { e.target.style.display = "none"; }}
+              style={{ width: mobile ? 42 : 48, height: mobile ? 42 : 48, borderRadius: 8, objectFit: "cover",
+                       background: "#fff", flexShrink: 0, border: "1px solid var(--border)" }}/>
+          ) : (
+            <div style={{ width: mobile ? 42 : 48, height: mobile ? 42 : 48, borderRadius: 8, background: "var(--surface)",
+                          border: "1px solid var(--border)", display: "grid", placeItems: "center", flexShrink: 0, color: "var(--muted)" }}>
+              <Icons.Box size={mobile ? 18 : 20}/>
+            </div>
+          )}
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+              <span className="mono" style={{ fontWeight: 700, fontSize: mobile ? 12.5 : 13.5 }}>{c.sku}</span>
+              <span className={`badge ${c.inStock ? "badge-success" : "badge-neutral"}`} style={{ fontSize: 10 }}>
+                <span className="dot"/>{c.inStock ? "มีในสต็อก" : "ในแคตตาล็อก"}
+              </span>
+            </div>
+            {c.name ? (
+              <div style={{ fontSize: mobile ? 11.5 : 12.5, color: "var(--fg)", marginTop: 2,
+                            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.name}</div>
+            ) : null}
+            <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
+              {[c.brand, c.cat].filter(Boolean).join(" · ")}{(c.brand || c.cat) ? " — " : ""}{reasonLabel(c.reason)}
+            </div>
+          </div>
+          <button className={mobile ? "m-action accent" : "btn btn-accent btn-sm"} onClick={() => onUseExisting(c)}
+            style={mobile ? { width: "auto", padding: "0 12px", fontSize: 11, flexShrink: 0, borderRadius: 10, whiteSpace: "nowrap" }
+                          : { flexShrink: 0, whiteSpace: "nowrap" }}>
+            {c.inStock ? "รับเข้า +1" : "ใช้รหัสนี้"}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+
+  const intro = (
+    <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: mobile ? "8px 10px" : "10px 12px",
+                  background: "var(--warning-soft)", border: "1.5px solid var(--warning)", borderRadius: 12 }}>
+      <Icons.Warn size={mobile ? 14 : 16} style={{ color: "var(--warning)", flexShrink: 0, marginTop: 1 }}/>
+      <div style={{ fontSize: mobile ? 11 : 12, color: "var(--fg)" }}>
+        สแกน <span className="mono" style={{ fontWeight: 700 }}>{code}</span> ไม่พบในระบบ
+        แต่พบสินค้าที่รหัส<b>ใกล้เคียง</b> {candidates.length} รายการ — เลือกใช้รายการที่มีอยู่เพื่อไม่ให้สินค้าซ้ำซ้อน
+        หรือยืนยันว่าเป็นสินค้าใหม่จริง
+      </div>
+    </div>
+  );
+
+  /* ── Mobile: bottom sheet ── */
+  if (mobile) return (
+    <>
+      <div className="m-sheet-backdrop" onClick={onClose}/>
+      <div className="m-sheet" style={{ bottom: 84, maxHeight: "72vh", borderRadius: 22, display: "flex", flexDirection: "column" }}>
+        <div className="m-sheet-grabber"/>
+        <div className="m-sheet-head" style={{ flexShrink: 0 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>อาจเป็นสินค้าซ้ำ</h3>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 1 }}>พบรหัสใกล้เคียง {candidates.length} รายการ</div>
+          </div>
+          <button className="m-action" onClick={onClose}><Icons.X size={14}/></button>
+        </div>
+        <div className="m-sheet-body" style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", display: "flex", flexDirection: "column", gap: 10 }}>
+          {intro}
+          {list}
+        </div>
+        <div className="m-sheet-foot" style={{ flexShrink: 0 }}>
+          <button className="m-btn-big" style={{ background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={onCreateNew}>
+            <Icons.Plus size={16}/> ไม่ซ้ำ — สร้างสินค้าใหม่
+          </button>
+        </div>
+      </div>
+    </>
+  );
+
+  /* ── Desktop: centered modal ── */
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose}/>
+      <div className="modal" style={{ maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
+        <div className="modal-head">
+          <div>
+            <h3>อาจเป็นสินค้าซ้ำ</h3>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>ตรวจพบรหัสที่ใกล้เคียงกับสินค้าที่มีอยู่</div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
+        </div>
+        <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {intro}
+          {list}
+        </div>
+        <div className="modal-foot">
+          <button className="btn" onClick={onClose}>ยกเลิก</button>
+          <button className="btn btn-primary" onClick={onCreateNew}><Icons.Plus size={14}/> ไม่ซ้ำ — สร้างสินค้าใหม่</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function GRAddModal({ onClose, onAdd, existing }) {
   const [id, setId]           = useState(() => {
     const d = new Date();
@@ -1039,6 +1162,7 @@ function Inbound({ goTo, pushToast }) {
   const [flash, setFlash] = useState(null);
   const [camOpen, setCamOpen] = useState(false);
   const [quickAdd, setQuickAdd] = useState(null); // null | { sku: string }
+  const [similar, setSimilar] = useState(null); // null | { code, candidates } — near-duplicate prompt
   const [closeConfirm, setCloseConfirm] = useState(null); // null | { changes }
   const [closed, setClosed] = useState(false); // true once job is committed
   const [grQueue, setGRQueue] = useState(loadGRQueue);
@@ -1079,12 +1203,22 @@ function Inbound({ goTo, pushToast }) {
     if (!code) return;
     const p = PRODUCTS.find(x => x.sku.toLowerCase() === code.toLowerCase());
     if (!p) {
-      /* Unknown SKU → check the WooCommerce reference catalog. A match prefills
-         the quick-register form (no typing); otherwise open it blank. */
+      /* Unknown SKU → check the WooCommerce reference catalog. An exact match
+         prefills the quick-register form (no typing). */
       const hit = typeof wooCatalogLookup === "function" ? wooCatalogLookup(code) : null;
-      if (typeof playScanErrorBeep === "function" && !hit) playScanErrorBeep();
-      else if (typeof playScanBeep === "function" && hit) playScanBeep();
-      setQuickAdd({ sku: code, prefill: hit });
+      if (hit) {
+        if (typeof playScanBeep === "function") playScanBeep();
+        setQuickAdd({ sku: code, prefill: hit });
+        setScan("");
+        return;
+      }
+      /* No exact match anywhere → is this a near-duplicate of an existing SKU
+         (brand prefix added/dropped, separators, a typo)? Surface it so we reuse
+         the existing item instead of forking a duplicate; else open blank add. */
+      const near = typeof findSimilarSkus === "function" ? findSimilarSkus(code) : [];
+      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      if (near.length) setSimilar({ code, candidates: near });
+      else setQuickAdd({ sku: code });
       setScan("");
       return;
     }
@@ -1094,6 +1228,23 @@ function Inbound({ goTo, pushToast }) {
     setTimeout(() => setFlash(null), 1200);
     setScan("");
     pushToast(`สแกนรับเข้า ${p.sku} สำเร็จ`);
+  };
+
+  // Near-duplicate prompt → reuse an existing item. A stocked SKU is received
+  // straight away; a catalog-only SKU opens the prefilled quick-add (its real
+  // SKU + name/price/image), so no duplicate is created either way.
+  const receiveExisting = (cand) => {
+    setSimilar(null);
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === cand.sku.toLowerCase());
+    if (p) {
+      if (typeof playScanBeep === "function") playScanBeep();
+      addToReceived(p.sku, p.name, p.loc, 1);
+      setFlash({ sku: p.sku, name: p.name, notFound: false });
+      setTimeout(() => setFlash(null), 1200);
+      pushToast(`สแกนรับเข้า ${p.sku} สำเร็จ`);
+    } else {
+      setQuickAdd({ sku: cand.sku, prefill: cand });
+    }
   };
 
   const totalQty = received.reduce((s, r) => s + r.qty, 0);
@@ -1195,6 +1346,15 @@ function Inbound({ goTo, pushToast }) {
           <button className="btn btn-accent" style={{ margin: 4 }} onClick={() => submitScan()}>บันทึก</button>
         </div>
         {camOpen && <CameraScanner continuous onScan={code => { submitScan(code); }} onClose={() => setCamOpen(false)}/>}
+        {similar && (
+          <ScanSimilarModal
+            code={similar.code}
+            candidates={similar.candidates}
+            onUseExisting={receiveExisting}
+            onCreateNew={() => { setSimilar(null); setQuickAdd({ sku: similar.code }); }}
+            onClose={() => setSimilar(null)}
+          />
+        )}
         {quickAdd && (
           <QuickAddInboundModal
             sku={quickAdd.sku}
