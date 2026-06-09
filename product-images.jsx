@@ -30,14 +30,60 @@ function setProductImage(sku, dataUrl) {
   window.dispatchEvent(new CustomEvent("ims-images-change"));
 }
 
+// Bulk-set images at once (e.g. from a WooCommerce catalog import). map = { sku: url }.
+// One localStorage write + one re-render instead of N; each SKU's cloud row is
+// still saved individually (the schema is one app_state row per SKU). A url of
+// null/"" is skipped (use setProductImage to clear a single image). Returns the
+// number applied.
+function setProductImagesBulk(map) {
+  if (!map || typeof map !== "object") return 0;
+  const m = { ...loadProductImages() };
+  let n = 0;
+  Object.keys(map).forEach(sku => {
+    const url = map[sku];
+    if (!url) return;
+    m[sku] = url; n++;
+    if (typeof dbSaveState === "function") dbSaveState("img:" + sku, url).catch(() => {});
+  });
+  if (!n) return 0;
+  window._DB_PRODUCT_IMAGES = m;
+  try { localStorage.setItem(PI_KEY, JSON.stringify(m)); } catch (e) {} // quota — cloud still has it
+  window.dispatchEvent(new CustomEvent("ims-images-change"));
+  return n;
+}
+
 function useProductImages() {
   const [images, setImages] = useStateImg(() => loadProductImages());
+  const [, setTick] = useStateImg(0);
   useEffectImg(() => {
-    const handler = () => setImages(loadProductImages());
-    window.addEventListener("ims-images-change", handler);
-    return () => window.removeEventListener("ims-images-change", handler);
+    const onImg = () => setImages(loadProductImages());
+    // A WooCommerce-catalog import/backfill changes the fallback image source
+    // (resolveProductImage) without touching ims_product_images — force a
+    // re-render so thumbnails pick up newly-catalogued photos immediately.
+    const onCat = () => setTick(t => t + 1);
+    window.addEventListener("ims-images-change", onImg);
+    window.addEventListener("ims-woo-catalog-change", onCat);
+    return () => {
+      window.removeEventListener("ims-images-change", onImg);
+      window.removeEventListener("ims-woo-catalog-change", onCat);
+    };
   }, []);
   return images;
+}
+
+// Resolve the image to DISPLAY for a SKU. An explicitly attached image
+// (uploaded, or pulled into ims_product_images) always wins; otherwise fall
+// back to the WooCommerce reference-catalog image so every catalogued product
+// shows its photo even before one is attached to live stock. `images` is the
+// map from useProductImages()/loadProductImages() (passed in to avoid a reload).
+function resolveProductImage(sku, images) {
+  const map = images || loadProductImages();
+  let url = map[sku];
+  if (!url && typeof wooCatalogLookup === "function") {
+    const hit = wooCatalogLookup(sku);
+    if (hit && hit.image) url = hit.image;
+  }
+  return url || "";
 }
 
 /* ============ WebP conversion via Canvas ============ */
@@ -98,7 +144,7 @@ const fmtBytes = (n) => {
 
 function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel }) {
   const images = useProductImages();
-  const url = images[sku];
+  const url = resolveProductImage(sku, images);
   if (url) {
     return (
       <div style={{
@@ -185,7 +231,9 @@ function ProductImageUpload({ sku, productName, pushToast, size = "lg" }) {
         }}
       >
         {current ? (
-          <img src={current} alt={productName} style={{ width: "100%", height: "100%", objectFit: "contain", background: "white" }}/>
+          // Absolutely positioned so the image fills the aspect-ratio box exactly and
+          // can never push the container taller (a tall portrait photo was overflowing).
+          <img src={current} alt={productName} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "white" }}/>
         ) : (
           <div style={{ textAlign: "center", padding: 20 }}>
             <div style={{ width: 48, height: 48, borderRadius: 14, background: "var(--surface)", border: "1px solid var(--border)", display: "grid", placeItems: "center", color: "var(--muted)", margin: "0 auto 10px" }}>
@@ -239,7 +287,9 @@ function ProductImageUpload({ sku, productName, pushToast, size = "lg" }) {
 Object.assign(window, {
   fileToWebp,
   setProductImage,
+  setProductImagesBulk,
   loadProductImages,
+  resolveProductImage,
   useProductImages,
   ProductImageUpload,
   ProductImageThumb

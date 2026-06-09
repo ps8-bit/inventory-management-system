@@ -148,6 +148,7 @@ function Screen({ ctx }) {
   if (route.view === "tracking")  return <MTracking ctx={ctx}/>;
   if (route.view === "track-edit")return <MTrackEdit ctx={ctx}/>;
   if (route.view === "import")    return <MImport ctx={ctx}/>;
+  if (route.view === "catalog")   return <MCatalog ctx={ctx}/>;
   if (route.view === "bundles")   return <MBundles ctx={ctx}/>;
   if (route.view === "analytics") return <MAnalytics ctx={ctx}/>;
   if (route.view === "stocktake") return <MStockTake ctx={ctx}/>;
@@ -349,7 +350,14 @@ function MInbound({ ctx }) {
     if (!code) return;
     const p = PRODUCTS.find(x => x.sku.toLowerCase() === code.toLowerCase());
     setScan("");
-    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); setQuickAdd({ sku: code }); return; }
+    if (!p) {
+      // Unknown SKU → look it up in the WooCommerce catalog; a match prefills the form.
+      const hit = typeof wooCatalogLookup === "function" ? wooCatalogLookup(code) : null;
+      if (hit) { if (typeof playScanBeep === "function") playScanBeep(); }
+      else if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      setQuickAdd({ sku: code, prefill: hit });
+      return;
+    }
     if (typeof playScanBeep === "function") playScanBeep();
     addReceived(p, 1);
   };
@@ -465,6 +473,7 @@ function MInbound({ ctx }) {
           <QuickAddInboundModal
             mobile
             sku={quickAdd.sku}
+            prefill={quickAdd.prefill}
             onClose={() => setQuickAdd(null)}
             onConfirm={(product, qty) => {
               addProductToStore(product);
@@ -865,12 +874,13 @@ function MInventory({ ctx }) {
 /* Mobile Add-SKU bottom sheet (also used for editing when `editing` product is passed) */
 function MAddSku({ categories, products, onClose, onAdd, editing }) {
   const suppliers = useMemoM(() => [...new Set(products.map(p => p.supplier))], [products]);
+  const brands    = useMemoM(() => [...new Set(products.map(p => p.brand))].filter(Boolean), [products]);
   const [f, setF] = useStateM(() => editing ? {
-    sku: editing.sku, name: editing.name, cat: editing.cat, supplier: editing.supplier,
+    sku: editing.sku, name: editing.name, cat: editing.cat, brand: editing.brand || "", supplier: editing.supplier,
     cost: String(editing.cost ?? ""), price: String(editing.price ?? ""),
     qty: String(editing.qty ?? ""), reorder: String(editing.reorder ?? "50"), loc: editing.loc
   } : {
-    sku: "", name: "", cat: categories[0] || "", supplier: suppliers[0] || "",
+    sku: "", name: "", cat: categories[0] || "", brand: "", supplier: suppliers[0] || "",
     cost: "", price: "", qty: "", reorder: "50", loc: ""
   });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
@@ -883,8 +893,12 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
 
   const save = () => {
     if (!canSave) return;
+    const catVal = (f.cat || "ทั่วไป").trim();
+    // Register a brand-new category typed here so it persists + syncs.
+    if (typeof addCategory === "function") { try { addCategory(catVal); } catch (e) {} }
     onAdd({
-      sku: skuTrim, name: f.name.trim(), cat: f.cat || "ทั่วไป",
+      sku: skuTrim, name: f.name.trim(), cat: catVal,
+      brand: (f.brand || "").trim(),
       supplier: f.supplier || "ไม่ระบุ", cost, price,
       qty: Math.round(qty), reorder: Math.round(reorder),
       loc: f.loc.trim().toUpperCase()
@@ -906,7 +920,7 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
         <div className="m-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
             <div className="m-section-label" style={{ padding: "0 2px 4px" }}>รหัส SKU *</div>
-            <input className="m-input mono" value={f.sku} disabled={!!editing} onChange={e => set("sku", e.target.value)} placeholder="เช่น TH-APP-003" style={{ textTransform: "uppercase", opacity: editing ? 0.6 : 1 }}/>
+            <input className="m-input mono" value={f.sku} disabled={!!editing} onChange={e => { const v = e.target.value; setF(prev => ({ ...prev, sku: v, brand: prev.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(v) : "") })); }} placeholder="เช่น TH-APP-003" style={{ textTransform: "uppercase", opacity: editing ? 0.6 : 1 }}/>
             {dupe && <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 4 }}>SKU นี้มีอยู่แล้ว</div>}
           </div>
           <div>
@@ -927,6 +941,11 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
               <input className="m-input" value={f.supplier} onChange={e => set("supplier", e.target.value)} placeholder="ผู้จัดส่ง" list="m-sups"/>
               <datalist id="m-sups">{suppliers.map(s => <option key={s} value={s}/>)}</datalist>
             </div>
+          </div>
+          <div>
+            <div className="m-section-label" style={{ padding: "0 2px 4px" }}>แบรนด์</div>
+            <input className="m-input" value={f.brand} onChange={e => set("brand", e.target.value)} placeholder="แบรนด์ (เช่น 5.11)" list="m-brands"/>
+            <datalist id="m-brands">{brands.map(b => <option key={b} value={b}/>)}</datalist>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <div>
@@ -1115,6 +1134,7 @@ function MProductDetail({ ctx }) {
         <div className="m-list">
           <MetaRow label="SKU" value={p.sku} mono/>
           <MetaRow label="ตำแหน่ง" value={p.loc} mono/>
+          <MetaRow label="แบรนด์" value={p.brand || "—"}/>
           <MetaRow label="ผู้จัดส่ง" value={p.supplier}/>
           <MetaRow label="ราคา" value={`฿${p.price.toLocaleString()}`}/>
           <MetaRow label="จุดสั่งซื้อใหม่" value={`${p.reorder} ชิ้น`}/>
@@ -2264,6 +2284,7 @@ function MMore({ ctx }) {
     { id: "locations", icon: Icons.Map,   label: "ตำแหน่งจัดเก็บ",  sub: "แผนผังคลังและการใช้พื้นที่" },
     { id: "labels",    icon: Icons.Tag,   label: "พิมพ์ฉลากจัดส่ง", sub: "สร้าง แก้ไข และพิมพ์ฉลาก" },
     { id: "import",    icon: Icons.Pkg,   label: "นำเข้า SKU",      sub: "อัปโหลดจาก Excel/CSV" },
+    { id: "catalog",   icon: Icons.Scan,  label: "แคตตาล็อกอ้างอิง", sub: "ดูสินค้าทั้งหมด แยกตามแบรนด์" },
     { id: "history",   icon: Icons.History, label: "ประวัติการแก้ไข", sub: "บันทึกการเปลี่ยนแปลงทั้งหมด" },
     { id: "users",     icon: Icons.Help,  label: "ผู้ใช้งานและสิทธิ์", sub: "จัดการบัญชีผู้ใช้และบทบาท" },
     { id: "settings",  icon: Icons.Setting, label: "ตั้งค่าร้านค้า",  sub: "โลโก้ ข้อมูลผู้ส่ง" }
@@ -2331,6 +2352,115 @@ function MMore({ ctx }) {
             <span className="badge badge-success"><span className="dot"/>ออนไลน์</span>
           </div>
         </div>
+      </div>
+    </>
+  );
+}
+
+/* =============== REFERENCE CATALOG (browse by brand) =============== */
+
+function MCatalog({ ctx }) {
+  const [catalog, setCatalog] = useStateM(() => typeof loadWooCatalog === "function" ? loadWooCatalog() : {});
+  const [q, setQ] = useStateM("");
+  const [brandFilter, setBrandFilter] = useStateM(""); // "" = all
+  const [showN, setShowN] = useStateM(60);
+  useEffectM(() => {
+    const h = () => setCatalog(typeof loadWooCatalog === "function" ? loadWooCatalog() : {});
+    window.addEventListener("ims-woo-catalog-change", h);
+    return () => window.removeEventListener("ims-woo-catalog-change", h);
+  }, []);
+
+  const catList = useMemoM(() => Object.keys(catalog).map(k => catalog[k]), [catalog]);
+  // Brand of an entry: stored brand wins, else guess from SKU prefix. "อื่นๆ" = unknown.
+  const brandOf = (e) => (e.brand && e.brand.trim())
+    || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(e.sku) : "")
+    || "อื่นๆ";
+  const brands = useMemoM(() => {
+    const m = {};
+    catList.forEach(e => { const b = brandOf(e); m[b] = (m[b] || 0) + 1; });
+    return Object.keys(m).sort((a, b) => m[b] - m[a]).map(name => ({ name, count: m[name] }));
+  }, [catList]);
+  const filtered = useMemoM(() => {
+    const s = q.trim().toLowerCase();
+    return catList.filter(e => {
+      if (brandFilter && brandOf(e) !== brandFilter) return false;
+      if (s && !((e.sku || "").toLowerCase().includes(s) || (e.name || "").toLowerCase().includes(s))) return false;
+      return true;
+    });
+  }, [catList, q, brandFilter]);
+
+  const resetPage = () => setShowN(60);
+
+  return (
+    <>
+      <div className="m-topbar">
+        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+        <div className="m-title-sub">แคตตาล็อกอ้างอิง</div>
+        <div style={{ width: 32 }}/>
+      </div>
+      <div className="m-content">
+        {catList.length === 0 ? (
+          <div className="m-card" style={{ padding: 28, textAlign: "center" }}>
+            <div style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>
+              ยังไม่มีแคตตาล็อกอ้างอิง<br/>นำเข้าไฟล์ WooCommerce จากหน้าเดสก์ท็อปก่อน
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, color: "var(--muted)", padding: "0 4px 8px" }}>
+              <strong className="tnum" style={{ color: "var(--fg)" }}>{catList.length.toLocaleString()}</strong> รายการ
+              {brandFilter && <> · กรอง <strong style={{ color: "var(--fg)" }}>{brandFilter}</strong> ({filtered.length.toLocaleString()})</>}
+            </div>
+
+            {/* Brand filter chips — horizontally scrollable */}
+            <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "0 0 10px", WebkitOverflowScrolling: "touch" }}>
+              {[{ name: "", count: catList.length }, ...brands].map(b => {
+                const active = brandFilter === b.name;
+                return (
+                  <button key={b.name || "__all"} onClick={() => { setBrandFilter(b.name); resetPage(); }}
+                    style={{
+                      fontSize: 12, padding: "6px 12px", borderRadius: 999, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
+                      border: "1px solid " + (active ? "var(--accent)" : "var(--border)"),
+                      background: active ? "var(--accent)" : "var(--surface-2)",
+                      color: active ? "#fff" : "var(--fg-2)", fontWeight: active ? 600 : 500
+                    }}>
+                    {b.name || "ทั้งหมด"} <span style={{ opacity: 0.7 }}>({b.count.toLocaleString()})</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="m-search">
+              <Icons.Search size={16} style={{ color: "var(--muted)" }}/>
+              <input value={q} onChange={e => { setQ(e.target.value); resetPage(); }} placeholder="ค้นหา SKU หรือชื่อสินค้า..."/>
+            </div>
+
+            <div className="m-list">
+              {filtered.slice(0, showN).map((e, i) => {
+                const inStock = PRODUCTS.some(p => p.sku.toLowerCase() === (e.sku || "").toLowerCase());
+                return (
+                  <div key={e.sku || i} className="m-row" style={{ cursor: "default" }}>
+                    <ProductImageThumb sku={e.sku} size={40} radius={8}/>
+                    <div className="m-row-main">
+                      <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.name || "—"}</div>
+                      <div className="m-row-sub mono">{e.sku} · {brandOf(e)}{e.price ? " · ฿" + e.price.toLocaleString() : ""}</div>
+                    </div>
+                    {inStock
+                      ? <span className="badge badge-success" style={{ flexShrink: 0 }}>ในคลัง</span>
+                      : <span className="badge badge-neutral" style={{ flexShrink: 0 }}>อ้างอิง</span>}
+                  </div>
+                );
+              })}
+              {filtered.length === 0 && <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่พบรายการที่ตรงกับเงื่อนไข</div>}
+            </div>
+
+            {filtered.length > showN && (
+              <button className="m-btn-big" style={{ marginTop: 12 }} onClick={() => setShowN(n => n + 60)}>
+                ดูเพิ่ม — แสดง {Math.min(showN, filtered.length).toLocaleString()} จาก {filtered.length.toLocaleString()}
+              </button>
+            )}
+          </>
+        )}
       </div>
     </>
   );

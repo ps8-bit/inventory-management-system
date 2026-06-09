@@ -548,13 +548,18 @@ function OcrNameButton({ onResult, mobile }) {
   );
 }
 
-function QuickAddInboundModal({ sku, onConfirm, onClose, mobile }) {
+function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
   const cats      = useMemo(() => typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(p => p.cat))].filter(Boolean).sort(), []);
   const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))].filter(Boolean).sort(), []);
-  const [name,     setName]     = useState("");
-  const [cat,      setCat]      = useState(cats[0] || "ทั่วไป");
+  const brands    = useMemo(() => [...new Set(PRODUCTS.map(p => p.brand))].filter(Boolean).sort(), []);
+  // When the scanned SKU was found in the WooCommerce reference catalog, prefill
+  // name / category / price (and remember the image) so nothing is typed by hand.
+  const fromWoo = !!(prefill && (prefill.name || prefill.image || prefill.price));
+  const [name,     setName]     = useState(prefill?.name || "");
+  const [cat,      setCat]      = useState(prefill?.cat || cats[0] || "ทั่วไป");
+  const [brand,    setBrand]    = useState(prefill?.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(sku) : ""));
   const [loc,      setLoc]      = useState("");
-  const [price,    setPrice]    = useState("");
+  const [price,    setPrice]    = useState(prefill?.price ? String(prefill.price) : "");
   const [reorder,  setReorder]  = useState("30");
   const [supplier, setSupplier] = useState(suppliers[0] || "");
   const [qty,      setQty]      = useState("1");
@@ -565,10 +570,15 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile }) {
 
   const confirm = () => {
     if (!canSave) { nameRef.current?.focus(); return; }
+    const catVal = (cat || "").trim() || "ทั่วไป";
+    // Register a brand-new category typed here so it persists + syncs to the
+    // shared list (addCategory no-ops if it already exists).
+    if (typeof addCategory === "function") { try { addCategory(catVal); } catch (e) {} }
     const product = {
       sku,
       name:     name.trim(),
-      cat:      cat || "ทั่วไป",
+      cat:      catVal,
+      brand:    brand.trim() || "",
       loc:      loc.trim().toUpperCase() || "—",
       price:    parseFloat(price) || 0,
       cost:     Math.round((parseFloat(price) || 0) * 0.6),
@@ -577,11 +587,35 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile }) {
       reorder:  parseInt(reorder) || 30,
       supplier: supplier.trim() || "ไม่ระบุ",
     };
+    // Carry over the WooCommerce product image (a remote URL renders fine in
+    // <img> across the app). Set before onConfirm so the new product shows it.
+    if (fromWoo && prefill.image && typeof setProductImage === "function") {
+      try { setProductImage(sku, prefill.image); } catch (e) {}
+    }
     onConfirm(product, parseInt(qty) || 1);
   };
 
+  // "Pulled from WooCommerce" banner (shown above the form on both views).
+  const wooBanner = fromWoo ? (
+    <div style={{ display: "flex", gap: 10, alignItems: "center", padding: mobile ? "8px 10px" : "10px 12px",
+                  background: "var(--accent-soft, var(--surface-2))", border: "1.5px solid var(--accent)", borderRadius: 12 }}>
+      {prefill.image ? (
+        <img src={prefill.image} alt="" onError={e => { e.target.style.display = "none"; }}
+          style={{ width: mobile ? 40 : 48, height: mobile ? 40 : 48, borderRadius: 8, objectFit: "cover",
+                   background: "#fff", flexShrink: 0, border: "1px solid var(--border)" }}/>
+      ) : null}
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: mobile ? 11.5 : 12.5, fontWeight: 700, color: "var(--accent)", display: "flex", alignItems: "center", gap: 5 }}>
+          <Icons.Check size={mobile ? 12 : 14}/> ดึงข้อมูลจากแคตตาล็อก WooCommerce
+        </div>
+        <div style={{ fontSize: mobile ? 10.5 : 11.5, color: "var(--muted)", marginTop: 1 }}>เติมชื่อ · หมวดหมู่ · ราคา ให้อัตโนมัติ — ตรวจสอบแล้วบันทึกได้เลย</div>
+      </div>
+    </div>
+  ) : null;
+
   const fields = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {wooBanner}
       <div className="field">
         <label>รหัส SKU</label>
         <input className={mobile ? "m-input mono" : "input mono"} value={sku} readOnly
@@ -600,10 +634,12 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile }) {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <div className="field">
           <label>หมวดหมู่</label>
-          <select className={mobile ? "m-input" : "input"} value={cat} onChange={e => setCat(e.target.value)}>
-            {cats.map(c => <option key={c} value={c}>{c}</option>)}
-            <option value="ทั่วไป">ทั่วไป</option>
-          </select>
+          <input className={mobile ? "m-input" : "input"} value={cat} onChange={e => setCat(e.target.value)}
+            placeholder="พิมพ์เพื่อค้นหา หรือเพิ่มหมวดหมู่ใหม่" list="qa-cats"/>
+          <datalist id="qa-cats">
+            {cats.map(c => <option key={c} value={c}/>)}
+            <option value="ทั่วไป"/>
+          </datalist>
         </div>
         <div className="field">
           <label>ตำแหน่งจัดเก็บ</label>
@@ -623,10 +659,18 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile }) {
             onChange={e => setReorder(e.target.value)} style={{ textAlign: "right" }}/>
         </div>
       </div>
-      <div className="field">
-        <label>ผู้จัดส่ง</label>
-        <input className={mobile ? "m-input" : "input"} value={supplier}
-          onChange={e => setSupplier(e.target.value)} placeholder="ชื่อ supplier"/>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div className="field">
+          <label>แบรนด์</label>
+          <input className={mobile ? "m-input" : "input"} value={brand}
+            onChange={e => setBrand(e.target.value)} placeholder="เช่น 5.11, PS TACTICAL" list="qa-brands"/>
+          <datalist id="qa-brands">{brands.map(b => <option key={b} value={b}/>)}</datalist>
+        </div>
+        <div className="field">
+          <label>ผู้จัดส่ง</label>
+          <input className={mobile ? "m-input" : "input"} value={supplier}
+            onChange={e => setSupplier(e.target.value)} placeholder="ชื่อ supplier"/>
+        </div>
       </div>
       <div style={{ padding: "14px 16px", background: "var(--accent-soft,var(--surface-2))", borderRadius: 12,
                     border: "1.5px solid var(--accent)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -659,6 +703,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile }) {
         <div className="m-sheet-body" style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
           {/* Compact mobile fields — only essentials up front, rest below */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {wooBanner}
             <div className="field" style={{ marginBottom: 0 }}>
               <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
                 <label style={{ fontSize: 11 }}>ชื่อสินค้า *</label>
@@ -673,6 +718,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile }) {
               <div className="field" style={{ marginBottom: 0 }}>
                 <label style={{ fontSize: 11 }}>หมวดหมู่</label>
                 <select className="m-input" value={cat} onChange={e => setCat(e.target.value)}>
+                  {cat && !cats.includes(cat) && cat !== "ทั่วไป" && <option value={cat}>{cat}</option>}
                   {cats.map(c => <option key={c} value={c}>{c}</option>)}
                   <option value="ทั่วไป">ทั่วไป</option>
                 </select>
@@ -875,9 +921,12 @@ function Inbound({ goTo, pushToast }) {
     if (!code) return;
     const p = PRODUCTS.find(x => x.sku.toLowerCase() === code.toLowerCase());
     if (!p) {
-      /* Unknown SKU → open quick-register modal instead of plain error */
-      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
-      setQuickAdd({ sku: code });
+      /* Unknown SKU → check the WooCommerce reference catalog. A match prefills
+         the quick-register form (no typing); otherwise open it blank. */
+      const hit = typeof wooCatalogLookup === "function" ? wooCatalogLookup(code) : null;
+      if (typeof playScanErrorBeep === "function" && !hit) playScanErrorBeep();
+      else if (typeof playScanBeep === "function" && hit) playScanBeep();
+      setQuickAdd({ sku: code, prefill: hit });
       setScan("");
       return;
     }
@@ -991,6 +1040,7 @@ function Inbound({ goTo, pushToast }) {
         {quickAdd && (
           <QuickAddInboundModal
             sku={quickAdd.sku}
+            prefill={quickAdd.prefill}
             onClose={() => setQuickAdd(null)}
             onConfirm={(product, qty) => {
               addProductToStore(product);
@@ -2051,7 +2101,7 @@ function Inventory({ pushToast, density, goTo }) {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     const s = stockStatus(p).key;
     if (statusFilter !== "all" && s !== statusFilter) return false;
-    if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()))) return false;
+    if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
 
@@ -2124,10 +2174,10 @@ function Inventory({ pushToast, density, goTo }) {
         </div>
         <div className="row">
           <button className="btn" onClick={() => {
-            const headers = ["SKU","ชื่อสินค้า","หมวดหมู่","คงเหลือ","จองแล้ว","จุดสั่งซื้อ","ตำแหน่ง","ราคาขาย","ต้นทุน","ผู้จัดส่ง","สถานะ"];
+            const headers = ["SKU","ชื่อสินค้า","หมวดหมู่","แบรนด์","คงเหลือ","จองแล้ว","จุดสั่งซื้อ","ตำแหน่ง","ราคาขาย","ต้นทุน","ผู้จัดส่ง","สถานะ"];
             const rows = filtered.map(p => {
               const s = stockStatus(p);
-              return [p.sku, p.name, p.cat, p.qty, p.reserved, p.reorder, p.loc, p.price, p.cost, p.supplier, s.label]
+              return [p.sku, p.name, p.cat, p.brand || "", p.qty, p.reserved, p.reorder, p.loc, p.price, p.cost, p.supplier, s.label]
                 .map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",");
             });
             const csv = "﻿" + [headers.join(","), ...rows].join("\n");
@@ -2405,9 +2455,11 @@ function BulkField({ label, hint, on, onToggle, children }) {
 
 function AddSkuModal({ products, categories, onClose, onAdd }) {
   const suppliers = useMemo(() => [...new Set(products.map(p => p.supplier))], [products]);
+  const brands    = useMemo(() => [...new Set(products.map(p => p.brand))].filter(Boolean), [products]);
   const [f, setF] = useState({
     sku: "", name: "",
     cat: categories[0] || "",
+    brand: "",
     supplier: suppliers[0] || "",
     cost: "", price: "", qty: "", reorder: "50", loc: ""
   });
@@ -2427,6 +2479,7 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
     if (!canSave) return;
     onAdd({
       sku: skuTrim, name: f.name.trim(), cat: f.cat,
+      brand: (f.brand || "").trim(),
       supplier: f.supplier, cost, price,
       qty: Math.round(qty), reorder: Math.round(reorder),
       loc: f.loc.trim().toUpperCase()
@@ -2450,7 +2503,7 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
             <input
               className="input mono"
               value={f.sku}
-              onChange={e => set("sku", e.target.value)}
+              onChange={e => { const v = e.target.value; setF(prev => ({ ...prev, sku: v, brand: prev.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(v) : "") })); }}
               placeholder="เช่น TH-APP-003"
               style={{ fontFamily: "IBM Plex Mono, monospace", textTransform: "uppercase" }}
             />
@@ -2478,6 +2531,13 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
                 {suppliers.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
+          </div>
+
+          <div className="field">
+            <label>แบรนด์</label>
+            <input className="input" value={f.brand} onChange={e => set("brand", e.target.value)}
+              placeholder="เช่น 5.11, PS TACTICAL" list="addsku-brands"/>
+            <datalist id="addsku-brands">{brands.map(b => <option key={b} value={b}/>)}</datalist>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -2554,6 +2614,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
             <Stat label="SKU" value={<span className="mono">{product.sku}</span>}/>
             <Stat label="หมวดหมู่" value={product.cat}/>
             <Stat label="ตำแหน่ง" value={<span className="mono">{product.loc}</span>}/>
+            <Stat label="แบรนด์" value={product.brand || "—"}/>
             <Stat label="ผู้จัดส่ง" value={product.supplier}/>
             <Stat label="ราคาทุน" value={`฿${(product.cost ?? Math.round(product.price * 0.6)).toLocaleString()}`}/>
             <Stat label="ราคาขาย" value={`฿${product.price.toLocaleString()}`}/>
@@ -2712,8 +2773,9 @@ function ProductDrawer({ product, onClose, pushToast }) {
 function ProductEditModal({ product, onClose, onSave }) {
   const cats = useMemo(() => typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(p => p.cat))], []);
   const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))], []);
+  const brands = useMemo(() => [...new Set(PRODUCTS.map(p => p.brand))].filter(Boolean), []);
   const [f, setF] = useState({
-    name: product.name, cat: product.cat, supplier: product.supplier,
+    name: product.name, cat: product.cat, brand: product.brand || "", supplier: product.supplier,
     cost: String(product.cost ?? ""), price: String(product.price ?? ""),
     reorder: String(product.reorder ?? "50"), loc: product.loc
   });
@@ -2726,7 +2788,7 @@ function ProductEditModal({ product, onClose, onSave }) {
   const save = () => {
     if (!canSave) return;
     onSave({
-      name: f.name.trim(), cat: f.cat, supplier: f.supplier,
+      name: f.name.trim(), cat: f.cat, brand: (f.brand || "").trim(), supplier: f.supplier,
       cost, price, reorder: Math.round(reorder), loc: f.loc.trim().toUpperCase()
     });
   };
@@ -2760,6 +2822,12 @@ function ProductEditModal({ product, onClose, onSave }) {
                 {suppliers.map(sp => <option key={sp} value={sp}>{sp}</option>)}
               </select>
             </div>
+          </div>
+          <div className="field">
+            <label>แบรนด์</label>
+            <input className="input" value={f.brand} onChange={e => set("brand", e.target.value)}
+              placeholder="เช่น 5.11, PS TACTICAL" list="editprod-brands"/>
+            <datalist id="editprod-brands">{brands.map(b => <option key={b} value={b}/>)}</datalist>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div className="field">

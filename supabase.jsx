@@ -18,7 +18,7 @@ async function dbLoadProducts() {
 }
 async function dbUpsertProducts(products) {
   if (!products || !products.length) return { ok: true };
-  const rows = products.map(({ sku, name, cat, cost, price, qty, reserved, reorder, loc, supplier }) => ({
+  const rows = products.map(({ sku, name, cat, cost, price, qty, reserved, reorder, loc, supplier, brand }) => ({
     sku, name, cat,
     cost:     Number(cost)     || 0,
     price:    Number(price)    || 0,
@@ -27,6 +27,7 @@ async function dbUpsertProducts(products) {
     reorder:  Number(reorder)  || 0,
     loc:      loc      || '-',
     supplier: supplier || 'ไม่ระบุ',
+    brand:    brand    || '',
     updated_at: new Date().toISOString()
   }));
   // .select() detects an RLS-blocked write (0 rows, no error) — e.g. a viewer
@@ -364,6 +365,7 @@ function setupRealtimeSync() {
       const map = { categories: ['_DB_CATEGORIES', 'ims-categories-change'],
                     locations:  ['_DB_LOCATIONS',  'ims-locations-change'],
                     stock_adj:  ['_DB_STOCK_ADJ',  'ims-stock-adj-change'],
+                    woo_catalog: ['_DB_WOO_CATALOG', 'ims-woo-catalog-change'],
                     order_overrides: ['_DB_ORDER_OVERRIDES', 'ims-orders-change'] };
       const keys = key && map[key] ? [key] : Object.keys(map).filter(k => map[k]);
       for (const k of keys) {
@@ -455,7 +457,7 @@ async function lineBotPreview(command) {
    ═══════════════════════════════════════════ */
 async function dbInit() {
   try {
-    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides] = await Promise.all([
+    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog] = await Promise.all([
       dbLoadProducts(),
       dbLoadOrders(),
       dbLoadBundles(),
@@ -465,7 +467,8 @@ async function dbInit() {
       dbLoadState('categories'),
       dbLoadState('locations'),
       dbLoadState('stock_adj'),
-      dbLoadState('order_overrides')
+      dbLoadState('order_overrides'),
+      dbLoadState('woo_catalog')
     ]);
 
     /* Hydrate global PRODUCTS array (mutated in-place so existing
@@ -485,6 +488,7 @@ async function dbInit() {
     if (Array.isArray(locations))  window._DB_LOCATIONS  = locations;
     if (stockAdj && typeof stockAdj === 'object') window._DB_STOCK_ADJ = stockAdj;
     if (orderOverrides && typeof orderOverrides === 'object') window._DB_ORDER_OVERRIDES = orderOverrides;
+    if (wooCatalog && typeof wooCatalog === 'object') window._DB_WOO_CATALOG = wooCatalog;
 
     /* One-time seed: if the cloud has no copy yet but this device has local
        data, push it up so categories/locations/stock_adj start syncing. */
@@ -603,6 +607,26 @@ async function readProductNameFromImage(file) {
   return { name: String(j.name || '').trim(), code: String(j.code || '').trim() };
 }
 
+// Resolve product images from their web pages (the extract-og-image function
+// fetches each page server-side and returns its og:image). Pass an array of page
+// URLs; returns [{ url, image|null, error? }]. Used to backfill catalog photos for
+// products with no image in the CSV. Needs a PUBLIC store URL — localhost/private
+// hosts are rejected server-side.
+async function resolveWebImages(urls) {
+  const list = (Array.isArray(urls) ? urls : [urls]).filter(u => typeof u === 'string' && u.trim());
+  if (!list.length) return { results: [] };
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) throw new Error('กรุณาเข้าสู่ระบบใหม่');
+  const res = await fetch(SUPABASE_URL + '/functions/v1/extract-og-image', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + session.access_token },
+    body: JSON.stringify({ urls: list }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || !j.success) throw new Error(j.error || ('เกิดข้อผิดพลาด (' + res.status + ')'));
+  return { results: Array.isArray(j.results) ? j.results : [], found: j.found || 0 };
+}
+
 /* ── Full-data backup ── a raw snapshot of every table, for manual export and
    (server-side) the nightly Google Drive backup. RLS-scoped to the caller. */
 const BACKUP_TABLES = ['products', 'orders', 'bundles', 'bundle_items', 'labels', 'store_settings', 'app_state', 'audit_log'];
@@ -634,7 +658,7 @@ async function downloadBackup() {
 }
 
 Object.assign(window, {
-  sb, readProductNameFromImage, buildBackupSnapshot, downloadBackup,
+  sb, readProductNameFromImage, resolveWebImages, buildBackupSnapshot, downloadBackup,
   dbInit, setupRealtimeSync,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,

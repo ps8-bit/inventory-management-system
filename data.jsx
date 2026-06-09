@@ -637,8 +637,12 @@ function upsertWooCatalog(entries) {
       sku:   String(e.sku).trim(),
       name:  e.name ? String(e.name).trim() : "",
       cat:   e.cat ? String(e.cat).trim() : "",
+      brand: e.brand ? String(e.brand).trim() : "",
       price: Number(e.price) || 0,
-      image: e.image ? String(e.image).trim() : ""
+      image: e.image ? String(e.image).trim() : "",
+      // Kept for the future web-page image fallback (build /?p=<id> or use link).
+      id:    e.id ? String(e.id).trim() : "",
+      link:  e.link ? String(e.link).trim() : ""
     };
   });
   saveWooCatalog(m);
@@ -797,7 +801,36 @@ function parseThaiAddrTail(addr) {
   };
 }
 
+/* ── Brand auto-guess from SKU ──
+   Brands usually lead the SKU (e.g. "AFG-HP005-SV-BK" → AFG). We first LEARN:
+   the most common brand among existing products that share the same SKU prefix
+   (so once a brand is tagged for "AFG-…", future "AFG-…" scans auto-fill it).
+   If nothing is learned yet, we fall back to the leading SKU segment itself. */
+function skuBrandPrefix(sku) {
+  const s = String(sku || "").trim().toUpperCase();
+  if (!s) return "";
+  const seg = s.split(/[-_/\s]/)[0];           // part before first separator
+  if (seg && seg.length >= 2 && seg !== s) return seg;
+  const lead = s.match(/^[A-Z]+/);             // no separator → leading letters
+  if (lead && lead[0].length >= 2) return lead[0];
+  return seg || s;
+}
+function guessBrandFromSku(sku) {
+  const pre = skuBrandPrefix(sku);
+  if (!pre) return "";
+  // 1) Learned: most common brand among products sharing this SKU prefix.
+  const counts = {};
+  for (const p of PRODUCTS) {
+    if (p.brand && skuBrandPrefix(p.sku) === pre) counts[p.brand] = (counts[p.brand] || 0) + 1;
+  }
+  const learned = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+  if (learned) return learned;
+  // 2) Fallback: the prefix itself (brand usually leads the SKU).
+  return pre;
+}
+
 Object.assign(window, {
+  skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem,
   loadStockTake, saveStockTake, applyStockCounts,
