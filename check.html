@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ตรวจสอบเวอร์ชัน</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b0b0c;color:#fff;font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
+  .box{text-align:center;padding:24px}
+  .big{font-size:64px;font-weight:800;letter-spacing:1px;color:#5fd28a;line-height:1.1}
+  .lbl{font-size:14px;color:#888;margin-top:8px}
+  .sub{font-size:18px;margin-top:18px;color:#ddd}
+  .ok{margin-top:22px;font-size:15px;color:#9fd;line-height:1.6;max-width:340px}
+</style>
+</head>
+<body>
+  <div class="box">
+    <div class="lbl">เวอร์ชันที่เครื่องคุณได้รับ</div>
+    <div class="big" id="b">20260609r</div>
+    <div class="sub">scanner: html5-qrcode</div>
+    <div class="ok">
+      ถ้าคุณเห็นเลข <b>20260609r</b> สีเขียว =<br>
+      โทรศัพท์เข้าถึง “เวอร์ชันล่าสุด” ได้แล้ว ✅<br>
+      <span style="color:#888">(ถ้าเห็นเลขอื่น/หน้าเก่า = เครื่องยังโหลดของเก่าอยู่)</span>
+    </div>
+    <div id="t" class="lbl" style="margin-top:18px"></div>
+  </div>
+  <script>
+    // Show the moment THIS page loaded — proves it's a live fetch, not a cached snapshot.
+    document.getElementById('t').textContent = 'โหลดเมื่อ: ' + new Date().toLocaleString('th-TH');
+  </script>
+</body>
+</html>
