@@ -114,7 +114,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   onScanRef.current = onScan;
   const [lastScan, setLastScan] = useState(null);
   // Small scan badge — confirms which build is running + live decode count.
-  const dbgRef = useRef({ build: "20260609t", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
+  const dbgRef = useRef({ build: "20260609u", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
   const [, forceDbg] = useState(0);
   useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 600); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
@@ -190,59 +190,12 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
 
     (async () => {
       try {
-        /* ── Primary engine: html5-qrcode — the battle-tested live QR + 1D scanner used
-           by production apps. It owns the camera + full-frame scan region + decoding
-           (native BarcodeDetector when available, else ZXing) and does NOT downscale the
-           frame, which is what broke the old hand-rolled loop. ── */
-        if (typeof Html5Qrcode !== "undefined") {
-          const SF = (typeof Html5QrcodeSupportedFormats !== "undefined") ? Html5QrcodeSupportedFormats : {};
-          const formats = ["QR_CODE","CODE_128","CODE_39","CODE_93","EAN_13","EAN_8","UPC_A","UPC_E","ITF","CODABAR","DATA_MATRIX"]
-            .map(k => SF[k]).filter(v => v !== undefined && v !== null);
-          dbgRef.current.engine = "html5-qrcode";
-          dbgRef.current.bd = ("BarcodeDetector" in window) ? "y" : "n";
-          let h5;
-          try {
-            h5 = new Html5Qrcode("h5qr-live", {
-              formatsToSupport: formats.length ? formats : undefined,
-              verbose: false,
-              experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-            });
-          } catch (e) { handleCamError(e); return; }
-          h5qrRef.current = h5;
-          const onHit = (text) => {
-            if (dead || pausedRef.current || !text) return;
-            dbgRef.current.tries++; dbgRef.current.last = String(text); dbgRef.current.via = "h5";
-            if (continuous) {
-              pausedRef.current = true;
-              try { h5.pause(true); } catch (_) {}
-              try { if (typeof playScanBeep === "function") playScanBeep(); } catch (_) {}
-              setLastScan(text);
-              try { onScanRef.current(text); } catch (_) {}
-            } else {
-              dead = true;
-              try { h5.stop().then(() => { try { h5.clear(); } catch (_) {} }, () => {}); } catch (_) {}
-              onScanRef.current(text);
-            }
-          };
-          // html5-qrcode requires the 1st arg (camera) to have EXACTLY one key; the
-          // resolution goes in config.videoConstraints (passing width/height in the 1st
-          // arg throws "object should have exactly 1 key").
-          const cam = { facingMode: { ideal: "environment" } };
-          const cfg = { fps: 12, qrbox: undefined, disableFlip: false,
-            videoConstraints: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } };
-          h5.start(cam, cfg, onHit, () => {}).then(() => {
-            if (dead) { try { h5.stop().then(() => h5.clear(), () => {}); } catch (_) {} return; }
-            setPhase("ready");
-            try {
-              const caps = (typeof h5.getRunningTrackCapabilities === "function") ? h5.getRunningTrackCapabilities() : {};
-              if (caps && caps.torch) setTorchSupported(true);
-              if (caps && caps.width) dbgRef.current.vid = (caps.width.max || "?") + "x" + (caps.height ? (caps.height.max || "?") : "?");
-            } catch (_) {}
-          }).catch(handleCamError);
-          return;
-        }
-
         /* ── Engine 1: per-frame capture loop ──
+           NOTE: html5-qrcode was tried as the primary engine but it has a well-documented
+           failure to decode 1D barcodes on iOS Safari (mebjas/html5-qrcode #484/#512/#618/
+           #820/#915) — worked on Android, dead on iPhone. So we use the native BarcodeDetector
+           (iOS 17.4+/Android) plus the fixed native-resolution ZXing fallback below, which
+           decode 1D + QR on both platforms. ──
            Uses native BarcodeDetector when present (fast, hardware-accelerated),
            and ALWAYS runs the ZXing rotation fallback below — which is what lets us
            read QR codes and 1D barcodes at any orientation. Critically this loop now
@@ -550,7 +503,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
 
       {/* Build/scan badge — confirms which code is running + live decode state */}
       <div style={{ position:"absolute", top:6, left:6, right:6, zIndex:30, fontFamily:"monospace", fontSize:11, color:"#8f8", background:"rgba(0,0,0,0.6)", padding:"5px 8px", borderRadius:6, lineHeight:1.5, pointerEvents:"none", textAlign:"left" }}>
-        v{dbgRef.current.build} · {dbgRef.current.engine} · สแกนได้ {dbgRef.current.tries} · ล่าสุด: {String(dbgRef.current.last).slice(0,18)}
+        v{dbgRef.current.build} · {dbgRef.current.engine} · {dbgRef.current.vid} · สแกนได้ {dbgRef.current.tries} ({dbgRef.current.via}) · ล่าสุด: {String(dbgRef.current.last).slice(0,16)}
       </div>
 
       {/* Continuous-scan pause overlay — shown after each decode; tap สแกนต่อ to keep going */}
@@ -571,8 +524,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
       {/* Mode A: live viewfinder (HTTPS / localhost only) */}
       {(phase === "init" || phase === "ready") && (
         <div style={{ position:"relative", width:"100%", maxWidth:520, borderRadius:16, overflow:"hidden", background:"#111", minHeight:200 }}>
-          {/* html5-qrcode injects its <video> into this div */}
-          <div id="h5qr-live" style={{ width:"100%", minHeight:200 }}/>
+          <video ref={videoRef} muted playsInline autoPlay style={{ width:"100%", display:"block", borderRadius:16 }}/>
           {phase === "ready" && (
             <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none" }}>
               <div style={{ position:"relative", width:"68%", height:110 }}>
