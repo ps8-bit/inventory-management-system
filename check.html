@@ -3,73 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>อัปเดตเป็นเวอร์ชันล่าสุด</title>
+<title>เปิดเวอร์ชันล่าสุด</title>
 <style>
   html,body{margin:0;height:100%;background:#0b0b0c;color:#fff;font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
-  .box{text-align:center;padding:24px;max-width:380px}
+  .box{text-align:center;padding:24px;max-width:360px}
   .big{font-size:34px;font-weight:800;color:#5fd28a;line-height:1.15}
   .sub{font-size:14px;color:#bbb;margin-top:12px;line-height:1.6}
-  #status{font-size:13px;color:#9fd;margin-top:16px;min-height:38px;line-height:1.5;font-family:monospace;white-space:pre-line}
-  .btn{display:inline-block;margin-top:18px;background:#fff;color:#111;font-size:17px;font-weight:700;padding:14px 26px;border-radius:14px;text-decoration:none;border:none;cursor:pointer}
+  #status{font-size:13px;color:#9fd;margin-top:16px;min-height:20px;font-family:monospace}
+  .btn{display:inline-block;margin-top:20px;background:#fff;color:#111;font-size:18px;font-weight:700;padding:15px 30px;border-radius:14px;text-decoration:none;border:none;cursor:pointer}
   .spin{width:24px;height:24px;border:3px solid rgba(255,255,255,.2);border-top-color:#5fd28a;border-radius:50%;animation:s .8s linear infinite;margin:16px auto 0}
   @keyframes s{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
   <div class="box">
-    <div class="big">อัปเดตเวอร์ชันล่าสุด</div>
-    <div class="sub">กำลังบังคับดาวน์โหลดโค้ดใหม่ทับของเก่าในเครื่อง แล้วเปิดแอปให้อัตโนมัติ</div>
+    <div class="big">เปิดเวอร์ชันล่าสุด</div>
+    <div class="sub">เปิดแอปผ่านที่อยู่ใหม่ที่เครื่องคุณยังไม่เคยเก็บแคช — จึงได้โค้ดใหม่แน่นอน</div>
     <div class="spin" id="spin"></div>
-    <div id="status">เริ่ม…</div>
-    <button class="btn" id="go" style="display:none" onclick="launch()">เปิดแอปเวอร์ชันใหม่</button>
+    <div id="status">กำลังเตรียม…</div>
+    <button class="btn" id="go" style="display:none" onclick="launch()">แตะเพื่อเปิดแอป</button>
   </div>
   <script>
-    var APP = '/Inventory%20Management%20System.html?fresh=';
-    function launch(){ var u = APP + Date.now(); try { window.location.replace(u); } catch(e){ window.location.href = u; } }
+    // Every load uses a brand-new path prefix /u/<timestamp>/ . A Vercel rewrite maps it
+    // back to the real files, but the browser/CDN have NEVER seen this exact path, so they
+    // cannot serve a stale copy — the entire app (html + all .jsx) comes down fresh.
+    function freshUrl(){ return '/u/' + Date.now() + '/Inventory%20Management%20System.html'; }
+    function launch(){ var u = freshUrl(); try { window.location.replace(u); } catch(e){ window.location.href = u; } }
     function st(t){ var s=document.getElementById('status'); if(s) s.textContent=t; }
     (async function(){
-      // 1) Remove any stuck service workers
-      try {
-        if (navigator.serviceWorker) {
-          var regs = await navigator.serviceWorker.getRegistrations();
-          for (var i=0;i<regs.length;i++){ try { await regs[i].unregister(); } catch(e){} }
-        }
-      } catch(e){}
-      // 2) Clear CacheStorage (service-worker caches)
-      try {
-        if (window.caches) { var keys = await caches.keys(); for (var j=0;j<keys.length;j++){ try { await caches.delete(keys[j]); } catch(e){} } }
-      } catch(e){}
-      // 3) Fetch the FRESH html (cache:'reload' bypasses + overwrites the HTTP cache),
-      //    then force-reload every .jsx/.css it references so the browser's HTTP cache
-      //    holds the new code (JS can't clear the HTTP cache, but cache:'reload' replaces it).
-      var newScanner = false, n = 0;
-      try {
-        st('ดาวน์โหลดหน้าแอปใหม่…');
-        var res = await fetch(APP + Date.now(), { cache: 'reload' });
-        var html = await res.text();
-        var doc = new DOMParser().parseFromString(html, 'text/html');
-        var els = doc.querySelectorAll('script[src], link[href]');
-        var urls = [];
-        els.forEach(function(el){
-          var u = el.getAttribute('src') || el.getAttribute('href') || '';
-          if (u && /\.(jsx|css)\b/i.test(u) && u.indexOf('http') !== 0) urls.push(u);
-        });
-        st('บังคับโหลดโค้ดใหม่ ' + urls.length + ' ไฟล์…');
-        for (var k=0;k<urls.length;k++){
-          try {
-            var r = await fetch(urls[k], { cache: 'reload' });
-            n++;
-            if (/screens\.jsx/i.test(urls[k])) {
-              var txt = await r.text();
-              if (/Html5Qrcode|html5-qrcode/.test(txt)) newScanner = true;
-            }
-          } catch(e){}
-        }
-      } catch(e){ st('โหลดบางส่วนไม่สำเร็จ — จะลองเปิดแอปต่อ'); }
-      st('โหลดใหม่ ' + n + ' ไฟล์ ✓' + (newScanner ? '\nยืนยัน: ได้สแกนเนอร์ใหม่ ✅' : '\n(สแกนเนอร์: ตรวจไม่พบ — แต่ลองเปิดดู)') + '\nกำลังเปิดแอป…');
+      try { if (navigator.serviceWorker){ var rs = await navigator.serviceWorker.getRegistrations(); for (var i=0;i<rs.length;i++){ try{ await rs[i].unregister(); }catch(e){} } } } catch(e){}
+      try { if (window.caches){ var ks = await caches.keys(); for (var j=0;j<ks.length;j++){ try{ await caches.delete(ks[j]); }catch(e){} } } } catch(e){}
+      st('พร้อมแล้ว — กำลังเปิดแอป…');
       var b=document.getElementById('go'); if(b) b.style.display='inline-block';
       var sp=document.getElementById('spin'); if(sp) sp.style.display='none';
-      setTimeout(launch, 1200);
+      setTimeout(launch, 700);
     })();
   </script>
 </body>
