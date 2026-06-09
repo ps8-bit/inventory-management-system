@@ -114,7 +114,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   onScanRef.current = onScan;
   const [lastScan, setLastScan] = useState(null);
   // Small scan badge — confirms which build is running + live decode count.
-  const dbgRef = useRef({ build: "20260609v", engine: "init", bd: "?", mfr: "?", vid: "-", frames: 0, tries: 0, last: "-", via: "-" });
+  const dbgRef = useRef({ build: "20260609w", engine: "init", bd: "?", mfr: "?", vid: "-", frames: 0, tries: 0, last: "-", via: "-" });
   const [, forceDbg] = useState(0);
   useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 600); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
@@ -319,8 +319,8 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
             if (!vid || vid.readyState < 2 || vid.paused) return;
             scanBusy = true;
             try {
-              /* 1. BarcodeDetector straight on the <video> element — most reliable path,
-                    avoids a canvas roundtrip that can drop borderline 1D detections. */
+              /* 1. Native BarcodeDetector straight on the <video> — fastest path
+                    (hardware), reads the orientation the OS handles with no canvas work. */
               let value = null;
               if (bd) {
                 try {
@@ -329,21 +329,24 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
                 } catch (_) {}
               }
 
-              /* 2. Per-rotation pass: render the frame at each 90° turn, then try BOTH
-                    ZXing (sync) AND BarcodeDetector on the ROTATED canvas (async). Running
-                    BD on rotated canvases recovers any-orientation 1D + QR even when the
-                    device's native detector is orientation-limited and ZXing is absent. */
-              if (!value && (bd || zCapable)) {
-                for (const deg of [0, 90, 180, 270]) {
-                  const canvas = renderRotated(vid, deg);
-                  value = zxDecode(canvas);
+              /* 2. Native BarcodeDetector on ROTATED frames — still hardware-fast (~25ms),
+                    reads a SIDEWAYS / upside-down barcode while the phone stays upright.
+                    90°/270° (the sideways cases) first since that's the common one. */
+              if (!value && bd) {
+                for (const deg of [90, 270, 180]) {
+                  try {
+                    const h = await bd.detect(renderRotated(vid, deg));
+                    if (h.length) { value = h[0].rawValue; dbgRef.current.via = "bd-" + deg; break; }
+                  } catch (_) {}
+                }
+              }
+
+              /* 3. ZXing fallback on rotated frames — only when the native detector can't
+                    read it at all (older iOS, unusual symbologies). Slower, so it runs last. */
+              if (!value && zCapable) {
+                for (const deg of [0, 90, 270, 180]) {
+                  value = zxDecode(renderRotated(vid, deg));
                   if (value) { dbgRef.current.via = "zx-" + deg; break; }
-                  if (bd) {
-                    try {
-                      const h = await bd.detect(canvas);
-                      if (h.length) { value = h[0].rawValue; dbgRef.current.via = "bd-" + deg; break; }
-                    } catch (_) {}
-                  }
                 }
               }
 
