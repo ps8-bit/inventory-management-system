@@ -113,12 +113,9 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   const onScanRef = useRef(onScan);
   onScanRef.current = onScan;
   const [lastScan, setLastScan] = useState(null);
-  // Temporary on-screen scan diagnostics — reveals, on the user's own device, which
-  // decode engine runs, whether ZXing's reader is present, the video size, and live
-  // decode attempts. (Remove once the device-specific issue is pinned down.)
-  const dbgRef = useRef({ build: "20260609q", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
-  const [, forceDbg] = useState(0);
-  useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 500); return () => clearInterval(t); }, []);
+  // Lightweight scan telemetry (no longer shown on screen) — harmless ref the scan
+  // engines still write to; kept to avoid churn across the decode paths.
+  const dbgRef = useRef({ engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
   const [errMsg,   setErrMsg]  = useState("");
   const [scanning, setScanning] = useState(false);
@@ -547,13 +544,6 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
 
   return (
     <div style={{ position:"fixed", inset:0, zIndex:600, background:"rgba(0,0,0,0.93)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16, padding:16 }}>
-
-      {/* TEMP scan diagnostics — screenshot this while scanning if it fails */}
-      <div style={{ position:"absolute", top:6, left:6, right:6, zIndex:20, fontFamily:"monospace", fontSize:11, color:"#8f8", background:"rgba(0,0,0,0.62)", padding:"5px 8px", borderRadius:6, lineHeight:1.5, pointerEvents:"none", textAlign:"left" }}>
-        build {dbgRef.current.build} · {dbgRef.current.engine} · BD:{dbgRef.current.bd} MFR:{dbgRef.current.mfr}<br/>
-        vid {dbgRef.current.vid} · tries {dbgRef.current.tries} · via {dbgRef.current.via}<br/>
-        last: {String(dbgRef.current.last).slice(0,22)}
-      </div>
 
       {/* Continuous-scan pause overlay — shown after each decode; tap สแกนต่อ to keep going */}
       {continuous && lastScan && (
