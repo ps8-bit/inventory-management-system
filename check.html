@@ -3,31 +3,50 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ตรวจสอบเวอร์ชัน</title>
+<title>อัปเดตเป็นเวอร์ชันล่าสุด</title>
 <style>
   html,body{margin:0;height:100%;background:#0b0b0c;color:#fff;font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
-  .box{text-align:center;padding:24px}
-  .big{font-size:64px;font-weight:800;letter-spacing:1px;color:#5fd28a;line-height:1.1}
-  .lbl{font-size:14px;color:#888;margin-top:8px}
-  .sub{font-size:18px;margin-top:18px;color:#ddd}
-  .ok{margin-top:22px;font-size:15px;color:#9fd;line-height:1.6;max-width:340px}
+  .box{text-align:center;padding:24px;max-width:360px}
+  .big{font-size:40px;font-weight:800;color:#5fd28a;line-height:1.15}
+  .sub{font-size:15px;color:#bbb;margin-top:14px;line-height:1.6}
+  #status{font-size:14px;color:#9fd;margin-top:18px;min-height:20px}
+  .btn{display:inline-block;margin-top:22px;background:#fff;color:#111;font-size:17px;font-weight:700;padding:14px 26px;border-radius:14px;text-decoration:none;border:none;cursor:pointer}
+  .spin{width:26px;height:26px;border:3px solid rgba(255,255,255,.2);border-top-color:#5fd28a;border-radius:50%;animation:s .8s linear infinite;margin:18px auto 0}
+  @keyframes s{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
   <div class="box">
-    <div class="lbl">เวอร์ชันที่เครื่องคุณได้รับ</div>
-    <div class="big" id="b">20260609r</div>
-    <div class="sub">scanner: html5-qrcode</div>
-    <div class="ok">
-      ถ้าคุณเห็นเลข <b>20260609r</b> สีเขียว =<br>
-      โทรศัพท์เข้าถึง “เวอร์ชันล่าสุด” ได้แล้ว ✅<br>
-      <span style="color:#888">(ถ้าเห็นเลขอื่น/หน้าเก่า = เครื่องยังโหลดของเก่าอยู่)</span>
-    </div>
-    <div id="t" class="lbl" style="margin-top:18px"></div>
+    <div class="big">อัปเดต<br>เวอร์ชันล่าสุด</div>
+    <div class="sub">กำลังล้างของเก่าออกจากเครื่อง แล้วเปิดแอปเวอร์ชันใหม่ให้อัตโนมัติ</div>
+    <div class="spin" id="spin"></div>
+    <div id="status">กำลังเตรียม…</div>
+    <button class="btn" id="go" style="display:none" onclick="launch()">เปิดแอปเวอร์ชันใหม่</button>
   </div>
   <script>
-    // Show the moment THIS page loaded — proves it's a live fetch, not a cached snapshot.
-    document.getElementById('t').textContent = 'โหลดเมื่อ: ' + new Date().toLocaleString('th-TH');
+    var APP = '/Inventory%20Management%20System.html?fresh=';
+    function launch(){ try { window.location.replace(APP + Date.now()); } catch(e){ window.location.href = APP + Date.now(); } }
+    function setStatus(t){ var s=document.getElementById('status'); if(s) s.textContent=t; }
+    (async function(){
+      var cleared = { sw:0, cache:0 };
+      try {
+        if (navigator.serviceWorker) {
+          var regs = await navigator.serviceWorker.getRegistrations();
+          for (var i=0;i<regs.length;i++){ try { await regs[i].unregister(); cleared.sw++; } catch(e){} }
+        }
+      } catch(e){}
+      try {
+        if (window.caches) {
+          var keys = await caches.keys();
+          for (var j=0;j<keys.length;j++){ try { await caches.delete(keys[j]); cleared.cache++; } catch(e){} }
+        }
+      } catch(e){}
+      setStatus('ล้างแล้ว ✓ (sw:'+cleared.sw+' cache:'+cleared.cache+') — กำลังเปิดแอป…');
+      // Show a manual button too, in case the auto-redirect is blocked.
+      var b=document.getElementById('go'); if(b) b.style.display='inline-block';
+      var sp=document.getElementById('spin'); if(sp) sp.style.display='none';
+      setTimeout(launch, 800);
+    })();
   </script>
 </body>
 </html>
