@@ -112,6 +112,12 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   const onScanRef = useRef(onScan);
   onScanRef.current = onScan;
   const [lastScan, setLastScan] = useState(null);
+  // Temporary on-screen scan diagnostics — reveals, on the user's own device, which
+  // decode engine runs, whether ZXing's reader is present, the video size, and live
+  // decode attempts. (Remove once the device-specific issue is pinned down.)
+  const dbgRef = useRef({ build: "20260609l", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-" });
+  const [, forceDbg] = useState(0);
+  useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 500); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
   const [errMsg,   setErrMsg]  = useState("");
   const [scanning, setScanning] = useState(false);
@@ -217,6 +223,9 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
             const fmts = FMTS.filter(f => supported.includes(f));
             bd = new BarcodeDetector({ formats: fmts.length ? fmts : FMTS });
           }
+          dbgRef.current.bd = hasDetector ? "y" : "n";
+          dbgRef.current.mfr = (window.ZXing && window.ZXing.MultiFormatReader) ? "y" : "n";
+          dbgRef.current.engine = bd ? "frame+BD" : "frame-ZX";
 
           /* ZXing fallback — runs only on frames where BarcodeDetector finds nothing.
              iOS Safari's BarcodeDetector frequently fails to decode 1D bars (EAN/Code128)
@@ -315,6 +324,9 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
                 }
               }
 
+              dbgRef.current.vid = (vid.videoWidth || 0) + "x" + (vid.videoHeight || 0);
+              dbgRef.current.tries++;
+              if (value) dbgRef.current.last = String(value);
               finish(value);
             } catch (_) {}
             scanBusy = false;
@@ -329,6 +341,8 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
            raw RGBA bytes and almost never decoded. */
         const v = videoRef.current;
         if (!v) return;
+        dbgRef.current.engine = "live-ZX"; dbgRef.current.bd = "n";
+        dbgRef.current.mfr = (window.ZXing && window.ZXing.MultiFormatReader) ? "y" : "n";
         v.setAttribute("playsinline", "true");
         v.setAttribute("webkit-playsinline", "true");
         v.addEventListener("playing", () => { if (!dead) { setupTrack(); setPhase("ready"); } }, { once: true });
@@ -453,6 +467,12 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
 
   return (
     <div style={{ position:"fixed", inset:0, zIndex:600, background:"rgba(0,0,0,0.93)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16, padding:16 }}>
+
+      {/* TEMP scan diagnostics — screenshot this while scanning if it fails */}
+      <div style={{ position:"absolute", top:6, left:6, right:6, zIndex:20, fontFamily:"monospace", fontSize:11, color:"#8f8", background:"rgba(0,0,0,0.62)", padding:"5px 8px", borderRadius:6, lineHeight:1.5, pointerEvents:"none", textAlign:"left" }}>
+        build {dbgRef.current.build} · {dbgRef.current.engine} · BD:{dbgRef.current.bd} MFR:{dbgRef.current.mfr}<br/>
+        vid {dbgRef.current.vid} · tries {dbgRef.current.tries} · last: {String(dbgRef.current.last).slice(0,18)}
+      </div>
 
       {/* Continuous-scan pause overlay — shown after each decode; tap สแกนต่อ to keep going */}
       {continuous && lastScan && (
