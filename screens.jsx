@@ -115,7 +115,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   // Temporary on-screen scan diagnostics — reveals, on the user's own device, which
   // decode engine runs, whether ZXing's reader is present, the video size, and live
   // decode attempts. (Remove once the device-specific issue is pinned down.)
-  const dbgRef = useRef({ build: "20260609m", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
+  const dbgRef = useRef({ build: "20260609n", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
   const [, forceDbg] = useState(0);
   useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 500); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
@@ -250,10 +250,12 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
              read bars at any orientation. The frame is also downscaled (longest side ~1024px)
              so multiple rotations stay fast enough to run every tick. */
           // Draw the current frame rotated by deg into fCanvas; returns the canvas.
+          // Decode at NATIVE resolution — the old 1024px downscale aliased a 1D barcode's
+          // thin bars below ZXing's threshold, so real-camera frames never decoded even
+          // though clean full-size test images did. (Verified: 1920→1024 fails for 2/3/4px
+          // bar widths; native decodes all.)
           const renderRotated = (vid, deg) => {
-            const vw = vid.videoWidth || 640, vh = vid.videoHeight || 480;
-            const scale = Math.min(1, 1024 / Math.max(vw, vh));
-            const sw = Math.round(vw * scale), sh = Math.round(vh * scale);
+            const sw = vid.videoWidth || 640, sh = vid.videoHeight || 480;
             const swap = (deg === 90 || deg === 270);
             const cw = swap ? sh : sw, ch = swap ? sw : sh;
             if (fCanvas.width !== cw)  fCanvas.width  = cw;
