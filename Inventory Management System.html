@@ -19,7 +19,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="styles.css?v=20260609o"/>
+  <link rel="stylesheet" href="styles.css?v=20260609p"/>
   <style>
     /* Print: only labels print, with proper paper sizing */
     @media print {
@@ -51,29 +51,44 @@
   <!-- qrcode-generator: real, scannable QR encoding (exposes global `qrcode`) -->
   <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 
-  <script type="text/babel" src="tweaks-panel.jsx?v=20260609o"></script>
-  <script type="text/babel" src="data.jsx?v=20260609o"></script>
-  <script type="text/babel" src="supabase.jsx?v=20260609o"></script>
-  <script type="text/babel" src="icons.jsx?v=20260609o"></script>
-  <script type="text/babel" src="product-images.jsx?v=20260609o"></script>
-  <script type="text/babel" src="screens.jsx?v=20260609o"></script>
-  <script type="text/babel" src="dashboard.jsx?v=20260609o"></script>
-  <script type="text/babel" src="labels.jsx?v=20260609o"></script>
-  <script type="text/babel" src="settings.jsx?v=20260609o"></script>
-  <script type="text/babel" src="audit.jsx?v=20260609o"></script>
-  <script type="text/babel" src="tracking.jsx?v=20260609o"></script>
-  <script type="text/babel" src="analytics.jsx?v=20260609o"></script>
-  <script type="text/babel" src="handheld.jsx?v=20260609o"></script>
-  <script type="text/babel" src="import.jsx?v=20260609o"></script>
-  <script type="text/babel" src="bundles.jsx?v=20260609o"></script>
-  <script type="text/babel" src="auth.jsx?v=20260609o"></script>
-  <script type="text/babel" src="app.jsx?v=20260609o"></script>
+  <script type="text/babel" src="tweaks-panel.jsx?v=20260609p"></script>
+  <script type="text/babel" src="data.jsx?v=20260609p"></script>
+  <script type="text/babel" src="supabase.jsx?v=20260609p"></script>
+  <script type="text/babel" src="icons.jsx?v=20260609p"></script>
+  <script type="text/babel" src="product-images.jsx?v=20260609p"></script>
+  <script type="text/babel" src="screens.jsx?v=20260609p"></script>
+  <script type="text/babel" src="dashboard.jsx?v=20260609p"></script>
+  <script type="text/babel" src="labels.jsx?v=20260609p"></script>
+  <script type="text/babel" src="settings.jsx?v=20260609p"></script>
+  <script type="text/babel" src="audit.jsx?v=20260609p"></script>
+  <script type="text/babel" src="tracking.jsx?v=20260609p"></script>
+  <script type="text/babel" src="analytics.jsx?v=20260609p"></script>
+  <script type="text/babel" src="handheld.jsx?v=20260609p"></script>
+  <script type="text/babel" src="import.jsx?v=20260609p"></script>
+  <script type="text/babel" src="bundles.jsx?v=20260609p"></script>
+  <script type="text/babel" src="auth.jsx?v=20260609p"></script>
+  <script type="text/babel" src="app.jsx?v=20260609p"></script>
 
   <!-- Register service worker so the app is installable as a standalone PWA -->
   <script>
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", function () {
-        navigator.serviceWorker.register("/sw.js").catch(function (err) {
+        // Was a SW already controlling this page? If so, a later controllerchange is a
+        // genuine UPDATE (not first install) and we reload once to pick up fresh code.
+        var hadController = !!navigator.serviceWorker.controller;
+        var reloaded = false;
+        navigator.serviceWorker.addEventListener("controllerchange", function () {
+          if (reloaded || !hadController) return;
+          reloaded = true;
+          window.location.reload();
+        });
+        navigator.serviceWorker.register("/sw.js").then(function (reg) {
+          try { reg.update(); } catch (e) {}            // check for a new SW now
+          // And re-check whenever the app regains focus (covers installed PWAs).
+          document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "visible") { try { reg.update(); } catch (e) {} }
+          });
+        }).catch(function (err) {
           console.warn("SW registration failed:", err);
         });
       });

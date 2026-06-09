@@ -116,7 +116,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   // Temporary on-screen scan diagnostics — reveals, on the user's own device, which
   // decode engine runs, whether ZXing's reader is present, the video size, and live
   // decode attempts. (Remove once the device-specific issue is pinned down.)
-  const dbgRef = useRef({ build: "20260609o", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
+  const dbgRef = useRef({ build: "20260609p", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
   const [, forceDbg] = useState(0);
   useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 500); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
