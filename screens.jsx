@@ -114,7 +114,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   onScanRef.current = onScan;
   const [lastScan, setLastScan] = useState(null);
   // Small scan badge — confirms which build is running + live decode count.
-  const dbgRef = useRef({ build: "20260609u", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
+  const dbgRef = useRef({ build: "20260609v", engine: "init", bd: "?", mfr: "?", vid: "-", frames: 0, tries: 0, last: "-", via: "-" });
   const [, forceDbg] = useState(0);
   useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 600); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
@@ -258,10 +258,17 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
           // thin bars below ZXing's threshold, so real-camera frames never decoded even
           // though clean full-size test images did. (Verified: 1920→1024 fails for 2/3/4px
           // bar widths; native decodes all.)
+          // Decode the central 84% of the frame (where the user aims) at NATIVE pixel
+          // density — smaller area = each rotation decodes ~2x faster, so all 4 rotations
+          // finish within a frame and the "horizontal" orientation actually gets caught,
+          // while bars stay sharp (no downscale aliasing).
+          const CROP = 0.84;
           const renderRotated = (vid, deg) => {
-            const sw = vid.videoWidth || 640, sh = vid.videoHeight || 480;
+            const vw = vid.videoWidth || 640, vh = vid.videoHeight || 480;
+            const cw0 = Math.round(vw * CROP), ch0 = Math.round(vh * CROP);
+            const sx = Math.round((vw - cw0) / 2), sy = Math.round((vh - ch0) / 2);
             const swap = (deg === 90 || deg === 270);
-            const cw = swap ? sh : sw, ch = swap ? sw : sh;
+            const cw = swap ? ch0 : cw0, ch = swap ? cw0 : ch0;
             if (fCanvas.width !== cw)  fCanvas.width  = cw;
             if (fCanvas.height !== ch) fCanvas.height = ch;
             fCtx.setTransform(1, 0, 0, 1, 0, 0);
@@ -270,26 +277,23 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
             if (deg === 90)       { fCtx.translate(cw, 0);  fCtx.rotate(Math.PI / 2); }
             else if (deg === 180) { fCtx.translate(cw, ch); fCtx.rotate(Math.PI); }
             else if (deg === 270) { fCtx.translate(0, ch);  fCtx.rotate(-Math.PI / 2); }
-            fCtx.drawImage(vid, 0, 0, sw, sh);
+            fCtx.drawImage(vid, sx, sy, cw0, ch0, 0, 0, cw0, ch0);
             fCtx.restore();
             return fCanvas;
           };
           // ZXing decode of a canvas. Fresh reader each attempt (a reused MultiFormatReader
           // gets poisoned after a NotFound); hints via setHints() (decode(bmp, hints) no-ops
-          // in this build). Two binarizers: Hybrid for QR/uneven light, GlobalHistogram for
-          // flat high-contrast 1D labels.
+          // in this build). Single Hybrid binarizer — halves per-rotation cost so all 4
+          // rotations finish in time (GlobalHistogram rarely added a real-world hit and
+          // doubled the time, which was starving the rotation that reads the other axis).
           const zxDecode = (canvas) => {
             if (!zCapable) return null;
-            const lum = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
-            const Binarizers = [ZXing.HybridBinarizer, ZXing.GlobalHistogramBinarizer].filter(Boolean);
-            for (const Bin of Binarizers) {
-              try {
-                const reader = new ZXing.MultiFormatReader();
-                reader.setHints(zHints);
-                return reader.decode(new ZXing.BinaryBitmap(new Bin(lum))).getText();
-              } catch (_) {}
-            }
-            return null;
+            try {
+              const lum = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+              const reader = new ZXing.MultiFormatReader();
+              reader.setHints(zHints);
+              return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
+            } catch (_) { return null; }
           };
 
           setPhase("ready");
@@ -344,13 +348,13 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
               }
 
               dbgRef.current.vid = (vid.videoWidth || 0) + "x" + (vid.videoHeight || 0);
-              dbgRef.current.tries++;
-              if (value) dbgRef.current.last = String(value);
+              dbgRef.current.frames = (dbgRef.current.frames || 0) + 1;
+              if (value) { dbgRef.current.tries++; dbgRef.current.last = String(value); }
               finish(value);
             } catch (_) {}
             scanBusy = false;
           };
-          timerRef.current = setInterval(scan, 300);
+          timerRef.current = setInterval(scan, 140);
           return;
         }
 
@@ -503,7 +507,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
 
       {/* Build/scan badge — confirms which code is running + live decode state */}
       <div style={{ position:"absolute", top:6, left:6, right:6, zIndex:30, fontFamily:"monospace", fontSize:11, color:"#8f8", background:"rgba(0,0,0,0.6)", padding:"5px 8px", borderRadius:6, lineHeight:1.5, pointerEvents:"none", textAlign:"left" }}>
-        v{dbgRef.current.build} · {dbgRef.current.engine} · {dbgRef.current.vid} · สแกนได้ {dbgRef.current.tries} ({dbgRef.current.via}) · ล่าสุด: {String(dbgRef.current.last).slice(0,16)}
+        v{dbgRef.current.build} · {dbgRef.current.engine} · {dbgRef.current.vid} · เฟรม{dbgRef.current.frames||0} ✓{dbgRef.current.tries} ({dbgRef.current.via}) · {String(dbgRef.current.last).slice(0,14)}
       </div>
 
       {/* Continuous-scan pause overlay — shown after each decode; tap สแกนต่อ to keep going */}
