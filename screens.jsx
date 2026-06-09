@@ -105,6 +105,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   const trackRef  = useRef(null);
   const lastRef   = useRef({ code: null, streak: 0 });
   const fileRef   = useRef(null);
+  const h5qrRef   = useRef(null); // html5-qrcode live-scanner instance
   // Continuous mode: after each decode we pause (don't tear down the camera) and
   // show a "สแกนต่อ" overlay, so receiving many items doesn't bounce out of the
   // scanner. pausedRef gates the decode loop; onScanRef keeps the latest handler.
@@ -115,7 +116,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   // Temporary on-screen scan diagnostics — reveals, on the user's own device, which
   // decode engine runs, whether ZXing's reader is present, the video size, and live
   // decode attempts. (Remove once the device-specific issue is pinned down.)
-  const dbgRef = useRef({ build: "20260609n", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
+  const dbgRef = useRef({ build: "20260609o", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
   const [, forceDbg] = useState(0);
   useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 500); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
@@ -191,6 +192,58 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
 
     (async () => {
       try {
+        /* ── Primary engine: html5-qrcode — the battle-tested live QR + 1D scanner used
+           by production apps. It owns the camera + full-frame scan region + decoding
+           (native BarcodeDetector when available, else ZXing) and does NOT downscale the
+           frame, which is what broke the old hand-rolled loop. ── */
+        if (typeof Html5Qrcode !== "undefined") {
+          const SF = (typeof Html5QrcodeSupportedFormats !== "undefined") ? Html5QrcodeSupportedFormats : {};
+          const formats = ["QR_CODE","CODE_128","CODE_39","CODE_93","EAN_13","EAN_8","UPC_A","UPC_E","ITF","CODABAR","DATA_MATRIX"]
+            .map(k => SF[k]).filter(v => v !== undefined && v !== null);
+          dbgRef.current.engine = "html5-qrcode";
+          dbgRef.current.bd = ("BarcodeDetector" in window) ? "y" : "n";
+          let h5;
+          try {
+            h5 = new Html5Qrcode("h5qr-live", {
+              formatsToSupport: formats.length ? formats : undefined,
+              verbose: false,
+              experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+            });
+          } catch (e) { handleCamError(e); return; }
+          h5qrRef.current = h5;
+          const onHit = (text) => {
+            if (dead || pausedRef.current || !text) return;
+            dbgRef.current.tries++; dbgRef.current.last = String(text); dbgRef.current.via = "h5";
+            if (continuous) {
+              pausedRef.current = true;
+              try { h5.pause(true); } catch (_) {}
+              try { if (typeof playScanBeep === "function") playScanBeep(); } catch (_) {}
+              setLastScan(text);
+              try { onScanRef.current(text); } catch (_) {}
+            } else {
+              dead = true;
+              try { h5.stop().then(() => { try { h5.clear(); } catch (_) {} }, () => {}); } catch (_) {}
+              onScanRef.current(text);
+            }
+          };
+          // html5-qrcode requires the 1st arg (camera) to have EXACTLY one key; the
+          // resolution goes in config.videoConstraints (passing width/height in the 1st
+          // arg throws "object should have exactly 1 key").
+          const cam = { facingMode: { ideal: "environment" } };
+          const cfg = { fps: 12, qrbox: undefined, disableFlip: false,
+            videoConstraints: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } };
+          h5.start(cam, cfg, onHit, () => {}).then(() => {
+            if (dead) { try { h5.stop().then(() => h5.clear(), () => {}); } catch (_) {} return; }
+            setPhase("ready");
+            try {
+              const caps = (typeof h5.getRunningTrackCapabilities === "function") ? h5.getRunningTrackCapabilities() : {};
+              if (caps && caps.torch) setTorchSupported(true);
+              if (caps && caps.width) dbgRef.current.vid = (caps.width.max || "?") + "x" + (caps.height ? (caps.height.max || "?") : "?");
+            } catch (_) {}
+          }).catch(handleCamError);
+          return;
+        }
+
         /* ── Engine 1: per-frame capture loop ──
            Uses native BarcodeDetector when present (fast, hardware-accelerated),
            and ALWAYS runs the ZXing rotation fallback below — which is what lets us
@@ -388,23 +441,35 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
       dead = true;
       clearInterval(timerRef.current);
       try { zxReader?.reset(); } catch (_) {}
+      const h5 = h5qrRef.current; h5qrRef.current = null;
+      if (h5) {
+        try { h5.stop().then(() => { try { h5.clear(); } catch (_) {} }, () => { try { h5.clear(); } catch (_) {} }); }
+        catch (_) { try { h5.clear(); } catch (_) {} }
+      }
       try { trackRef.current?.stop?.(); } catch (_) {}
       streamRef.current?.getTracks().forEach(t => t.stop());
     };
   }, []);
 
   const toggleTorch = async () => {
-    const track = trackRef.current;
-    if (!track) return;
+    const h5 = h5qrRef.current;
     const next = !torchOn;
     try {
-      await track.applyConstraints({ advanced: [{ torch: next }] });
+      if (h5 && typeof h5.applyVideoConstraints === "function") {
+        await h5.applyVideoConstraints({ advanced: [{ torch: next }] });
+      } else if (trackRef.current) {
+        await trackRef.current.applyConstraints({ advanced: [{ torch: next }] });
+      } else return;
       setTorchOn(next);
     } catch (_) {}
   };
 
-  // Continuous mode: clear the result + re-arm the decode loop for the next item.
-  const resumeScan = () => { pausedRef.current = false; setLastScan(null); };
+  // Continuous mode: clear the result + resume the html5-qrcode live scan.
+  const resumeScan = () => {
+    pausedRef.current = false;
+    setLastScan(null);
+    try { h5qrRef.current && h5qrRef.current.resume(); } catch (_) {}
+  };
 
   /* Decode a photo File.
      1. BarcodeDetector — native, fast, handles orientation automatically
@@ -508,7 +573,8 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
       {/* Mode A: live viewfinder (HTTPS / localhost only) */}
       {(phase === "init" || phase === "ready") && (
         <div style={{ position:"relative", width:"100%", maxWidth:520, borderRadius:16, overflow:"hidden", background:"#111", minHeight:200 }}>
-          <video ref={videoRef} muted playsInline autoPlay style={{ width:"100%", display:"block", borderRadius:16 }}/>
+          {/* html5-qrcode injects its <video> into this div */}
+          <div id="h5qr-live" style={{ width:"100%", minHeight:200 }}/>
           {phase === "ready" && (
             <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", pointerEvents:"none" }}>
               <div style={{ position:"relative", width:"68%", height:110 }}>
@@ -602,7 +668,11 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
       >✕ ปิดกล้อง</button>
       {/* Hidden mount point required by html5-qrcode's scanFile() fallback */}
       <div id="__h5qr__" style={{ display:"none" }}/>
-      <style>{`@keyframes camScan{0%,100%{top:8%}50%{top:80%}} @keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <style>{`@keyframes camScan{0%,100%{top:8%}50%{top:80%}} @keyframes spin{to{transform:rotate(360deg)}}
+        #h5qr-live{border:none!important}
+        #h5qr-live video{width:100%!important;height:auto!important;display:block!important;border-radius:16px}
+        #h5qr-live img{display:none!important}
+        #h5qr-live::part(*){display:none}`}</style>
     </div>
   );
 }
