@@ -651,6 +651,63 @@ function upsertWooCatalog(entries) {
 function clearWooCatalog() { saveWooCatalog({}); }
 function wooCatalogCount() { return Object.keys(loadWooCatalog()).length; }
 
+// Search products by NAME (or SKU) across BOTH live stock and the WooCommerce
+// reference catalog — powers the "create product" name autocomplete. Returns a
+// deduped, relevance-ranked list of {sku,name,cat,price,brand,image,source,inStock}.
+// source: "stock" (already in inventory) | "catalog" (reference only).
+function searchProductCandidates(query, limit = 12) {
+  const q = String(query == null ? "" : query).trim().toLowerCase();
+  if (!q) return [];
+  const out = [], seen = new Set();
+  const push = (o) => { const k = (o.sku || "").toLowerCase(); if (!k || seen.has(k)) return; seen.add(k); out.push(o); };
+  // 1) Live stock first (these are the real things you already handle).
+  for (const p of PRODUCTS) {
+    if (((p.name || "") + " " + (p.sku || "")).toLowerCase().includes(q)) {
+      push({
+        sku: p.sku, name: p.name, cat: p.cat, price: p.price, brand: p.brand || "",
+        image: (typeof resolveProductImage === "function" ? resolveProductImage(p.sku) : "") || "",
+        source: "stock", inStock: true
+      });
+    }
+  }
+  // 2) WooCommerce reference catalog (may not be stocked yet).
+  const cat = typeof loadWooCatalog === "function" ? loadWooCatalog() : {};
+  for (const key in cat) {
+    const e = cat[key];
+    if (!e) continue;
+    if (((e.name || "") + " " + (e.sku || "")).toLowerCase().includes(q)) {
+      push({
+        sku: e.sku, name: e.name, cat: e.cat, price: e.price, brand: e.brand || "",
+        image: e.image || "", source: "catalog",
+        inStock: PRODUCTS.some(p => (p.sku || "").toLowerCase() === (e.sku || "").toLowerCase())
+      });
+    }
+  }
+  // Rank: name-prefix matches first, then stock before catalog, then shorter name.
+  out.sort((a, b) => {
+    const ap = (a.name || "").toLowerCase().startsWith(q) ? 0 : 1;
+    const bp = (b.name || "").toLowerCase().startsWith(q) ? 0 : 1;
+    if (ap !== bp) return ap - bp;
+    if (a.source !== b.source) return a.source === "stock" ? -1 : 1;
+    return (a.name || "").length - (b.name || "").length;
+  });
+  return out.slice(0, limit);
+}
+
+/* ── In-progress inbound receiving draft ──
+   The scanned-but-not-committed receiving list lives in component state, so
+   leaving the Inbound screen (or a reload) used to lose it. Persist it to
+   localStorage keyed by device so navigating away and back restores the count.
+   Cleared on "ปิดงาน" (commit). Desktop + mobile share the key on one device. */
+const INBOUND_DRAFT_KEY = "ims_inbound_draft";
+function loadInboundDraft() {
+  try { const a = JSON.parse(localStorage.getItem(INBOUND_DRAFT_KEY) || "[]"); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+function saveInboundDraft(list) {
+  try { localStorage.setItem(INBOUND_DRAFT_KEY, JSON.stringify(Array.isArray(list) ? list : [])); } catch (e) {}
+}
+
 /* ── Thai address gazetteer — data-anchored address splitting (no AI) ──
    `thai-address.json` is a list of [tambon, amphoe, province, zip] tuples
    (also used by the screens.jsx autocomplete). We index it once, then anchor
@@ -834,13 +891,14 @@ Object.assign(window, {
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem,
   loadStockTake, saveStockTake, applyStockCounts,
-  loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount,
+  loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, isoToThai,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
   loadOrders, saveOrders,
   loadLocations, saveLocations, addLocation, updateLocation, removeLocation, skusInLocation, canDeleteData,
+  loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,
   bangkokDateStr, workHoursExceptionDate, hasActiveWorkHoursException, workHoursStatusForUser
 });

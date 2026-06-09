@@ -317,7 +317,8 @@ function QuickTile({ icon, label, color, fg, onClick }) {
 /* =============== INBOUND =============== */
 
 function MInbound({ ctx }) {
-  const [received, setReceived] = useStateM([]);
+  // Restore in-progress receiving draft (survives leaving the screen / reload).
+  const [received, setReceived] = useStateM(() => typeof loadInboundDraft === "function" ? loadInboundDraft() : []);
   const [scan, setScan] = useStateM("");
   const [flash, setFlash] = useStateM(null);
   const [camOpen, setCamOpen] = useStateM(false);
@@ -325,6 +326,8 @@ function MInbound({ ctx }) {
   const [closed, setClosed] = useStateM(false);
   const [grQueue, setGRQueue] = useStateM(() => typeof loadGRQueue === "function" ? loadGRQueue() : []);
   const inputRef = useRefM(null);
+  // Persist the receiving draft on every change; clear it once the job is committed.
+  useEffectM(() => { if (typeof saveInboundDraft === "function") saveInboundDraft(closed ? [] : received); }, [received, closed]);
 
   // Active GR = first in-progress or scheduled document in the queue
   const activeGR = grQueue.find(r => r.status !== "received") || grQueue[0] || null;
@@ -468,7 +471,7 @@ function MInbound({ ctx }) {
             </div>
           </div>
         </button>}
-        {camOpen && <CameraScanner onScan={code => { submit(code); setCamOpen(false); }} onClose={() => setCamOpen(false)}/>}
+        {camOpen && <CameraScanner continuous onScan={code => { submit(code); }} onClose={() => setCamOpen(false)}/>}
         {quickAdd && (
           <QuickAddInboundModal
             mobile
@@ -873,17 +876,31 @@ function MInventory({ ctx }) {
 
 /* Mobile Add-SKU bottom sheet (also used for editing when `editing` product is passed) */
 function MAddSku({ categories, products, onClose, onAdd, editing }) {
-  const suppliers = useMemoM(() => [...new Set(products.map(p => p.supplier))], [products]);
+  const suppliers = useMemoM(() => [...new Set(products.map(p => p.supplier))].filter(Boolean), [products]);
   const brands    = useMemoM(() => [...new Set(products.map(p => p.brand))].filter(Boolean), [products]);
   const [f, setF] = useStateM(() => editing ? {
-    sku: editing.sku, name: editing.name, cat: editing.cat, brand: editing.brand || "", supplier: editing.supplier,
+    sku: editing.sku, name: editing.name, cat: editing.cat, brand: editing.brand || "", supplier: editing.supplier || "",
     cost: String(editing.cost ?? ""), price: String(editing.price ?? ""),
     qty: String(editing.qty ?? ""), reorder: String(editing.reorder ?? "50"), loc: editing.loc
   } : {
-    sku: "", name: "", cat: categories[0] || "", brand: "", supplier: suppliers[0] || "",
+    sku: "", name: "", cat: categories[0] || "", brand: "", supplier: "",
     cost: "", price: "", qty: "", reorder: "50", loc: ""
   });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+  const [pickedImage, setPickedImage] = useStateM("");
+  // Picked a stock/catalog match from the name search → auto-fill the rest.
+  const pickCandidate = (c) => {
+    setF(prev => ({
+      ...prev,
+      name:  c.name || prev.name,
+      sku:   c.sku || prev.sku,
+      cat:   c.cat || prev.cat,
+      brand: c.brand || prev.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(c.sku) : ""),
+      price: c.price ? String(c.price) : prev.price,
+      cost:  prev.cost || (c.price ? String(Math.round(c.price * 0.6)) : prev.cost)
+    }));
+    setPickedImage(c.image || "");
+  };
   const skuTrim = f.sku.trim().toUpperCase();
   const dupe = !editing && skuTrim && products.some(p => p.sku.toUpperCase() === skuTrim);
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n >= 0 ? n : null; };
@@ -896,10 +913,14 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
     const catVal = (f.cat || "ทั่วไป").trim();
     // Register a brand-new category typed here so it persists + syncs.
     if (typeof addCategory === "function") { try { addCategory(catVal); } catch (e) {} }
+    // Carry over the picked stock/catalog image so the new product shows it.
+    if (!editing && pickedImage && typeof setProductImage === "function") {
+      try { setProductImage(skuTrim, pickedImage); } catch (e) {}
+    }
     onAdd({
       sku: skuTrim, name: f.name.trim(), cat: catVal,
       brand: (f.brand || "").trim(),
-      supplier: f.supplier || "ไม่ระบุ", cost, price,
+      supplier: (f.supplier || "").trim(), cost, price,
       qty: Math.round(qty), reorder: Math.round(reorder),
       loc: f.loc.trim().toUpperCase()
     });
@@ -928,7 +949,10 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
               <div className="m-section-label" style={{ padding: 0 }}>ชื่อสินค้า *</div>
               {typeof OcrNameButton === "function" && <OcrNameButton mobile onResult={r => set("name", r.name)}/>}
             </div>
-            <input className="m-input" value={f.name} onChange={e => set("name", e.target.value)} placeholder="ชื่อสินค้า"/>
+            {!editing && typeof ProductNameSearchField === "function"
+              ? <ProductNameSearchField mobile value={f.name} onChange={v => set("name", v)} onPick={pickCandidate}
+                  placeholder="พิมพ์ชื่อเพื่อค้นหาจากคลัง/แคตตาล็อก…"/>
+              : <input className="m-input" value={f.name} onChange={e => set("name", e.target.value)} placeholder="ชื่อสินค้า"/>}
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <div>
@@ -964,7 +988,11 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
             </div>
             <div>
               <div className="m-section-label" style={{ padding: "0 2px 4px" }}>จุดสั่งซื้อ</div>
-              <input className="m-input" type="number" min="0" value={f.reorder} onChange={e => set("reorder", e.target.value)}/>
+              <input className="m-input" type="number" min="0" value={f.reorder} onChange={e => set("reorder", e.target.value)}
+                list="m-reorder-presets" placeholder="พิมพ์เอง หรือเลือก"/>
+              <datalist id="m-reorder-presets">
+                {Array.from({ length: 20 }, (_, i) => (i + 1) * 5).map(n => <option key={n} value={n}/>)}
+              </datalist>
             </div>
             <div>
               <div className="m-section-label" style={{ padding: "0 2px 4px" }}>ตำแหน่ง *</div>

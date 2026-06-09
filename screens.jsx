@@ -98,13 +98,20 @@ function MiniWarehouse() {
    A) Live scan  — getUserMedia + BarcodeDetector/ZXing (needs HTTPS or localhost)
    B) Photo mode — <input capture="environment"> works over plain HTTP on LAN
    Pass onScan(rawValue) and onClose(). */
-function CameraScanner({ onScan, onClose }) {
+function CameraScanner({ onScan, onClose, continuous = false }) {
   const videoRef  = useRef(null);
   const streamRef = useRef(null);
   const timerRef  = useRef(null);
   const trackRef  = useRef(null);
   const lastRef   = useRef({ code: null, streak: 0 });
   const fileRef   = useRef(null);
+  // Continuous mode: after each decode we pause (don't tear down the camera) and
+  // show a "สแกนต่อ" overlay, so receiving many items doesn't bounce out of the
+  // scanner. pausedRef gates the decode loop; onScanRef keeps the latest handler.
+  const pausedRef = useRef(false);
+  const onScanRef = useRef(onScan);
+  onScanRef.current = onScan;
+  const [lastScan, setLastScan] = useState(null);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
   const [errMsg,   setErrMsg]  = useState("");
   const [scanning, setScanning] = useState(false);
@@ -253,13 +260,21 @@ function CameraScanner({ onScan, onClose }) {
           let scanBusy = false;
           const finish = (value) => {
             if (!value || dead) return;
+            if (continuous) {
+              // Pause (keep camera live) and surface the result; user taps สแกนต่อ.
+              pausedRef.current = true;
+              try { if (typeof playScanBeep === "function") playScanBeep(); } catch (_) {}
+              setLastScan(value);
+              try { onScanRef.current(value); } catch (_) {}
+              return;
+            }
             dead = true;
             clearInterval(timerRef.current);
             streamRef.current?.getTracks().forEach(t => t.stop());
-            onScan(value);
+            onScanRef.current(value);
           };
           const scan = async () => {
-            if (dead || scanBusy) return;
+            if (dead || scanBusy || pausedRef.current) return;
             const vid = videoRef.current;
             if (!vid || vid.readyState < 2 || vid.paused) return;
             scanBusy = true;
@@ -303,11 +318,17 @@ function CameraScanner({ onScan, onClose }) {
         hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
         zxReader = new ZXing.BrowserMultiFormatReader(hints, 250);
         zxReader.decodeFromConstraints(CONSTRAINTS, v, (result) => {
-          if (result && !dead) {
-            dead = true;
-            try { zxReader.reset(); } catch (_) {}
-            onScan(result.getText());
+          if (!result || dead || pausedRef.current) return;
+          if (continuous) {
+            pausedRef.current = true;
+            try { if (typeof playScanBeep === "function") playScanBeep(); } catch (_) {}
+            setLastScan(result.getText());
+            try { onScanRef.current(result.getText()); } catch (_) {}
+            return;
           }
+          dead = true;
+          try { zxReader.reset(); } catch (_) {}
+          onScanRef.current(result.getText());
         }).catch(handleCamError);
 
       } catch (err) {
@@ -333,6 +354,9 @@ function CameraScanner({ onScan, onClose }) {
       setTorchOn(next);
     } catch (_) {}
   };
+
+  // Continuous mode: clear the result + re-arm the decode loop for the next item.
+  const resumeScan = () => { pausedRef.current = false; setLastScan(null); };
 
   /* Decode a photo File.
      1. BarcodeDetector — native, fast, handles orientation automatically
@@ -410,6 +434,21 @@ function CameraScanner({ onScan, onClose }) {
 
   return (
     <div style={{ position:"fixed", inset:0, zIndex:600, background:"rgba(0,0,0,0.93)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16, padding:16 }}>
+
+      {/* Continuous-scan pause overlay — shown after each decode; tap สแกนต่อ to keep going */}
+      {continuous && lastScan && (
+        <div style={{ position:"absolute", inset:0, zIndex:5, background:"rgba(0,0,0,0.82)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:20, padding:24 }}>
+          <div style={{ width:64, height:64, borderRadius:"50%", background:"rgba(70,200,120,0.18)", border:"2px solid rgba(70,200,120,0.7)", display:"grid", placeItems:"center", color:"#5fd28a", fontSize:30 }}>✓</div>
+          <div style={{ textAlign:"center" }}>
+            <div style={{ color:"rgba(255,255,255,0.55)", fontSize:13, marginBottom:6 }}>สแกนแล้ว — เพิ่มเข้ารายการ</div>
+            <div style={{ color:"#fff", fontSize:22, fontWeight:700, fontFamily:"'IBM Plex Mono', monospace", letterSpacing:"0.04em", wordBreak:"break-all", maxWidth:420 }}>{lastScan}</div>
+          </div>
+          <div style={{ display:"flex", gap:12, width:"100%", maxWidth:420 }}>
+            <button onClick={onClose} style={{ flex:1, padding:"15px 0", borderRadius:14, background:"rgba(255,255,255,0.12)", border:"1px solid rgba(255,255,255,0.25)", color:"#fff", fontSize:16, fontWeight:600, cursor:"pointer" }}>เสร็จสิ้น</button>
+            <button onClick={resumeScan} style={{ flex:2, padding:"15px 0", borderRadius:14, background:"#fff", border:"none", color:"#111", fontSize:16, fontWeight:700, cursor:"pointer", boxShadow:"0 4px 18px rgba(255,255,255,0.25)" }}>📷 สแกนต่อ</button>
+          </div>
+        </div>
+      )}
 
       {/* Mode A: live viewfinder (HTTPS / localhost only) */}
       {(phase === "init" || phase === "ready") && (
@@ -878,7 +917,9 @@ function saveGRQueue(list) {
 }
 
 function Inbound({ goTo, pushToast }) {
-  const [received, setReceived] = useState([]);
+  // Restore any in-progress receiving draft so leaving + returning (or a reload)
+  // doesn't lose scanned-but-not-committed items.
+  const [received, setReceived] = useState(() => typeof loadInboundDraft === "function" ? loadInboundDraft() : []);
   const [scan, setScan] = useState("");
   const [flash, setFlash] = useState(null);
   const [camOpen, setCamOpen] = useState(false);
@@ -902,6 +943,8 @@ function Inbound({ goTo, pushToast }) {
   };
 
   useEffect(() => { inputRef.current?.focus(); }, []);
+  // Persist the receiving draft on every change; clear it once the job is committed.
+  useEffect(() => { if (typeof saveInboundDraft === "function") saveInboundDraft(closed ? [] : received); }, [received, closed]);
 
   const addToReceived = (sku, name, loc, qty) => {
     const t = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
@@ -1036,7 +1079,7 @@ function Inbound({ goTo, pushToast }) {
           </button>
           <button className="btn btn-accent" style={{ margin: 4 }} onClick={() => submitScan()}>บันทึก</button>
         </div>
-        {camOpen && <CameraScanner onScan={code => { submitScan(code); setCamOpen(false); }} onClose={() => setCamOpen(false)}/>}
+        {camOpen && <CameraScanner continuous onScan={code => { submitScan(code); }} onClose={() => setCamOpen(false)}/>}
         {quickAdd && (
           <QuickAddInboundModal
             sku={quickAdd.sku}
@@ -2453,17 +2496,82 @@ function BulkField({ label, hint, on, onToggle, children }) {
   );
 }
 
+/* Product-name input with a live search dropdown over BOTH live stock and the
+   WooCommerce catalog. Picking a result lets the parent auto-fill SKU / price /
+   category / brand / image. Shared by desktop AddSkuModal + mobile MAddSku. */
+function ProductNameSearchField({ value, onChange, onPick, mobile, placeholder, inputRef }) {
+  const [open, setOpen] = useState(false);
+  const blurT = useRef(null);
+  const results = useMemo(
+    () => (typeof searchProductCandidates === "function" ? searchProductCandidates(value, 12) : []),
+    [value]
+  );
+  const show = open && String(value || "").trim().length >= 1 && results.length > 0;
+  return (
+    <div style={{ position: "relative" }}>
+      <input ref={inputRef} className={mobile ? "m-input" : "input"} value={value} autoComplete="off"
+        onChange={e => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => { blurT.current = setTimeout(() => setOpen(false), 150); }}
+        placeholder={placeholder || "พิมพ์ชื่อสินค้าเพื่อค้นหาจากคลังหรือแคตตาล็อก…"}/>
+      {show && (
+        <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 80,
+          background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10,
+          boxShadow: "var(--elev-2, 0 10px 28px rgba(0,0,0,0.22))", maxHeight: 288, overflowY: "auto" }}>
+          {results.map((r, i) => (
+            <div key={r.sku + ":" + i}
+              onMouseDown={e => { e.preventDefault(); clearTimeout(blurT.current); onPick(r); setOpen(false); }}
+              style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 10px", cursor: "pointer",
+                borderTop: i ? "1px solid var(--border)" : "none" }}
+              onMouseEnter={e => e.currentTarget.style.background = "var(--surface-2)"}
+              onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+              {r.image
+                ? <img src={r.image} alt="" loading="lazy" onError={ev => { ev.target.style.visibility = "hidden"; }}
+                    style={{ width: 38, height: 38, borderRadius: 7, objectFit: "cover", background: "#fff", border: "1px solid var(--border)", flexShrink: 0 }}/>
+                : <div style={{ width: 38, height: 38, borderRadius: 7, background: "var(--surface-2)", border: "1px solid var(--border)", flexShrink: 0 }}/>}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name || "—"}</div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {r.sku}{r.brand ? " · " + r.brand : ""}{r.price ? " · ฿" + Number(r.price).toLocaleString() : ""}
+                </div>
+              </div>
+              <span className={"badge " + (r.source === "stock" ? "badge-success" : "badge-neutral")} style={{ flexShrink: 0, fontSize: 10 }}>
+                {r.source === "stock" ? "ในคลัง" : "แคตตาล็อก"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AddSkuModal({ products, categories, onClose, onAdd }) {
-  const suppliers = useMemo(() => [...new Set(products.map(p => p.supplier))], [products]);
+  const suppliers = useMemo(() => [...new Set(products.map(p => p.supplier))].filter(Boolean), [products]);
   const brands    = useMemo(() => [...new Set(products.map(p => p.brand))].filter(Boolean), [products]);
   const [f, setF] = useState({
     sku: "", name: "",
     cat: categories[0] || "",
     brand: "",
-    supplier: suppliers[0] || "",
+    supplier: "",
     cost: "", price: "", qty: "", reorder: "50", loc: ""
   });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
+  const [pickedImage, setPickedImage] = useState("");
+
+  // Picked a stock/catalog match from the name search → auto-fill the rest.
+  const pickCandidate = (c) => {
+    setF(prev => ({
+      ...prev,
+      name:  c.name || prev.name,
+      sku:   c.sku || prev.sku,
+      cat:   c.cat || prev.cat,
+      brand: c.brand || prev.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(c.sku) : ""),
+      price: c.price ? String(c.price) : prev.price,
+      cost:  prev.cost || (c.price ? String(Math.round(c.price * 0.6)) : prev.cost)
+    }));
+    setPickedImage(c.image || "");
+  };
 
   const skuTrim = f.sku.trim().toUpperCase();
   const dupe = skuTrim && products.some(p => p.sku.toUpperCase() === skuTrim);
@@ -2477,6 +2585,10 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
 
   const save = () => {
     if (!canSave) return;
+    // Carry over the picked stock/catalog image so the new product shows it.
+    if (pickedImage && typeof setProductImage === "function") {
+      try { setProductImage(skuTrim, pickedImage); } catch (e) {}
+    }
     onAdd({
       sku: skuTrim, name: f.name.trim(), cat: f.cat,
       brand: (f.brand || "").trim(),
@@ -2515,21 +2627,24 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
               <label>ชื่อสินค้า <span style={{ color: "var(--danger)" }}>*</span></label>
               <OcrNameButton onResult={r => set("name", r.name)}/>
             </div>
-            <input className="input" value={f.name} onChange={e => set("name", e.target.value)} placeholder="เช่น เสื้อยืดคอกลม Cotton 100%"/>
+            <ProductNameSearchField value={f.name} onChange={v => set("name", v)} onPick={pickCandidate}
+              placeholder="พิมพ์ชื่อเพื่อค้นหาจากคลังหรือแคตตาล็อก WooCommerce…"/>
+            <span className="hint" style={{ color: "var(--muted)" }}>พิมพ์ชื่อแล้วเลือกจากคลังหรือแคตตาล็อก เพื่อเติม SKU/ราคา/รูปอัตโนมัติ</span>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div className="field">
               <label>หมวดหมู่</label>
               <select className="input" value={f.cat} onChange={e => set("cat", e.target.value)}>
+                {f.cat && !categories.includes(f.cat) && <option value={f.cat}>{f.cat}</option>}
                 {categories.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
             <div className="field">
               <label>ผู้จัดส่ง</label>
-              <select className="input" value={f.supplier} onChange={e => set("supplier", e.target.value)}>
-                {suppliers.map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
+              <input className="input" value={f.supplier} onChange={e => set("supplier", e.target.value)}
+                placeholder="เว้นว่างได้ หรือเลือกจากที่เคยใช้" list="addsku-suppliers"/>
+              <datalist id="addsku-suppliers">{suppliers.map(s => <option key={s} value={s}/>)}</datalist>
             </div>
           </div>
 
@@ -2563,7 +2678,11 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
             </div>
             <div className="field">
               <label>จุดสั่งซื้อใหม่</label>
-              <input className="input" type="number" min="0" value={f.reorder} onChange={e => set("reorder", e.target.value)} style={{ textAlign: "right" }}/>
+              <input className="input" type="number" min="0" value={f.reorder} onChange={e => set("reorder", e.target.value)}
+                list="reorder-presets" placeholder="พิมพ์เอง หรือเลือก" style={{ textAlign: "right" }}/>
+              <datalist id="reorder-presets">
+                {Array.from({ length: 20 }, (_, i) => (i + 1) * 5).map(n => <option key={n} value={n}/>)}
+              </datalist>
             </div>
             <div className="field">
               <label>ตำแหน่ง <span style={{ color: "var(--danger)" }}>*</span></label>
@@ -2587,6 +2706,29 @@ function ProductDrawer({ product, onClose, pushToast }) {
   const [adjOpen, setAdjOpen] = useState(false);
   const s = stockStatus(product);
   const avail = product.qty - product.reserved;
+
+  // Print a scannable Code 128 barcode label (50×30mm) for this SKU.
+  const printBarcode = () => {
+    const svg = (typeof barcodeSvgMarkup === "function") ? barcodeSvgMarkup(product.sku, { height: 80, moduleWidth: 2 }) : "";
+    const safe = (str) => String(str == null ? "" : str).replace(/[<>&]/g, "");
+    const w = window.open("", "_blank", "width=480,height=320");
+    if (!w) { (pushToast || (() => {}))("เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วลองใหม่"); return; }
+    w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>บาร์โค้ด ${safe(product.sku)}</title>
+      <style>
+        @page { size: 50mm 30mm; margin: 0; }
+        html,body { margin:0; padding:0; }
+        body { font-family:'IBM Plex Mono',monospace; text-align:center; padding:2.5mm 2mm; }
+        .name { font-size:10px; line-height:1.2; max-height:2.4em; overflow:hidden; margin-bottom:1mm; }
+        .bc svg { width:auto; max-width:46mm; height:13mm; display:block; margin:0 auto; }
+        .sku { font-size:13px; font-weight:600; letter-spacing:1px; margin-top:1mm; }
+      </style></head>
+      <body onload="window.focus();window.print();">
+        <div class="name">${safe(product.name)}</div>
+        <div class="bc">${svg}</div>
+        <div class="sku">${safe(product.sku)}</div>
+      </body></html>`);
+    w.document.close();
+  };
   // fake movement history
   const moves = [
     { t: "วันนี้ 09:24", type: "in",  qty: +80, ref: "GR-26051901", who: "สมชาย" },
@@ -2688,7 +2830,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
           <div style={{ marginTop: 18 }}>
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
               <div style={{ fontWeight: 600, fontSize: 13 }}>บาร์โค้ดสินค้า</div>
-              <button className="btn btn-sm"><Icons.Print size={13}/> พิมพ์บาร์โค้ด</button>
+              <button className="btn btn-sm" onClick={printBarcode}><Icons.Print size={13}/> พิมพ์บาร์โค้ด</button>
             </div>
             <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 18px", textAlign: "center" }}>
               <Barcode value={product.sku} height={50}/>
@@ -2847,7 +2989,11 @@ function ProductEditModal({ product, onClose, onSave }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div className="field">
               <label>จุดสั่งซื้อใหม่</label>
-              <input className="input" type="number" min="0" value={f.reorder} onChange={e => set("reorder", e.target.value)} style={{ textAlign: "right" }}/>
+              <input className="input" type="number" min="0" value={f.reorder} onChange={e => set("reorder", e.target.value)}
+                list="reorder-presets" placeholder="พิมพ์เอง หรือเลือก" style={{ textAlign: "right" }}/>
+              <datalist id="reorder-presets">
+                {Array.from({ length: 20 }, (_, i) => (i + 1) * 5).map(n => <option key={n} value={n}/>)}
+              </datalist>
             </div>
             <div className="field">
               <label>ตำแหน่ง <span style={{ color: "var(--danger)" }}>*</span></label>
@@ -4089,4 +4235,4 @@ function StockTake({ pushToast }) {
   );
 }
 
-Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton });
+Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductNameSearchField });

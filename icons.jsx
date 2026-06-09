@@ -47,28 +47,67 @@ const Icons = {
 };
 
 /* Barcode (Code128-ish visual) */
-const Barcode = ({ value = "TH8842919012", height = 48, scale = 1 }) => {
-  const widths = [];
-  let seed = 0;
-  for (let i = 0; i < value.length; i++) seed = (seed * 31 + value.charCodeAt(i)) >>> 0;
-  const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0xffffffff; };
-  const bars = [];
-  let x = 0;
-  // start guard
-  bars.push({ x, w: 1.5*scale, fill: true }); x += 1.5*scale;
-  bars.push({ x, w: 1.5*scale, fill: false }); x += 1.5*scale;
-  for (let i = 0; i < 70; i++) {
-    const w = (rng() < 0.5 ? 1 : rng() < 0.5 ? 2 : 3) * scale;
-    bars.push({ x, w, fill: i % 2 === 0 }); x += w;
+/* ── Real, scannable Code 128 (subset B) ──
+   Standard binary pattern table (index = code value 0–106; '1' = bar module,
+   '0' = space module). Encodes Start-B → data → checksum → Stop, so any phone /
+   scanner reads back the exact SKU. Replaces the old decorative random-bar SVG. */
+const CODE128_PATTERNS = [
+  "11011001100","11001101100","11001100110","10010011000","10010001100","10001001100","10011001000","10011000100","10001100100","11001001000",
+  "11001000100","11000100100","10110011100","10011011100","10011001110","10111001100","10011101100","10011100110","11001110010","11001011100",
+  "11001001110","11011100100","11001110100","11101101110","11101001100","11100101100","11100100110","11101100100","11100110100","11100110010",
+  "11011011000","11011000110","11000110110","10100011000","10001011000","10001000110","10110001000","10001101000","10001100010","11010001000",
+  "11000101000","11000100010","10110111000","10110001110","10001101110","10111011000","10111000110","10001110110","11101110110","11010001110",
+  "11000101110","11011101000","11011100010","11011101110","11101011000","11101000110","11100010110","11101101000","11101100010","11100011010",
+  "11101111010","11001000010","11110001010","10100110000","10100001100","10010110000","10010000110","10000101100","10000100110","10110010000",
+  "10110000100","10011010000","10011000010","10000110100","10000110010","11000010010","11001010000","11110111010","11000010100","10001111010",
+  "10100111100","10010111100","10010011110","10111100100","10011110100","10011110010","11110100100","11110010100","11110010010","11011011110",
+  "11011110110","11110110110","10101111000","10100011110","10001011110","10111101000","10111100010","11110101000","11110100010","10111011110",
+  "10111101110","11101011110","11110101110","11010000100","11010010000","11010011100","1100011101011"
+];
+// Module string for Code 128-B: Start-B(104) + chars + checksum + Stop(106).
+function code128Modules(value) {
+  const s = String(value == null ? "" : value);
+  let sum = 104;                      // Start B
+  const codes = [104];
+  for (let i = 0; i < s.length; i++) {
+    let cc = s.charCodeAt(i);
+    if (cc < 32 || cc > 126) cc = 63; // out-of-range → '?'
+    const v = cc - 32;
+    codes.push(v);
+    sum += v * (i + 1);
   }
-  bars.push({ x, w: 1.5*scale, fill: true }); x += 1.5*scale;
-  bars.push({ x, w: 0.5*scale, fill: false }); x += 0.5*scale;
-  bars.push({ x, w: 1.5*scale, fill: true }); x += 1.5*scale;
+  codes.push(sum % 103);              // checksum
+  codes.push(106);                    // Stop
+  return codes.map(c => CODE128_PATTERNS[c]).join("");
+}
+// Collapse a module string into {x,w} dark-bar runs.
+function code128Bars(mods, moduleWidth, quietModules) {
+  const bars = [];
+  let x = quietModules * moduleWidth, i = 0;
+  while (i < mods.length) {
+    if (mods[i] === "1") {
+      let run = 1; while (mods[i + run] === "1") run++;
+      bars.push({ x, w: run * moduleWidth }); x += run * moduleWidth; i += run;
+    } else { x += moduleWidth; i++; }
+  }
+  return { bars, width: x + quietModules * moduleWidth };
+}
+// Standalone SVG markup for print windows / new tabs (no React).
+function barcodeSvgMarkup(value, opts = {}) {
+  const height = opts.height || 70, mw = opts.moduleWidth || 2, quiet = opts.quiet != null ? opts.quiet : 10;
+  const mods = code128Modules(value);
+  const { bars, width } = code128Bars(mods, mw, quiet);
+  const rects = bars.map(b => `<rect x="${b.x}" y="0" width="${b.w}" height="${height}" fill="#111"/>`).join("");
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges"><rect width="${width}" height="${height}" fill="#fff"/>${rects}</svg>`;
+}
+
+const Barcode = ({ value = "TH8842919012", height = 48, scale = 1 }) => {
+  const mw = 1.6 * scale, quiet = 8;
+  const { bars, width } = code128Bars(code128Modules(value), mw, quiet);
   return (
-    <svg width={x} height={height} viewBox={`0 0 ${x} ${height}`}>
-      {bars.filter(b => b.fill).map((b, i) => (
-        <rect key={i} x={b.x} y="0" width={b.w} height={height} fill="#111"/>
-      ))}
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} shapeRendering="crispEdges" style={{ maxWidth: "100%" }}>
+      <rect width={width} height={height} fill="#fff"/>
+      {bars.map((b, i) => <rect key={i} x={b.x} y="0" width={b.w} height={height} fill="#111"/>)}
     </svg>
   );
 };
