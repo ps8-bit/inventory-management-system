@@ -115,7 +115,7 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
   // Temporary on-screen scan diagnostics — reveals, on the user's own device, which
   // decode engine runs, whether ZXing's reader is present, the video size, and live
   // decode attempts. (Remove once the device-specific issue is pinned down.)
-  const dbgRef = useRef({ build: "20260609l", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-" });
+  const dbgRef = useRef({ build: "20260609m", engine: "init", bd: "?", mfr: "?", vid: "-", tries: 0, last: "-", via: "-" });
   const [, forceDbg] = useState(0);
   useEffect(() => { const t = setInterval(() => forceDbg(n => (n + 1) % 1e6), 500); return () => clearInterval(t); }, []);
   const [phase,    setPhase]   = useState("init"); // init | ready | photo | unsupported
@@ -249,7 +249,8 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
              runs parallel to the scan lines and never decodes. Rotating the frame lets us
              read bars at any orientation. The frame is also downscaled (longest side ~1024px)
              so multiple rotations stay fast enough to run every tick. */
-          const decodeRotated = (vid, deg) => {
+          // Draw the current frame rotated by deg into fCanvas; returns the canvas.
+          const renderRotated = (vid, deg) => {
             const vw = vid.videoWidth || 640, vh = vid.videoHeight || 480;
             const scale = Math.min(1, 1024 / Math.max(vw, vh));
             const sw = Math.round(vw * scale), sh = Math.round(vh * scale);
@@ -265,12 +266,15 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
             else if (deg === 270) { fCtx.translate(0, ch);  fCtx.rotate(-Math.PI / 2); }
             fCtx.drawImage(vid, 0, 0, sw, sh);
             fCtx.restore();
-            const lum = new ZXing.HTMLCanvasElementLuminanceSource(fCanvas);
-            // Fresh reader each attempt: a reused MultiFormatReader gets poisoned after a
-            // NotFound and stops decoding. Hints MUST be applied via setHints() — passing
-            // them as decode(bmp, hints) silently no-ops in this build. Two binarizers
-            // catch different conditions: Hybrid for QR / uneven light, GlobalHistogram
-            // for flat high-contrast 1D labels.
+            return fCanvas;
+          };
+          // ZXing decode of a canvas. Fresh reader each attempt (a reused MultiFormatReader
+          // gets poisoned after a NotFound); hints via setHints() (decode(bmp, hints) no-ops
+          // in this build). Two binarizers: Hybrid for QR/uneven light, GlobalHistogram for
+          // flat high-contrast 1D labels.
+          const zxDecode = (canvas) => {
+            if (!zCapable) return null;
+            const lum = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
             const Binarizers = [ZXing.HybridBinarizer, ZXing.GlobalHistogramBinarizer].filter(Boolean);
             for (const Bin of Binarizers) {
               try {
@@ -311,16 +315,25 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
               if (bd) {
                 try {
                   const hits = await bd.detect(vid);
-                  if (hits.length) value = hits[0].rawValue;
+                  if (hits.length) { value = hits[0].rawValue; dbgRef.current.via = "bd-vid"; }
                 } catch (_) {}
               }
 
-              /* 2. ZXing on the captured frame, tried at every 90° rotation — recovers 1D
-                    barcodes BarcodeDetector missed, regardless of how the bars are turned. */
-              if (!value && zCapable) {
+              /* 2. Per-rotation pass: render the frame at each 90° turn, then try BOTH
+                    ZXing (sync) AND BarcodeDetector on the ROTATED canvas (async). Running
+                    BD on rotated canvases recovers any-orientation 1D + QR even when the
+                    device's native detector is orientation-limited and ZXing is absent. */
+              if (!value && (bd || zCapable)) {
                 for (const deg of [0, 90, 180, 270]) {
-                  value = decodeRotated(vid, deg);
-                  if (value) break;
+                  const canvas = renderRotated(vid, deg);
+                  value = zxDecode(canvas);
+                  if (value) { dbgRef.current.via = "zx-" + deg; break; }
+                  if (bd) {
+                    try {
+                      const h = await bd.detect(canvas);
+                      if (h.length) { value = h[0].rawValue; dbgRef.current.via = "bd-" + deg; break; }
+                    } catch (_) {}
+                  }
                 }
               }
 
@@ -471,7 +484,8 @@ function CameraScanner({ onScan, onClose, continuous = false }) {
       {/* TEMP scan diagnostics — screenshot this while scanning if it fails */}
       <div style={{ position:"absolute", top:6, left:6, right:6, zIndex:20, fontFamily:"monospace", fontSize:11, color:"#8f8", background:"rgba(0,0,0,0.62)", padding:"5px 8px", borderRadius:6, lineHeight:1.5, pointerEvents:"none", textAlign:"left" }}>
         build {dbgRef.current.build} · {dbgRef.current.engine} · BD:{dbgRef.current.bd} MFR:{dbgRef.current.mfr}<br/>
-        vid {dbgRef.current.vid} · tries {dbgRef.current.tries} · last: {String(dbgRef.current.last).slice(0,18)}
+        vid {dbgRef.current.vid} · tries {dbgRef.current.tries} · via {dbgRef.current.via}<br/>
+        last: {String(dbgRef.current.last).slice(0,22)}
       </div>
 
       {/* Continuous-scan pause overlay — shown after each decode; tap สแกนต่อ to keep going */}
