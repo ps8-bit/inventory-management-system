@@ -6,46 +6,70 @@
 <title>อัปเดตเป็นเวอร์ชันล่าสุด</title>
 <style>
   html,body{margin:0;height:100%;background:#0b0b0c;color:#fff;font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
-  .box{text-align:center;padding:24px;max-width:360px}
-  .big{font-size:40px;font-weight:800;color:#5fd28a;line-height:1.15}
-  .sub{font-size:15px;color:#bbb;margin-top:14px;line-height:1.6}
-  #status{font-size:14px;color:#9fd;margin-top:18px;min-height:20px}
-  .btn{display:inline-block;margin-top:22px;background:#fff;color:#111;font-size:17px;font-weight:700;padding:14px 26px;border-radius:14px;text-decoration:none;border:none;cursor:pointer}
-  .spin{width:26px;height:26px;border:3px solid rgba(255,255,255,.2);border-top-color:#5fd28a;border-radius:50%;animation:s .8s linear infinite;margin:18px auto 0}
+  .box{text-align:center;padding:24px;max-width:380px}
+  .big{font-size:34px;font-weight:800;color:#5fd28a;line-height:1.15}
+  .sub{font-size:14px;color:#bbb;margin-top:12px;line-height:1.6}
+  #status{font-size:13px;color:#9fd;margin-top:16px;min-height:38px;line-height:1.5;font-family:monospace;white-space:pre-line}
+  .btn{display:inline-block;margin-top:18px;background:#fff;color:#111;font-size:17px;font-weight:700;padding:14px 26px;border-radius:14px;text-decoration:none;border:none;cursor:pointer}
+  .spin{width:24px;height:24px;border:3px solid rgba(255,255,255,.2);border-top-color:#5fd28a;border-radius:50%;animation:s .8s linear infinite;margin:16px auto 0}
   @keyframes s{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
   <div class="box">
-    <div class="big">อัปเดต<br>เวอร์ชันล่าสุด</div>
-    <div class="sub">กำลังล้างของเก่าออกจากเครื่อง แล้วเปิดแอปเวอร์ชันใหม่ให้อัตโนมัติ</div>
+    <div class="big">อัปเดตเวอร์ชันล่าสุด</div>
+    <div class="sub">กำลังบังคับดาวน์โหลดโค้ดใหม่ทับของเก่าในเครื่อง แล้วเปิดแอปให้อัตโนมัติ</div>
     <div class="spin" id="spin"></div>
-    <div id="status">กำลังเตรียม…</div>
+    <div id="status">เริ่ม…</div>
     <button class="btn" id="go" style="display:none" onclick="launch()">เปิดแอปเวอร์ชันใหม่</button>
   </div>
   <script>
     var APP = '/Inventory%20Management%20System.html?fresh=';
-    function launch(){ try { window.location.replace(APP + Date.now()); } catch(e){ window.location.href = APP + Date.now(); } }
-    function setStatus(t){ var s=document.getElementById('status'); if(s) s.textContent=t; }
+    function launch(){ var u = APP + Date.now(); try { window.location.replace(u); } catch(e){ window.location.href = u; } }
+    function st(t){ var s=document.getElementById('status'); if(s) s.textContent=t; }
     (async function(){
-      var cleared = { sw:0, cache:0 };
+      // 1) Remove any stuck service workers
       try {
         if (navigator.serviceWorker) {
           var regs = await navigator.serviceWorker.getRegistrations();
-          for (var i=0;i<regs.length;i++){ try { await regs[i].unregister(); cleared.sw++; } catch(e){} }
+          for (var i=0;i<regs.length;i++){ try { await regs[i].unregister(); } catch(e){} }
         }
       } catch(e){}
+      // 2) Clear CacheStorage (service-worker caches)
       try {
-        if (window.caches) {
-          var keys = await caches.keys();
-          for (var j=0;j<keys.length;j++){ try { await caches.delete(keys[j]); cleared.cache++; } catch(e){} }
-        }
+        if (window.caches) { var keys = await caches.keys(); for (var j=0;j<keys.length;j++){ try { await caches.delete(keys[j]); } catch(e){} } }
       } catch(e){}
-      setStatus('ล้างแล้ว ✓ (sw:'+cleared.sw+' cache:'+cleared.cache+') — กำลังเปิดแอป…');
-      // Show a manual button too, in case the auto-redirect is blocked.
+      // 3) Fetch the FRESH html (cache:'reload' bypasses + overwrites the HTTP cache),
+      //    then force-reload every .jsx/.css it references so the browser's HTTP cache
+      //    holds the new code (JS can't clear the HTTP cache, but cache:'reload' replaces it).
+      var newScanner = false, n = 0;
+      try {
+        st('ดาวน์โหลดหน้าแอปใหม่…');
+        var res = await fetch(APP + Date.now(), { cache: 'reload' });
+        var html = await res.text();
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var els = doc.querySelectorAll('script[src], link[href]');
+        var urls = [];
+        els.forEach(function(el){
+          var u = el.getAttribute('src') || el.getAttribute('href') || '';
+          if (u && /\.(jsx|css)\b/i.test(u) && u.indexOf('http') !== 0) urls.push(u);
+        });
+        st('บังคับโหลดโค้ดใหม่ ' + urls.length + ' ไฟล์…');
+        for (var k=0;k<urls.length;k++){
+          try {
+            var r = await fetch(urls[k], { cache: 'reload' });
+            n++;
+            if (/screens\.jsx/i.test(urls[k])) {
+              var txt = await r.text();
+              if (/Html5Qrcode|html5-qrcode/.test(txt)) newScanner = true;
+            }
+          } catch(e){}
+        }
+      } catch(e){ st('โหลดบางส่วนไม่สำเร็จ — จะลองเปิดแอปต่อ'); }
+      st('โหลดใหม่ ' + n + ' ไฟล์ ✓' + (newScanner ? '\nยืนยัน: ได้สแกนเนอร์ใหม่ ✅' : '\n(สแกนเนอร์: ตรวจไม่พบ — แต่ลองเปิดดู)') + '\nกำลังเปิดแอป…');
       var b=document.getElementById('go'); if(b) b.style.display='inline-block';
       var sp=document.getElementById('spin'); if(sp) sp.style.display='none';
-      setTimeout(launch, 800);
+      setTimeout(launch, 1200);
     })();
   </script>
 </body>
