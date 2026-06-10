@@ -71,21 +71,30 @@ function Legend({ color, label }) {
 }
 
 function MiniWarehouse() {
-  // small variant of locations
-  const cells = LOCATIONS.slice(0, 40);
+  // Small dashboard variant of the Building→Floor→Position locations.
+  const positions = typeof allPositions === "function" ? allPositions() : [];
+  if (!positions.length) {
+    const tree = typeof loadLocTree === "function" ? loadLocTree() : { buildings: [] };
+    const buildings = tree.buildings || [];
+    return (
+      <div style={{ fontSize: 12, color: "var(--muted)", padding: "6px 2px", lineHeight: 1.7 }}>
+        {buildings.length === 0
+          ? <div>ยังไม่มีอาคาร</div>
+          : buildings.map(b => (
+              <div key={b.name}><strong style={{ color: "var(--fg)" }}>{b.name}</strong> · {(b.floors || []).length} ชั้น</div>
+            ))}
+        <div style={{ marginTop: 6 }}>ยังไม่มีตำแหน่งจัดเก็บ — เพิ่มได้ในหน้า “ตำแหน่งจัดเก็บ”</div>
+      </div>
+    );
+  }
   return (
-    <div className="wh-grid">
-      {cells.map(c => {
-        let cls = "wh-cell";
-        if (c.fill === 0) cls += " empty";
-        else if (c.fill < 30) cls += " fill1";
-        else if (c.fill < 70) cls += " fill2";
-        else if (c.fill < 90) cls += " fill3";
-        else cls += " fill4";
+    <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+      {positions.slice(0, 40).map(p => {
+        const n = typeof skusInLocation === "function" ? skusInLocation(p.code) : 0;
         return (
-          <div key={c.code} className={cls}>
-            <div className="lab">{c.code.split("-").slice(0,2).join("-")}</div>
-            <div className="pct">{c.fill}%</div>
+          <div key={p.code} title={p.code} style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 9px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 11 }}>
+            <span className="mono" style={{ fontWeight: 600 }}>{p.pos}</span>
+            <span style={{ color: "var(--muted)" }}>{n}</span>
           </div>
         );
       })}
@@ -2659,9 +2668,12 @@ function BulkEditModal({ count, products, categories, onClose, onApply }) {
             label="ตำแหน่งจัดเก็บ"
             on={enabled.loc}
             onToggle={() => setEnabled(e => ({ ...e, loc: !e.loc }))}
-            hint="เช่น A-02-03 (จะใช้ค่าเดียวกันทุก SKU)"
+            hint="เลือกตำแหน่ง (จะใช้ค่าเดียวกันทุก SKU)"
           >
-            <input className="input mono" value={vals.loc} onChange={e => setVals(v => ({ ...v, loc: e.target.value }))} placeholder="A-01-01" style={{ fontFamily: "IBM Plex Mono, monospace" }}/>
+            <input className="input" value={vals.loc} onChange={e => setVals(v => ({ ...v, loc: e.target.value }))} list="loc-positions-bulk" placeholder="เลือกตำแหน่ง"/>
+            <datalist id="loc-positions-bulk">
+              {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
+            </datalist>
           </BulkField>
 
           <BulkField
@@ -2805,7 +2817,7 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
   const dupe = skuTrim && products.some(p => p.sku.toUpperCase() === skuTrim);
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n >= 0 ? n : null; };
   const cost = num(f.cost), price = num(f.price), qty = num(f.qty), reorder = num(f.reorder);
-  const canSave = skuTrim && !dupe && f.name.trim() && f.loc.trim() &&
+  const canSave = skuTrim && !dupe && f.name.trim() &&
     cost !== null && price !== null && qty !== null && reorder !== null;
 
   const margin = (cost !== null && price !== null && price > 0)
@@ -2822,7 +2834,7 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
       brand: (f.brand || "").trim(),
       supplier: f.supplier, cost, price,
       qty: Math.round(qty), reorder: Math.round(reorder),
-      loc: f.loc.trim().toUpperCase()
+      loc: f.loc.trim()
     });
   };
 
@@ -2913,8 +2925,11 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
               </datalist>
             </div>
             <div className="field">
-              <label>ตำแหน่ง <span style={{ color: "var(--danger)" }}>*</span></label>
-              <input className="input mono" value={f.loc} onChange={e => set("loc", e.target.value)} placeholder="A-01-01" style={{ fontFamily: "IBM Plex Mono, monospace", textTransform: "uppercase" }}/>
+              <label>ตำแหน่ง</label>
+              <input className="input" value={f.loc} onChange={e => set("loc", e.target.value)} list="loc-positions" placeholder="เลือกตำแหน่ง (ไม่บังคับ)"/>
+              <datalist id="loc-positions">
+                {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
+              </datalist>
             </div>
           </div>
         </div>
@@ -3152,14 +3167,14 @@ function ProductEditModal({ product, onClose, onSave }) {
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n >= 0 ? n : null; };
   const cost = num(f.cost), price = num(f.price), reorder = num(f.reorder);
-  const canSave = f.name.trim() && f.loc.trim() && cost !== null && price !== null && reorder !== null;
+  const canSave = f.name.trim() && cost !== null && price !== null && reorder !== null;
   const margin = (cost !== null && price !== null && price > 0) ? Math.round((1 - cost / price) * 100) : null;
 
   const save = () => {
     if (!canSave) return;
     onSave({
       name: f.name.trim(), cat: f.cat, brand: (f.brand || "").trim(), supplier: f.supplier,
-      cost, price, reorder: Math.round(reorder), loc: f.loc.trim().toUpperCase()
+      cost, price, reorder: Math.round(reorder), loc: f.loc.trim()
     });
   };
 
@@ -3224,8 +3239,11 @@ function ProductEditModal({ product, onClose, onSave }) {
               </datalist>
             </div>
             <div className="field">
-              <label>ตำแหน่ง <span style={{ color: "var(--danger)" }}>*</span></label>
-              <input className="input mono" value={f.loc} onChange={e => set("loc", e.target.value)} style={{ fontFamily: "IBM Plex Mono, monospace", textTransform: "uppercase" }}/>
+              <label>ตำแหน่ง</label>
+              <input className="input" value={f.loc} onChange={e => set("loc", e.target.value)} list="loc-positions-edit" placeholder="เลือกตำแหน่ง (ไม่บังคับ)"/>
+              <datalist id="loc-positions-edit">
+                {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
+              </datalist>
             </div>
           </div>
         </div>
@@ -3312,13 +3330,11 @@ function Stat({ label, value }) {
 
 /* ========= LOCATIONS ========= */
 function Locations() {
-  const [selected, setSelected] = useState(null);
-  const [locs, setLocs] = useState(loadLocations);
-  const [view, setView] = useState("map");
-  const [addOpen, setAddOpen] = useState(false);
+  const [tree, setTree] = useState(loadLocTree);
+  const [selected, setSelected] = useState(null); // { building, floor, pos, code }
 
   useEffect(() => {
-    const h = () => setLocs(loadLocations());
+    const h = () => setTree(loadLocTree());
     window.addEventListener("ims-locations-change", h);
     window.addEventListener("ims-products-change", h);
     return () => {
@@ -3327,219 +3343,121 @@ function Locations() {
     };
   }, []);
 
-  // Live SKU counts from the actual product store
-  const rows = locs.map(l => ({ ...l, skus: skusInLocation(l.code) }));
-  const total = rows.length;
-  const empty = rows.filter(l => l.fill === 0 && l.skus === 0).length;
-  const active = total - empty;
-  const avgFill = total ? Math.round(rows.reduce((s, l) => s + (l.fill || 0), 0) / total) : 0;
-  const nearFull = rows.filter(l => l.fill >= 90).length;
-
-  const cell = (c) => {
-    let cls = "wh-cell";
-    if (c.fill === 0) cls += " empty";
-    else if (c.fill < 30) cls += " fill1";
-    else if (c.fill < 70) cls += " fill2";
-    else if (c.fill < 90) cls += " fill3";
-    else cls += " fill4";
-    return cls;
-  };
-
-  // group by zone
-  const zones = {};
-  rows.forEach(l => { (zones[l.code[0]] ||= []).push(l); });
-
-  // Delete is admin/manager only (matches removeLocation's guard + DELETE RLS).
+  const buildings = tree.buildings || [];
+  const floorCount = buildings.reduce((s, b) => s + (b.floors || []).length, 0);
+  const posCount = buildings.reduce((s, b) => s + (b.floors || []).reduce((t, f) => t + (f.positions || []).length, 0), 0);
   const allowDelete = typeof canDeleteData === "function" ? canDeleteData() : true;
-  const delLoc = (code) => { removeLocation(code); setSelected(null); };
+
+  const askBuilding = () => { const n = prompt("ชื่ออาคาร / โซน (เช่น สภ.)"); if (n && n.trim()) addBuilding(n.trim()); };
+  const askFloor    = (b) => { const n = prompt(`เพิ่มชั้นในอาคาร "${b}" (เช่น ชั้น 3)`); if (n && n.trim()) addFloor(b, n.trim()); };
+  const askPos      = (b, f) => { const n = prompt(`เพิ่มตำแหน่งใน ${b} · ${f} (เช่น A1)`); if (n && n.trim()) addPosition(b, f, n.trim()); };
+  const editB = (b) => { const n = prompt("เปลี่ยนชื่ออาคาร", b); if (n && n.trim() && n.trim() !== b) renameBuilding(b, n.trim()); };
+  const editF = (b, f) => { const n = prompt("เปลี่ยนชื่อชั้น", f); if (n && n.trim() && n.trim() !== f) renameFloor(b, f, n.trim()); };
 
   return (
     <div className="stack" style={{ gap: 24 }}>
       <div className="page-head">
         <div>
           <h1 className="page-title">ตำแหน่งจัดเก็บ</h1>
-          <div className="page-sub">แผนผังคลังสินค้า • {Object.keys(zones).length} โซน · {total} ตำแหน่ง · อัตราการใช้พื้นที่ {avgFill}%</div>
+          <div className="page-sub">{buildings.length} อาคาร · {floorCount} ชั้น · {posCount} ตำแหน่ง</div>
         </div>
         <div className="row">
-          <div className="seg">
-            <button className={view === "map" ? "on" : ""} onClick={() => setView("map")}>แผนผัง</button>
-            <button className={view === "table" ? "on" : ""} onClick={() => setView("table")}>ตาราง</button>
-          </div>
-          <button className="btn" onClick={() => setAddOpen(true)}><Icons.Plus/> ตำแหน่งใหม่</button>
+          <button className="btn btn-primary" onClick={askBuilding}><Icons.Plus/> เพิ่มอาคาร</button>
         </div>
       </div>
 
-      <div className="grid-3">
-        <SmallStat label="ตำแหน่งใช้งาน" value={active + " / " + total} tone="info" hint={empty + " ตำแหน่งว่าง"}/>
-        <SmallStat label="อัตราการใช้พื้นที่" value={avgFill + "%"} tone="success" hint="เฉลี่ยทุกตำแหน่ง"/>
-        <SmallStat label="ตำแหน่งใกล้เต็ม" value={String(nearFull)} tone="warning" hint="≥ 90% — ต้องวางแผนย้ายสต็อก"/>
-      </div>
-
-      {view === "map" ? (
-        <div className="card">
-          <div className="row" style={{ marginBottom: 16, justifyContent: "space-between" }}>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>แผนผังคลัง — ชั้น 1</div>
-              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>คลิกที่ช่องเพื่อดูรายละเอียด</div>
-            </div>
-            <div className="row" style={{ gap: 12, fontSize: 11 }}>
-              <Legend color="var(--surface-2)" label="ว่าง"/>
-              <Legend color="oklch(0.97 0.02 150)" label="< 30%"/>
-              <Legend color="oklch(0.93 0.05 150)" label="30 – 70%"/>
-              <Legend color="oklch(0.87 0.08 75)" label="70 – 90%"/>
-              <Legend color="oklch(0.82 0.12 30)" label="เต็ม"/>
-            </div>
-          </div>
-
-          {total === 0 ? (
-            <div style={{ padding: "40px 16px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-              ยังไม่มีตำแหน่งจัดเก็บ — กด "ตำแหน่งใหม่" เพื่อเพิ่ม
-            </div>
-          ) : (
-            <div className="stack" style={{ gap: 18 }}>
-              {Object.entries(zones).map(([z, cells]) => (
-                <div key={z}>
-                  <div className="row" style={{ marginBottom: 8, gap: 8 }}>
-                    <div style={{ fontWeight: 600, fontSize: 13 }}>โซน {z}</div>
-                    <span className="badge badge-neutral">{cells.length} ตำแหน่ง</span>
-                    <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                      เฉลี่ย {Math.round(cells.reduce((s,c)=>s+c.fill,0)/cells.length)}% เต็ม
-                    </span>
-                  </div>
-                  <div className="wh-grid" style={{ gridTemplateColumns: `repeat(${cells.length}, 1fr)` }}>
-                    {cells.map(c => (
-                      <div key={c.code} className={cell(c)} onClick={() => setSelected(c)} title={c.code}>
-                        <div className="lab">{c.code}</div>
-                        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end" }}>
-                          <span style={{ fontSize: 9, color: c.fill > 89 ? "var(--fg)" : "var(--muted)" }}>{c.skus} SKU</span>
-                          <span className="pct" style={{ color: c.fill > 89 ? "var(--fg)" : "inherit" }}>{c.fill}%</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div style={{ marginTop: 24, padding: 16, background: "var(--surface-2)", borderRadius: 12, fontSize: 12, color: "var(--muted)", display: "flex", gap: 16, alignItems: "center" }}>
-            <Icons.Refresh size={16}/>
-            <span>จำนวน SKU คำนวณจากสินค้าจริงที่อ้างอิงตำแหน่งนี้ — อัปเดตอัตโนมัติเมื่อแก้ไขตำแหน่งของสินค้า</span>
-          </div>
+      {buildings.length === 0 ? (
+        <div className="card" style={{ padding: "44px 16px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+          ยังไม่มีอาคาร — กด “เพิ่มอาคาร” เพื่อเริ่ม
         </div>
-      ) : (
-        <LocationTable rows={rows} onOpen={setSelected} onDelete={allowDelete ? delLoc : null}/>
-      )}
+      ) : buildings.map(b => (
+        <div key={b.name} className="card" style={{ padding: 18 }}>
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+            <div className="row" style={{ gap: 8 }}>
+              <Icons.Map size={16}/>
+              <span style={{ fontWeight: 700, fontSize: 16 }}>{b.name}</span>
+              <span className="badge badge-neutral">{(b.floors || []).length} ชั้น</span>
+            </div>
+            <div className="row" style={{ gap: 4 }}>
+              <button className="btn btn-sm" onClick={() => askFloor(b.name)}><Icons.Plus size={12}/> เพิ่มชั้น</button>
+              <button className="btn btn-ghost btn-icon" title="แก้ชื่ออาคาร" onClick={() => editB(b.name)}><Icons.Edit size={13}/></button>
+              {allowDelete && <button className="btn btn-ghost btn-icon" title="ลบอาคาร" onClick={() => { if (confirm(`ลบอาคาร “${b.name}” และทุกชั้น/ตำแหน่งในนั้น?`)) removeBuilding(b.name); }}><Icons.Trash size={13}/></button>}
+            </div>
+          </div>
 
-      {selected && <LocationDrawer loc={{ ...selected, skus: skusInLocation(selected.code) }} onClose={() => setSelected(null)} onDelete={allowDelete ? delLoc : null}/>}
-      {addOpen && <AddLocationModal existing={rows} onClose={() => setAddOpen(false)} onAdd={(code, fill) => { if (addLocation(code, fill)) { setAddOpen(false); } }}/>}
-    </div>
-  );
-}
-
-/* Table view of storage locations with live SKU counts + delete. */
-function LocationTable({ rows, onOpen, onDelete }) {
-  if (!rows.length) {
-    return <div className="card" style={{ padding: "40px 16px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ยังไม่มีตำแหน่งจัดเก็บ</div>;
-  }
-  return (
-    <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-      <table className="table">
-        <thead><tr>
-          <th>รหัสตำแหน่ง</th><th>โซน</th><th>อัตราการใช้</th><th>SKU</th><th style={{ width: 1 }}/>
-        </tr></thead>
-        <tbody>
-          {rows.map(l => (
-            <tr key={l.code} style={{ cursor: "pointer" }} onClick={() => onOpen(l)}>
-              <td className="mono" style={{ fontWeight: 500 }}>{l.code}</td>
-              <td>โซน {l.code[0]}</td>
-              <td>
+          {(b.floors || []).length === 0 ? (
+            <div style={{ fontSize: 13, color: "var(--muted)", padding: "6px 2px" }}>ยังไม่มีชั้น — กด “เพิ่มชั้น”</div>
+          ) : (b.floors || []).map(f => (
+            <div key={f.name} style={{ borderTop: "1px solid var(--border)", padding: "12px 0" }}>
+              <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
                 <div className="row" style={{ gap: 8 }}>
-                  <div className="prog" style={{ width: 80, height: 6 }}><span style={{ width: l.fill + "%" }}/></div>
-                  <span style={{ fontSize: 12 }}>{l.fill}%</span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>{f.name}</span>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>{(f.positions || []).length} ตำแหน่ง</span>
                 </div>
-              </td>
-              <td className="tnum">{l.skus} รายการ</td>
-              <td>
-                {onDelete && (
-                  <button className="btn btn-ghost btn-icon" title="ลบตำแหน่ง" onClick={(e) => { e.stopPropagation(); if (confirm(`ลบตำแหน่ง ${l.code}?`)) onDelete(l.code); }}>
-                    <Icons.Trash size={13}/>
-                  </button>
-                )}
-              </td>
-            </tr>
+                <div className="row" style={{ gap: 4 }}>
+                  <button className="btn btn-sm" onClick={() => askPos(b.name, f.name)}><Icons.Plus size={12}/> เพิ่มตำแหน่ง</button>
+                  <button className="btn btn-ghost btn-icon" title="แก้ชื่อชั้น" onClick={() => editF(b.name, f.name)}><Icons.Edit size={13}/></button>
+                  {allowDelete && <button className="btn btn-ghost btn-icon" title="ลบชั้น" onClick={() => { if (confirm(`ลบ ${f.name} ในอาคาร ${b.name}?`)) removeFloor(b.name, f.name); }}><Icons.Trash size={13}/></button>}
+                </div>
+              </div>
+              <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+                {(f.positions || []).length === 0 && <span style={{ fontSize: 12, color: "var(--muted)" }}>— ยังไม่มีตำแหน่ง —</span>}
+                {(f.positions || []).map(p => {
+                  const code = locCode(b.name, f.name, p);
+                  const n = skusInLocation(code);
+                  return (
+                    <div key={p} onClick={() => setSelected({ building: b.name, floor: f.name, pos: p, code })}
+                      style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
+                      <span className="mono" style={{ fontWeight: 600, fontSize: 13 }}>{p}</span>
+                      <span className="badge badge-neutral" style={{ fontSize: 10 }}>{n} SKU</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-/* Add a new storage bin. Validates code format + duplicates. */
-function AddLocationModal({ existing, onClose, onAdd }) {
-  const [code, setCode] = useState("");
-  const [fill, setFill] = useState("0");
-  const c = code.trim().toUpperCase();
-  const dupe = existing.some(l => l.code === c);
-  const valid = /^[A-Z]-\d{2}-\d{2}$/.test(c);
-  const canAdd = c && !dupe && valid;
-  return (
-    <>
-      <div className="drawer-backdrop" onClick={onClose}/>
-      <div style={{ position: "fixed", top: "50%", left: "50%", transform: "translate(-50%,-50%)", zIndex: 201, width: "100%", maxWidth: 420, padding: "0 16px" }}>
-        <div className="card" style={{ padding: 22 }}>
-          <div className="row" style={{ justifyContent: "space-between", marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, fontSize: 16 }}>เพิ่มตำแหน่งจัดเก็บ</div>
-            <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X size={16}/></button>
-          </div>
-          <div className="stack" style={{ gap: 14 }}>
-            <div>
-              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>รหัสตำแหน่ง (โซน-แถว-ช่อง)</div>
-              <input className="input mono" value={code} onChange={e => setCode(e.target.value)} placeholder="เช่น A-01-09" style={{ textTransform: "uppercase", width: "100%" }} autoFocus/>
-              {c && !valid && <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 4 }}>รูปแบบต้องเป็น ตัวอักษร-ตัวเลข2หลัก-ตัวเลข2หลัก (เช่น B-02-05)</div>}
-              {dupe && <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 4 }}>รหัสนี้มีอยู่แล้ว</div>}
-            </div>
-            <div>
-              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>อัตราการใช้พื้นที่เริ่มต้น (%)</div>
-              <input className="input" type="number" min="0" max="100" value={fill} onChange={e => setFill(e.target.value)} style={{ width: "100%" }}/>
-            </div>
-          </div>
-          <div className="row" style={{ justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
-            <button className="btn btn-ghost" onClick={onClose}>ยกเลิก</button>
-            <button className="btn btn-primary" disabled={!canAdd} style={!canAdd ? { opacity: 0.5 } : {}} onClick={() => onAdd(c, fill)}>
-              <Icons.Plus size={14}/> เพิ่มตำแหน่ง
-            </button>
-          </div>
         </div>
+      ))}
+
+      <div className="row" style={{ padding: "12px 16px", background: "var(--surface-2)", borderRadius: 12, fontSize: 12, color: "var(--muted)", gap: 12, alignItems: "center" }}>
+        <Icons.Refresh size={16}/>
+        <span>จำนวน SKU ของแต่ละตำแหน่งคำนวณจากสินค้าจริง — กำหนดตำแหน่งให้สินค้าได้ในหน้าสินค้า / รับเข้า</span>
       </div>
-    </>
+
+      {selected && <LocationDrawer loc={selected} onClose={() => setSelected(null)}
+        onDelete={allowDelete ? (() => { if (confirm(`ลบตำแหน่ง ${selected.pos}?`)) { removePosition(selected.building, selected.floor, selected.pos); setSelected(null); } }) : null}/>}
+    </div>
   );
 }
 
 function LocationDrawer({ loc, onClose, onDelete }) {
-  // Products actually stored in this exact bin (falls back to zone if none match)
-  const exact = PRODUCTS.filter(p => (p.loc || "") === loc.code);
-  const items = (exact.length ? exact : PRODUCTS.filter(p => (p.loc || "").startsWith(loc.code[0]))).slice(0, 6);
+  const items = PRODUCTS.filter(p => (p.loc || "") === loc.code);
 
-  // Print a bin label with a real, scannable QR of the location code (icons.jsx).
   const printLabel = () => {
     const svg = (typeof qrSvgMarkup === "function") ? qrSvgMarkup(loc.code, 360) : "";
-    const w = window.open("", "_blank", "width=420,height=420");
+    const w = window.open("", "_blank", "width=420,height=470");
     if (!w) return;
-    w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>ป้าย ${loc.code}</title>
+    w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>ป้าย ${loc.pos}</title>
       <style>
         @page { size: 50mm 50mm; margin: 0; }
         html,body { margin:0; padding:0; }
-        body { font-family:'IBM Plex Mono',monospace; text-align:center; padding:4mm; }
-        .qr { width:32mm; height:32mm; margin:0 auto 2mm; }
+        body { font-family:'IBM Plex Sans Thai','IBM Plex Mono',monospace; text-align:center; padding:4mm; }
+        .qr { width:30mm; height:30mm; margin:0 auto 2mm; }
         .qr svg { width:100%; height:100%; display:block; }
-        .code { font-size:18px; font-weight:600; letter-spacing:1px; }
+        .pos { font-size:20px; font-weight:700; }
+        .path { font-size:11px; color:#555; margin-top:1mm; }
       </style></head>
       <body onload="window.focus();window.print();">
         <div class="qr">${svg}</div>
-        <div class="code">${loc.code}</div>
+        <div class="pos">${loc.pos}</div>
+        <div class="path">${loc.building} · ${loc.floor}</div>
       </body></html>`);
     w.document.close();
+  };
+
+  const renamePos = () => {
+    const n = prompt("เปลี่ยนชื่อตำแหน่ง", loc.pos);
+    if (n && n.trim() && n.trim() !== loc.pos) { renamePosition(loc.building, loc.floor, loc.pos, n.trim()); onClose(); }
   };
 
   return (
@@ -3548,24 +3466,19 @@ function LocationDrawer({ loc, onClose, onDelete }) {
       <div className="drawer">
         <div className="drawer-head">
           <div>
-            <div className="eyebrow">ตำแหน่งจัดเก็บ</div>
-            <div className="mono" style={{ fontSize: 18, fontWeight: 600, marginTop: 2 }}>{loc.code}</div>
+            <div className="eyebrow">{loc.building} · {loc.floor}</div>
+            <div className="mono" style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>{loc.pos}</div>
           </div>
-          <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
+          <div className="row" style={{ gap: 4 }}>
+            <button className="btn btn-ghost btn-icon" title="แก้ชื่อตำแหน่ง" onClick={renamePos}><Icons.Edit size={15}/></button>
+            <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
+          </div>
         </div>
         <div className="drawer-body">
-          <div className="grid-2">
-            <Stat label="อัตราการใช้" value={loc.fill + "%"}/>
-            <Stat label="SKU ในตำแหน่ง" value={loc.skus + " รายการ"}/>
-            <Stat label="โซน" value={"โซน " + loc.code[0]}/>
-            <Stat label="ประเภท" value="ชั้นวาง · พาเลท"/>
-          </div>
-          <div className="prog" style={{ marginTop: 14 }}><span style={{ width: loc.fill + "%" }}/></div>
-
-          <div style={{ marginTop: 22, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>สินค้าในตำแหน่งนี้</div>
+          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>สินค้าในตำแหน่งนี้ ({items.length})</div>
           <div className="stack" style={{ gap: 6 }}>
-            {items.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)", padding: 12, textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8 }}>ตำแหน่งว่าง</div>}
-            {items.map(p => (
+            {items.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)", padding: 12, textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้</div>}
+            {items.slice(0, 40).map(p => (
               <div key={p.sku} className="row" style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8 }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 13 }}>{p.name}</div>
@@ -3580,15 +3493,15 @@ function LocationDrawer({ loc, onClose, onDelete }) {
           <div className="row" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 14, gap: 14 }}>
             <QR value={loc.code} size={88}/>
             <div>
-              <div className="mono" style={{ fontSize: 14, fontWeight: 500 }}>{loc.code}</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>สแกนเพื่อเปิดตำแหน่งบนมือถือ</div>
+              <div className="mono" style={{ fontSize: 13, fontWeight: 500 }}>{loc.pos}</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{loc.building} · {loc.floor}</div>
               <button className="btn btn-sm" style={{ marginTop: 8 }} onClick={printLabel}><Icons.Print size={13}/> พิมพ์ป้าย QR</button>
             </div>
           </div>
         </div>
         <div className="drawer-foot">
           {onDelete && (
-            <button className="btn btn-ghost" style={{ color: "var(--danger)" }} onClick={() => { if (confirm(`ลบตำแหน่ง ${loc.code}?`)) onDelete(loc.code); }}>
+            <button className="btn btn-ghost" style={{ color: "var(--danger)" }} onClick={onDelete}>
               <Icons.Trash size={14}/> ลบตำแหน่ง
             </button>
           )}

@@ -226,57 +226,41 @@ const CARRIERS = [
 
 const ACTIVITY = [];
 
-const LOCATIONS = [
-  // 8 cols × 4 rows; some empty, varying fill
-  // Zones A B C D E
-  // We'll generate a structured map
-];
-// generate
-const _zonePrefix = ["A","A","B","B","C","C","D","E"];
-for (let r = 0; r < 5; r++) {
-  for (let c = 0; c < 8; c++) {
-    const zone = _zonePrefix[c];
-    const code = `${zone}-${String(r+1).padStart(2,"0")}-${String(c+1).padStart(2,"0")}`;
-    // fill bias
-    let fill = Math.floor((Math.sin(r*1.7 + c*0.9 + zone.charCodeAt(0)) + 1) * 50);
-    if (Math.random() < 0.08) fill = 0;
-    if (Math.random() < 0.1) fill = 98;
-    LOCATIONS.push({ code, fill, skus: Math.max(0, Math.floor(fill/14)) });
+// Kept as an empty export for backward-compat (old code referenced LOCATIONS).
+const LOCATIONS = [];
+
+/* ── Storage-location store — hierarchical Building → Floor → Position ──
+   Persisted as ONE cloud blob (app_state "locations") + a localStorage mirror,
+   same pattern as categories. Shape:
+     { buildings: [ { name, floors: [ { name, positions: ["A1", ...] } ] } ] }
+   A product references a position by its full path string in p.loc, e.g.
+   "สภ. › ชั้น 1 › A1". A floor may have zero positions (it still exists). */
+const LOC_SEP = " › ";
+const LOC_SEED = () => ({
+  buildings: [
+    { name: "สภ.",        floors: [ { name: "ชั้น 1", positions: [] }, { name: "ชั้น 2", positions: [] } ] },
+    { name: "ตึกพาณิชย์", floors: [ { name: "ชั้น 1", positions: [] }, { name: "ชั้น 2", positions: [] } ] },
+  ],
+});
+function locCode(building, floor, pos) { return [building, floor, pos].filter(Boolean).join(LOC_SEP); }
+
+function loadLocTree() {
+  let t = null;
+  const cloud = window._DB_LOCATIONS;
+  if (cloud && !Array.isArray(cloud) && Array.isArray(cloud.buildings)) t = cloud;
+  if (!t) {
+    try { const s = localStorage.getItem("ims_loc_tree"); if (s) { const o = JSON.parse(s); if (o && Array.isArray(o.buildings)) t = o; } } catch (e) {}
   }
+  if (!t) t = LOC_SEED();
+  return t;
+}
+function saveLocTree(tree) {
+  try { localStorage.setItem("ims_loc_tree", JSON.stringify(tree)); } catch (e) {}
+  window._DB_LOCATIONS = tree;
+  window.dispatchEvent(new CustomEvent("ims-locations-change"));
+  if (window.dbSaveState) dbSaveState("locations", tree).catch(() => {});
 }
 
-/* ── Storage-location store ──
-   Editable registry of warehouse bins, persisted to localStorage. Seeded from
-   the generated map on first run (migration-free). `skus` is computed live from
-   PRODUCTS by the screens; `fill` is an owner-set utilisation %. */
-function loadLocations() {
-  if (Array.isArray(window._DB_LOCATIONS) && window._DB_LOCATIONS.length) return window._DB_LOCATIONS;
-  try {
-    const s = localStorage.getItem("ims_locations");
-    if (s) { const a = JSON.parse(s); if (Array.isArray(a) && a.length) return a; }
-  } catch (e) {}
-  return LOCATIONS.map(l => ({ code: l.code, fill: l.fill }));
-}
-function saveLocations(locs) {
-  try { localStorage.setItem("ims_locations", JSON.stringify(locs)); } catch (e) {}
-  window._DB_LOCATIONS = locs;
-  window.dispatchEvent(new CustomEvent("ims-locations-change"));
-  if (window.dbSaveState) dbSaveState("locations", locs).catch(() => {});
-}
-function addLocation(code, fill) {
-  const c = String(code || "").trim().toUpperCase();
-  if (!c) return false;
-  const locs = loadLocations();
-  if (locs.some(l => l.code === c)) return false;
-  locs.push({ code: c, fill: Math.max(0, Math.min(100, Number(fill) || 0)) });
-  locs.sort((a, b) => a.code.localeCompare(b.code));
-  saveLocations(locs);
-  return true;
-}
-function updateLocation(code, changes) {
-  const locs = loadLocations().map(l => l.code === code ? { ...l, ...changes } : l);
-  saveLocations(locs);
-}
 /* Capability: hard-delete of records is reserved for admin/manager (mirrors the
    Supabase DELETE RLS policy). Locations live in the app_state blob, where a
    delete is persisted by dbSaveState as an UPDATE of the blob — which staff IS
@@ -286,20 +270,112 @@ function canDeleteData() {
   const role = (window.__currentUser && window.__currentUser.role) || "viewer";
   return role === "admin" || role === "manager";
 }
-function removeLocation(code) {
-  // Authoritative guard for every call site (desktop + mobile): a staff/viewer
-  // delete would otherwise silently persist through the app_state blob update.
-  if (!canDeleteData()) {
-    try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เฉพาะผู้ดูแลระบบหรือผู้จัดการเท่านั้นที่ลบตำแหน่งได้" })); } catch (e) {}
-    return false;
-  }
-  saveLocations(loadLocations().filter(l => l.code !== code));
-  return true;
+function _locDenyToast() {
+  try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เฉพาะผู้ดูแลระบบหรือผู้จัดการเท่านั้นที่ลบตำแหน่งได้" })); } catch (e) {}
 }
-// Live SKU count for a bin = products whose loc matches the code.
+// When a building/floor/position is renamed, re-point any products that used the old code.
+function _renameLocPointer(oldCode, newCode) {
+  let changed = false;
+  PRODUCTS.forEach(p => { if ((p.loc || "") === oldCode) { p.loc = newCode; changed = true; } });
+  if (changed && typeof saveProductStore === "function") saveProductStore();
+}
+
+// Flat list of every position with its building/floor — for dropdowns, the map, counts.
+function allPositions() {
+  const out = [];
+  loadLocTree().buildings.forEach(b => (b.floors || []).forEach(f => (f.positions || []).forEach(p => {
+    out.push({ building: b.name, floor: f.name, pos: p, code: locCode(b.name, f.name, p) });
+  })));
+  return out;
+}
+function allLocationCodes() { return allPositions().map(p => p.code); }
+
+// ── Tree mutators (each persists + broadcasts) ──
+function addBuilding(name) {
+  const n = String(name || "").trim(); if (!n) return false;
+  const t = loadLocTree(); if (t.buildings.some(b => b.name === n)) return false;
+  t.buildings.push({ name: n, floors: [] }); saveLocTree(t); return true;
+}
+function renameBuilding(oldName, newName) {
+  const n = String(newName || "").trim(); if (!n) return false;
+  const t = loadLocTree(); const b = t.buildings.find(x => x.name === oldName); if (!b) return false;
+  if (t.buildings.some(x => x.name === n && x !== b)) return false;
+  (b.floors || []).forEach(f => (f.positions || []).forEach(p => _renameLocPointer(locCode(oldName, f.name, p), locCode(n, f.name, p))));
+  b.name = n; saveLocTree(t); return true;
+}
+function removeBuilding(name) {
+  if (!canDeleteData()) { _locDenyToast(); return false; }
+  const t = loadLocTree(); t.buildings = t.buildings.filter(b => b.name !== name); saveLocTree(t); return true;
+}
+function addFloor(building, name) {
+  const n = String(name || "").trim(); if (!n) return false;
+  const t = loadLocTree(); const b = t.buildings.find(x => x.name === building); if (!b) return false;
+  b.floors = b.floors || []; if (b.floors.some(f => f.name === n)) return false;
+  b.floors.push({ name: n, positions: [] }); saveLocTree(t); return true;
+}
+function renameFloor(building, oldName, newName) {
+  const n = String(newName || "").trim(); if (!n) return false;
+  const t = loadLocTree(); const b = t.buildings.find(x => x.name === building); if (!b) return false;
+  const f = (b.floors || []).find(x => x.name === oldName); if (!f) return false;
+  if (b.floors.some(x => x.name === n && x !== f)) return false;
+  (f.positions || []).forEach(p => _renameLocPointer(locCode(building, oldName, p), locCode(building, n, p)));
+  f.name = n; saveLocTree(t); return true;
+}
+function removeFloor(building, name) {
+  if (!canDeleteData()) { _locDenyToast(); return false; }
+  const t = loadLocTree(); const b = t.buildings.find(x => x.name === building); if (!b) return false;
+  b.floors = (b.floors || []).filter(f => f.name !== name); saveLocTree(t); return true;
+}
+function addPosition(building, floor, name) {
+  const n = String(name || "").trim(); if (!n) return false;
+  const t = loadLocTree(); const b = t.buildings.find(x => x.name === building); if (!b) return false;
+  const f = (b.floors || []).find(x => x.name === floor); if (!f) return false;
+  f.positions = f.positions || []; if (f.positions.includes(n)) return false;
+  f.positions.push(n); saveLocTree(t); return true;
+}
+function renamePosition(building, floor, oldName, newName) {
+  const n = String(newName || "").trim(); if (!n) return false;
+  const t = loadLocTree(); const b = t.buildings.find(x => x.name === building); if (!b) return false;
+  const f = (b.floors || []).find(x => x.name === floor); if (!f) return false;
+  const i = (f.positions || []).indexOf(oldName); if (i < 0) return false;
+  if (f.positions.includes(n)) return false;
+  _renameLocPointer(locCode(building, floor, oldName), locCode(building, floor, n));
+  f.positions[i] = n; saveLocTree(t); return true;
+}
+function removePosition(building, floor, name) {
+  if (!canDeleteData()) { _locDenyToast(); return false; }
+  const t = loadLocTree(); const b = t.buildings.find(x => x.name === building); if (!b) return false;
+  const f = (b.floors || []).find(x => x.name === floor); if (!f) return false;
+  f.positions = (f.positions || []).filter(p => p !== name); saveLocTree(t); return true;
+}
+
+// Live SKU count for a position code = products whose loc matches.
 function skusInLocation(code) {
   return PRODUCTS.filter(p => (p.loc || "") === code).length;
 }
+
+/* One-time migration to the Building→Floor→Position model: drop the old flat demo
+   bins, seed the two real buildings, and clear product locations (the old "A-01-01"
+   codes don't exist in the new tree) so the warehouse starts clean. Runs once per
+   device; the product clear waits until products have actually loaded. */
+(function migrateLocationsV2() {
+  try { localStorage.removeItem("ims_locations"); } catch (e) {}
+  // Seed LOCAL only (no cloud write) so a fresh device shows the two buildings without
+  // clobbering an existing cloud tree — loadLocTree prefers the cloud copy once it loads,
+  // and a real user edit is what first persists the tree to the cloud.
+  try { if (!localStorage.getItem("ims_loc_tree")) localStorage.setItem("ims_loc_tree", JSON.stringify(LOC_SEED())); } catch (e) {}
+  try { if (localStorage.getItem("ims_loc_cleared_v2") === "1") return; } catch (e) { return; }
+  const clearOnce = () => {
+    if (!Array.isArray(PRODUCTS) || !PRODUCTS.length) return;   // wait for products
+    let changed = false;
+    PRODUCTS.forEach(p => { if (p.loc) { p.loc = ""; changed = true; } });
+    try { localStorage.setItem("ims_loc_cleared_v2", "1"); } catch (e) {}
+    window.removeEventListener("ims-products-change", clearOnce);
+    if (changed && typeof saveProductStore === "function") saveProductStore();
+  };
+  window.addEventListener("ims-products-change", clearOnce);
+  clearOnce();
+})();
 
 /* Sales channels — used for outbound deduction + per-channel stock tracking */
 const CHANNEL_LIST = [
@@ -694,6 +770,102 @@ function searchProductCandidates(query, limit = 12) {
   return out.slice(0, limit);
 }
 
+/* ── Near-duplicate SKU detection (scan funnel) ───────────────────────────
+   When a scanned code matches NO product/catalog SKU *exactly*, find SKUs that
+   are *almost* the same so the operator reuses the existing item instead of
+   forking a duplicate. Catches the common real cases:
+     • a brand prefix/suffix added or dropped — VE-75-ACC-05-BLK vs WST-VE-75-ACC-05-BLK
+     • different separators / spacing — VE_75_ACC_05_BLK, "VE 75 ACC 05 BLK"
+     • a 1–2 char OCR/typo — ...ACC-O5... (letter O) vs ...ACC-05... (zero)
+   Tuned for PRECISION (no alarm fatigue): a different colour/size variant is a
+   legitimately new SKU, NOT a duplicate, so it is intentionally NOT flagged.
+   Searches live stock AND the Woo catalog; ranks stock first (a split stock
+   item is the worst duplicate). Returns [] when nothing is convincingly close. */
+function _skuNorm(s) { return String(s == null ? "" : s).toLowerCase().replace(/[\s\-_/.]+/g, ""); }
+
+// Visually-confusable character buckets (scanner / OCR / manual-entry slips).
+// Two chars are interchangeable iff they share a bucket. Crucially, a digit is
+// NOT confusable with a *different* digit — so 05 vs 03 (different accessories)
+// and 05 vs 15 (different variant) stay DISTINCT, while O↔0 / S↔5 / I↔1 (a
+// look-alike mis-scan of the SAME product) are caught. Strings are already
+// lowercased by _skuNorm, so we map lowercase letters to their digit twin.
+const _SKU_CONFUSE = (() => {
+  const m = {};
+  ["0oq", "1il", "5s", "8b", "2z", "6g"].forEach(g => { for (const ch of g) m[ch] = g[0]; });
+  return m;
+})();
+function _skuCanonChar(ch) { return _SKU_CONFUSE[ch] || ch; }
+
+// Similarity of two ALREADY-normalized SKUs. { score: 0 } = not a likely dup.
+function _skuSimilarity(codeNorm, candNorm) {
+  if (!codeNorm || !candNorm) return { score: 0, reason: "" };
+  if (codeNorm === candNorm) return { score: 1, reason: "same" };   // differ only by separators/case
+  const short = codeNorm.length <= candNorm.length ? codeNorm : candNorm;
+  const long  = short === codeNorm ? candNorm : codeNorm;
+  // Containment → a brand prefix/suffix was added or dropped (the common case).
+  const at = long.indexOf(short);
+  if (short.length >= 4 && at !== -1) {
+    const ratio = short.length / long.length;            // how much of the longer SKU is shared
+    if (ratio >= 0.6) {
+      const clean = at === 0 || at + short.length === long.length;  // shared part is a clean prefix/suffix
+      return { score: 0.9 + (clean ? 0.04 : 0) - (1 - ratio) * 0.1, reason: "affix" };
+    }
+  }
+  // Look-alike typo → SAME length, every differing position is a confusable
+  // pair, and only a few positions differ. (Different length or a real digit
+  // swap falls through to "not a duplicate" — a deliberately tight net.)
+  if (codeNorm.length === candNorm.length && codeNorm.length >= 4) {
+    let diff = 0, ok = true;
+    for (let i = 0; i < codeNorm.length; i++) {
+      if (codeNorm[i] === candNorm[i]) continue;
+      diff++;
+      if (_skuCanonChar(codeNorm[i]) !== _skuCanonChar(candNorm[i])) { ok = false; break; }
+    }
+    if (ok && diff > 0 && diff <= Math.max(1, Math.floor(codeNorm.length * 0.25))) {
+      return { score: 0.84 - (diff - 1) * 0.06, reason: "typo" };
+    }
+  }
+  return { score: 0, reason: "" };
+}
+
+// Returns ranked near-matches: [{ sku,name,cat,brand,price,image,source,inStock,score,reason }].
+// source: "stock" (live inventory) | "catalog" (Woo reference). Empty when none are close.
+function findSimilarSkus(code, limit = 6) {
+  const codeNorm = _skuNorm(code);
+  if (codeNorm.length < 4) return [];               // too short to judge confidently
+  const codeLower = String(code == null ? "" : code).trim().toLowerCase();
+  const out = [], seen = new Set();
+  const consider = (sku, o, source, inStock) => {
+    const k = String(sku || "").toLowerCase();
+    if (!k || k === codeLower || seen.has(k)) return;  // skip the exact code + already-listed SKUs
+    const sim = _skuSimilarity(codeNorm, _skuNorm(sku));
+    if (sim.score <= 0) return;
+    seen.add(k);
+    out.push({
+      sku, name: o.name || "", cat: o.cat || "", brand: o.brand || "",
+      price: o.price || 0, image: o.image || "",
+      source, inStock, score: sim.score, reason: sim.reason,
+    });
+  };
+  // 1) Live stock first — a split stock item is the worst kind of duplicate.
+  for (const p of PRODUCTS) {
+    consider(p.sku, {
+      name: p.name, cat: p.cat, brand: p.brand, price: p.price,
+      image: (typeof resolveProductImage === "function" ? resolveProductImage(p.sku) : ""),
+    }, "stock", true);
+  }
+  // 2) Woo reference catalog (stock entries already seen are skipped via `seen`).
+  const cat = typeof loadWooCatalog === "function" ? loadWooCatalog() : {};
+  for (const key in cat) {
+    const e = cat[key];
+    if (!e) continue;
+    const inStock = PRODUCTS.some(p => (p.sku || "").toLowerCase() === (e.sku || "").toLowerCase());
+    consider(e.sku, e, "catalog", inStock);
+  }
+  out.sort((a, b) => (a.source !== b.source) ? (a.source === "stock" ? -1 : 1) : (b.score - a.score));
+  return out.slice(0, limit);
+}
+
 /* ── In-progress inbound receiving draft ──
    The scanned-but-not-committed receiving list lives in component state, so
    leaving the Inbound screen (or a reload) used to lose it. Persist it to
@@ -891,13 +1063,15 @@ Object.assign(window, {
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem,
   loadStockTake, saveStockTake, applyStockCounts,
-  loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates,
+  loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, isoToThai,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
   loadOrders, saveOrders,
-  loadLocations, saveLocations, addLocation, updateLocation, removeLocation, skusInLocation, canDeleteData,
+  loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData,
+  addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
+  addPosition, renamePosition, removePosition,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,
   bangkokDateStr, workHoursExceptionDate, hasActiveWorkHoursException, workHoursStatusForUser

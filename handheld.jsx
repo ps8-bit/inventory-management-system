@@ -323,6 +323,7 @@ function MInbound({ ctx }) {
   const [flash, setFlash] = useStateM(null);
   const [camOpen, setCamOpen] = useStateM(false);
   const [quickAdd, setQuickAdd] = useStateM(null); // null | { sku }
+  const [similar, setSimilar] = useStateM(null); // null | { code, candidates } — near-duplicate prompt
   const [closed, setClosed] = useStateM(false);
   const [grQueue, setGRQueue] = useStateM(() => typeof loadGRQueue === "function" ? loadGRQueue() : []);
   const inputRef = useRefM(null);
@@ -354,15 +355,28 @@ function MInbound({ ctx }) {
     const p = PRODUCTS.find(x => x.sku.toLowerCase() === code.toLowerCase());
     setScan("");
     if (!p) {
-      // Unknown SKU → look it up in the WooCommerce catalog; a match prefills the form.
+      // Unknown SKU → exact WooCommerce catalog match prefills the form.
       const hit = typeof wooCatalogLookup === "function" ? wooCatalogLookup(code) : null;
-      if (hit) { if (typeof playScanBeep === "function") playScanBeep(); }
-      else if (typeof playScanErrorBeep === "function") playScanErrorBeep();
-      setQuickAdd({ sku: code, prefill: hit });
+      if (hit) { if (typeof playScanBeep === "function") playScanBeep(); setQuickAdd({ sku: code, prefill: hit }); return; }
+      // No exact match → warn on a near-duplicate (brand prefix/typo/separators)
+      // so we reuse the existing item instead of forking a duplicate.
+      const near = typeof findSimilarSkus === "function" ? findSimilarSkus(code) : [];
+      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      if (near.length) setSimilar({ code, candidates: near });
+      else setQuickAdd({ sku: code });
       return;
     }
     if (typeof playScanBeep === "function") playScanBeep();
     addReceived(p, 1);
+  };
+
+  // Near-duplicate prompt → reuse an existing item: receive a stocked SKU now,
+  // or open the prefilled quick-add for a catalog-only SKU.
+  const useExistingNear = (cand) => {
+    setSimilar(null);
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === cand.sku.toLowerCase());
+    if (p) { if (typeof playScanBeep === "function") playScanBeep(); addReceived(p, 1); }
+    else setQuickAdd({ sku: cand.sku, prefill: cand });
   };
 
   const closeGR = () => {
@@ -472,6 +486,16 @@ function MInbound({ ctx }) {
           </div>
         </button>}
         {camOpen && <CameraScanner continuous onScan={code => { submit(code); }} onClose={() => setCamOpen(false)}/>}
+        {similar && (
+          <ScanSimilarModal
+            mobile
+            code={similar.code}
+            candidates={similar.candidates}
+            onUseExisting={useExistingNear}
+            onCreateNew={() => { setSimilar(null); setQuickAdd({ sku: similar.code }); }}
+            onClose={() => setSimilar(null)}
+          />
+        )}
         {quickAdd && (
           <QuickAddInboundModal
             mobile
@@ -929,7 +953,7 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
   const dupe = !editing && skuTrim && products.some(p => p.sku.toUpperCase() === skuTrim);
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n >= 0 ? n : null; };
   const cost = num(f.cost), price = num(f.price), qty = num(f.qty), reorder = num(f.reorder);
-  const canSave = skuTrim && !dupe && f.name.trim() && f.loc.trim() &&
+  const canSave = skuTrim && !dupe && f.name.trim() &&
     cost !== null && price !== null && qty !== null && reorder !== null;
 
   const save = () => {
@@ -946,7 +970,7 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
       brand: (f.brand || "").trim(),
       supplier: (f.supplier || "").trim(), cost, price,
       qty: Math.round(qty), reorder: Math.round(reorder),
-      loc: f.loc.trim().toUpperCase()
+      loc: f.loc.trim()
     });
   };
 
@@ -1019,8 +1043,11 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
               </datalist>
             </div>
             <div>
-              <div className="m-section-label" style={{ padding: "0 2px 4px" }}>ตำแหน่ง *</div>
-              <input className="m-input mono" value={f.loc} onChange={e => set("loc", e.target.value)} placeholder="A-01-01" style={{ textTransform: "uppercase" }}/>
+              <div className="m-section-label" style={{ padding: "0 2px 4px" }}>ตำแหน่ง</div>
+              <input className="m-input" value={f.loc} onChange={e => set("loc", e.target.value)} list="m-loc-positions" placeholder="เลือกตำแหน่ง (ไม่บังคับ)"/>
+              <datalist id="m-loc-positions">
+                {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
+              </datalist>
             </div>
           </div>
           {editing && <div style={{ fontSize: 11, color: "var(--muted)" }}>หมายเหตุ: รหัส SKU และจำนวนคงเหลือแก้ไขที่นี่ไม่ได้ — ใช้ "ปรับสต็อก" สำหรับจำนวน</div>}
@@ -1067,7 +1094,10 @@ function MBulkEdit({ count, categories, products, onClose, onApply }) {
             </select>
           </BulkField>
           <BulkField label="ตำแหน่งจัดเก็บ" on={enabled.loc} onToggle={() => setEnabled(e => ({...e, loc: !e.loc}))} hint="">
-            <input className="m-input mono" placeholder="A-01-01" value={vals.loc} onChange={e => setVals(v => ({...v, loc: e.target.value}))}/>
+            <input className="m-input" placeholder="เลือกตำแหน่ง" value={vals.loc} onChange={e => setVals(v => ({...v, loc: e.target.value}))} list="m-loc-positions-bulk"/>
+            <datalist id="m-loc-positions-bulk">
+              {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
+            </datalist>
           </BulkField>
           <BulkField label="ผู้จัดส่ง" on={enabled.supplier} onToggle={() => setEnabled(e => ({...e, supplier: !e.supplier}))} hint="">
             <select className="m-input" value={vals.supplier || suppliers[0]} onChange={e => setVals(v => ({...v, supplier: e.target.value}))}>
@@ -2521,10 +2551,9 @@ function MCatalog({ ctx }) {
 /* =============== LOCATIONS =============== */
 
 function MLocations({ ctx }) {
-  const [locs, setLocs] = useStateM(() => typeof loadLocations === "function" ? loadLocations() : LOCATIONS);
-  const [addOpen, setAddOpen] = useStateM(false);
+  const [tree, setTree] = useStateM(loadLocTree);
   useEffectM(() => {
-    const h = () => setLocs(typeof loadLocations === "function" ? loadLocations() : LOCATIONS);
+    const h = () => setTree(loadLocTree());
     window.addEventListener("ims-locations-change", h);
     window.addEventListener("ims-products-change", h);
     return () => {
@@ -2533,18 +2562,20 @@ function MLocations({ ctx }) {
     };
   }, []);
 
-  const rows = locs.map(l => ({ ...l, skus: typeof skusInLocation === "function" ? skusInLocation(l.code) : 0 }));
-  const total = rows.length;
-  const empty = rows.filter(l => l.fill === 0 && l.skus === 0).length;
-  const active = total - empty;
-  const avgFill = total ? Math.round(rows.reduce((s, l) => s + (l.fill || 0), 0) / total) : 0;
-  const nearFull = rows.filter(l => l.fill >= 90).length;
-  const zones = {};
-  rows.forEach(l => { (zones[l.code[0]] ||= []).push(l); });
+  const buildings = (tree && tree.buildings) || [];
+  const allowDelete = typeof canDeleteData === "function" ? canDeleteData() : true;
+  const posCount = buildings.reduce((s, b) => s + (b.floors || []).reduce((t, f) => t + (f.positions || []).length, 0), 0);
 
-  const add = (code, fill) => {
-    if (typeof addLocation === "function" && addLocation(code, fill)) setAddOpen(false);
-    else ctx.pushToast("รหัสซ้ำหรือไม่ถูกต้อง");
+  const addBtn = { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--accent)", fontWeight: 600 };
+  const delBtn = { display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--muted)" };
+
+  const askB = () => { const n = prompt("ชื่ออาคาร / โซน (เช่น สภ.)"); if (n && n.trim()) addBuilding(n.trim()); };
+  const askF = (b) => { const n = prompt(`เพิ่มชั้นใน "${b}" (เช่น ชั้น 3)`); if (n && n.trim()) addFloor(b, n.trim()); };
+  const askP = (b, f) => { const n = prompt(`เพิ่มตำแหน่งใน ${b} · ${f} (เช่น A1)`); if (n && n.trim()) addPosition(b, f, n.trim()); };
+  const editB = (b) => { const n = prompt("เปลี่ยนชื่ออาคาร", b); if (n && n.trim() && n.trim() !== b) renameBuilding(b, n.trim()); };
+  const tapPos = (b, f, p) => {
+    if (!allowDelete) return;
+    if (confirm(`ลบตำแหน่ง ${p}?`)) removePosition(b, f, p);
   };
 
   return (
@@ -2552,101 +2583,64 @@ function MLocations({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub">ตำแหน่งจัดเก็บ</div>
-        <button className="m-action accent" onClick={() => setAddOpen(true)}><Icons.Plus size={14}/></button>
+        <button className="m-action accent" onClick={askB} title="เพิ่มอาคาร"><Icons.Plus size={14}/></button>
       </div>
       <div className="m-content">
-        <div className="m-kpi-row" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
-          <div className="m-kpi" style={{ padding: 10 }}>
-            <div className="m-kpi-label">ใช้งาน</div>
-            <div className="m-kpi-value" style={{ fontSize: 18 }}>{active}/{total}</div>
-          </div>
-          <div className="m-kpi" style={{ padding: 10 }}>
-            <div className="m-kpi-label">ใช้พื้นที่</div>
-            <div className="m-kpi-value" style={{ fontSize: 18 }}>{avgFill}%</div>
-          </div>
-          <div className="m-kpi" style={{ padding: 10 }}>
-            <div className="m-kpi-label">ใกล้เต็ม</div>
-            <div className="m-kpi-value" style={{ fontSize: 18, color: "var(--warning)" }}>{nearFull}</div>
-          </div>
+        <div style={{ fontSize: 12, color: "var(--muted)", padding: "2px 2px 8px" }}>
+          {buildings.length} อาคาร · {posCount} ตำแหน่ง
         </div>
 
-        {total === 0 && (
+        {buildings.length === 0 && (
           <div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
             <Icons.Map size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>
-            <div>ยังไม่มีตำแหน่ง — แตะ + เพื่อเพิ่ม</div>
+            <div>ยังไม่มีอาคาร — แตะ + เพื่อเพิ่ม</div>
           </div>
         )}
 
-        {Object.entries(zones).map(([z, cells]) => (
-          <div key={z} className="m-card">
-            <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
-              <div style={{ fontWeight: 600 }}>โซน {z}</div>
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>{cells.length} ตำแหน่ง · เฉลี่ย {Math.round(cells.reduce((s,c)=>s+c.fill,0)/cells.length)}%</span>
+        {buildings.map(b => (
+          <div key={b.name} className="m-card">
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <div className="row" style={{ gap: 6 }} onClick={() => editB(b.name)}>
+                <Icons.Map size={14}/>
+                <span style={{ fontWeight: 700, fontSize: 15 }}>{b.name}</span>
+              </div>
+              <div className="row" style={{ gap: 6 }}>
+                <button style={addBtn} onClick={() => askF(b.name)}><Icons.Plus size={12}/> ชั้น</button>
+                {allowDelete && <button style={delBtn} onClick={() => { if (confirm(`ลบอาคาร "${b.name}" และทุกชั้น/ตำแหน่ง?`)) removeBuilding(b.name); }}><Icons.Trash size={13}/></button>}
+              </div>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 5 }}>
-              {cells.map(c => {
-                let cls = "wh-cell";
-                if (c.fill === 0) cls += " empty";
-                else if (c.fill < 30) cls += " fill1";
-                else if (c.fill < 70) cls += " fill2";
-                else if (c.fill < 90) cls += " fill3";
-                else cls += " fill4";
-                return (
-                  <div key={c.code} className={cls} style={{ aspectRatio: "1", padding: "5px 6px", fontSize: 9 }}>
-                    <div className="lab" style={{ fontSize: 9 }}>{c.code.split("-").slice(0,2).join("-")}</div>
-                    <div className="pct" style={{ fontSize: 11 }}>{c.fill}%</div>
+            {(b.floors || []).length === 0 && <div style={{ fontSize: 12, color: "var(--muted)" }}>ยังไม่มีชั้น</div>}
+            {(b.floors || []).map(f => (
+              <div key={f.name} style={{ borderTop: "1px solid var(--border)", paddingTop: 8, marginTop: 8 }}>
+                <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{f.name} <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>· {(f.positions || []).length} ตำแหน่ง</span></div>
+                  <div className="row" style={{ gap: 6 }}>
+                    <button style={addBtn} onClick={() => askP(b.name, f.name)}><Icons.Plus size={12}/> ตำแหน่ง</button>
+                    {allowDelete && <button style={delBtn} onClick={() => { if (confirm(`ลบ ${f.name}?`)) removeFloor(b.name, f.name); }}><Icons.Trash size={12}/></button>}
                   </div>
-                );
-              })}
-            </div>
+                </div>
+                <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+                  {(f.positions || []).length === 0 && <span style={{ fontSize: 11, color: "var(--muted)" }}>— ยังไม่มีตำแหน่ง —</span>}
+                  {(f.positions || []).map(p => {
+                    const code = locCode(b.name, f.name, p);
+                    const n = typeof skusInLocation === "function" ? skusInLocation(code) : 0;
+                    return (
+                      <div key={p} onClick={() => tapPos(b.name, f.name, p)}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, fontSize: 12 }}>
+                        <span className="mono" style={{ fontWeight: 600 }}>{p}</span>
+                        <span style={{ fontSize: 10, color: "var(--muted)" }}>{n} SKU</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         ))}
 
         <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 12, fontSize: 11, color: "var(--muted)", display: "flex", gap: 10, alignItems: "center" }}>
           <Icons.Refresh size={14}/>
-          <span>จำนวน SKU คำนวณจากสินค้าจริงในแต่ละตำแหน่ง</span>
-        </div>
-      </div>
-      {addOpen && <MAddLocationSheet existing={rows} onClose={() => setAddOpen(false)} onAdd={add}/>}
-    </>
-  );
-}
-
-function MAddLocationSheet({ existing, onClose, onAdd }) {
-  const [code, setCode] = useStateM("");
-  const [fill, setFill] = useStateM("0");
-  const c = code.trim().toUpperCase();
-  const valid = /^[A-Z]-\d{2}-\d{2}$/.test(c);
-  const dupe = existing.some(l => l.code === c);
-  const canAdd = c && valid && !dupe;
-  return (
-    <>
-      <div className="m-sheet-backdrop" onClick={onClose}/>
-      <div className="m-sheet">
-        <div className="m-sheet-grabber"/>
-        <div className="m-sheet-head">
-          <div>
-            <h3>เพิ่มตำแหน่งจัดเก็บ</h3>
-            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>รูปแบบ โซน-แถว-ช่อง เช่น A-01-09</div>
-          </div>
-          <button className="m-action" onClick={onClose}><Icons.X size={14}/></button>
-        </div>
-        <div className="m-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <div className="m-section-label" style={{ padding: "0 2px 4px" }}>รหัสตำแหน่ง</div>
-            <input className="m-input mono" value={code} onChange={e => setCode(e.target.value)} placeholder="A-01-09" style={{ textTransform: "uppercase" }}/>
-            {c && !valid && <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 4 }}>รูปแบบไม่ถูกต้อง</div>}
-            {dupe && <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 4 }}>รหัสนี้มีอยู่แล้ว</div>}
-          </div>
-          <div>
-            <div className="m-section-label" style={{ padding: "0 2px 4px" }}>อัตราการใช้พื้นที่เริ่มต้น (%)</div>
-            <input className="m-input" type="number" min="0" max="100" value={fill} onChange={e => setFill(e.target.value)}/>
-          </div>
-        </div>
-        <div className="m-sheet-foot">
-          <button className="m-btn-big" disabled={!canAdd} style={!canAdd ? { opacity: 0.5 } : {}} onClick={() => onAdd(c, fill)}>
-            <Icons.Plus size={16}/> เพิ่มตำแหน่ง
-          </button>
+          <span>แตะตำแหน่งเพื่อลบ · แตะชื่ออาคารเพื่อแก้ไข · SKU คำนวณจากสินค้าจริง</span>
         </div>
       </div>
     </>
