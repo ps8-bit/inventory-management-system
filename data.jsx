@@ -150,14 +150,72 @@ function deleteCategory(name, fallback = "ทั่วไป") {
 }
 
 /* ── Persistent stock deduction helpers ──
-   Always mutate PRODUCTS in-place + call saveProductStore() so changes
-   go to Supabase. Also clear any matching ims_stock_adj entry so the
-   display overlay doesn't double-count. */
+   Optimistic local mutation (PRODUCTS in place, never reassigned) followed by
+   an ATOMIC server-side deduction via the deduct_stock RPC (one
+   qty = GREATEST(0, qty - n) UPDATE per SKU — see migration-atomic-stock.sql).
+   This replaces the old full-catalog upsert, whose read-modify-write cycle
+   lost sales when two devices deducted the same SKU concurrently.
+   Fallbacks: RPC missing (migration not applied) → legacy saveProductStore();
+   offline/network error → offline queue, flushed on reconnect.
+   Also clears any matching ims_stock_adj entry so the display overlay
+   doesn't double-count. */
+function _persistProductsLocal() {
+  try { localStorage.setItem("ims_products", JSON.stringify(PRODUCTS)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-products-change"));
+}
+
+/* Write server-canonical quantities (RPC return value) back into PRODUCTS.
+   The same SKU can appear more than once (sold alone + inside a bundle in one
+   cart); entries are applied in order so the last — final — qty wins. */
+function _applyServerQty(rows) {
+  if (!Array.isArray(rows) || !rows.length) return;
+  let changed = false;
+  rows.forEach(r => {
+    const p = PRODUCTS.find(x => x.sku === r.sku);
+    if (p && typeof r.qty === "number" && p.qty !== r.qty) { p.qty = r.qty; changed = true; }
+  });
+  if (changed) _persistProductsLocal();
+}
+
+async function _deductRemote(deductions) {
+  if (typeof dbDeductStock !== "function") { saveProductStore(); return; }
+  if (!navigator.onLine) {
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions);
+    return;
+  }
+  try {
+    const res = await dbDeductStock(deductions);
+    if (res && res.ok) { _applyServerQty(res.rows); return; }
+    if (res && res.error === "PERMISSION_OR_MISSING") {
+      _applyServerQty(res.rows); // rows RLS did allow are still canonical
+      window.dispatchEvent(new CustomEvent("ims-toast", {
+        detail: "ตัดสต็อกไม่สำเร็จ: บัญชีนี้ไม่มีสิทธิ์แก้ไขสินค้า"
+      }));
+      // Reload canonical server state so the UI stops showing a deduction
+      // that didn't persist (mirrors saveProductStore's perm-block path).
+      if (window.dbLoadProducts) {
+        dbLoadProducts().then(fresh => {
+          if (!fresh) return;
+          PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p));
+          _persistProductsLocal();
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (res && res.error === "RPC_MISSING") { saveProductStore(); return; }
+    // Other failure (likely transient network/server) → queue for retry.
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions);
+  } catch (e) {
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions);
+  }
+}
+
 function deductStockAndPersist(sku, qty) {
   const p = PRODUCTS.find(x => x.sku === sku);
   if (!p) return;
   p.qty = Math.max(0, p.qty - qty);
-  saveProductStore();
+  _persistProductsLocal();
+  _deductRemote([{ sku, qty }]);
   const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
   if (sku in adj) { delete adj[sku]; if (typeof applyStockAdj === "function") applyStockAdj(adj); }
 }
@@ -166,7 +224,8 @@ function deductManyAndPersist(deductions) {
     const p = PRODUCTS.find(x => x.sku === sku);
     if (p) p.qty = Math.max(0, p.qty - qty);
   });
-  saveProductStore();
+  _persistProductsLocal();
+  _deductRemote(deductions);
   const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
   let changed = false;
   deductions.forEach(({ sku }) => { if (sku in adj) { delete adj[sku]; changed = true; } });
@@ -201,11 +260,34 @@ function saveOrders(orders) {
   if (window.dbUpsertOrders) dbUpsertOrders(orders).catch(() => {});
 }
 
+/* Append/update ONE order: optimistic local cache + single-row DB upsert.
+   This is the convergence-safe writer — unlike saveOrders() it never upserts
+   the whole list and never diffs-and-deletes, so two devices can't clobber
+   each other's orders. Failed writes go to the offline queue. */
+async function appendOrder(order) {
+  if (!order || !order.id) return { ok: false };
+  const next = [order, ...loadOrders().filter(o => o.id !== order.id)];
+  try { localStorage.setItem("ims_orders", JSON.stringify(next)); } catch (e) {}
+  window._DB_ORDERS = next;
+  window.dispatchEvent(new CustomEvent("ims-orders-change"));
+  if (typeof dbUpsertOrders !== "function") return { ok: true };
+  try {
+    const res = await dbUpsertOrders([order]);
+    if (res && res.error && typeof enqueueOfflineWrite === "function") {
+      enqueueOfflineWrite("orders", [order]);
+    }
+    return res || { ok: true };
+  } catch (e) {
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("orders", [order]);
+    return { error: String(e) };
+  }
+}
+
 const INBOUND = [];
 
 const OUTBOUND = [];
 
-const TODAY_ISO = new Date().toISOString().slice(0, 10);
+const TODAY_ISO = bangkokDateStr();
 
 const isoToThai = (iso) => {
   if (!iso) return "";
@@ -1058,6 +1140,96 @@ function guessBrandFromSku(sku) {
   return pre;
 }
 
+/* ── Offline write queue ──────────────────────────────────────────────────
+   Failed DB writes (network down / RLS block) are enqueued here and retried
+   automatically on the next "online" event. Entry shape: { id, type, payload, ts }. */
+const IMS_QUEUE_KEY = "ims_offline_queue_v1";
+function loadOfflineQueue() {
+  try { return JSON.parse(localStorage.getItem(IMS_QUEUE_KEY) || "[]"); } catch (e) { return []; }
+}
+function _saveQueue(q) {
+  try { localStorage.setItem(IMS_QUEUE_KEY, JSON.stringify(q)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-queue-change", { detail: { count: q.length } }));
+}
+function enqueueOfflineWrite(type, payload) {
+  const q = loadOfflineQueue();
+  q.push({ id: "q" + Date.now(), type, payload, ts: new Date().toISOString() });
+  _saveQueue(q);
+}
+async function flushOfflineQueue() {
+  if (!navigator.onLine) return;
+  const q = loadOfflineQueue();
+  if (!q.length) return;
+  const failed = [];
+  for (const item of q) {
+    let ok = false;
+    try {
+      if (item.type === "orders" && typeof dbUpsertOrders === "function") {
+        const r = await dbUpsertOrders(item.payload);
+        ok = !!(r && r.ok);
+      } else if (item.type === "labels" && typeof dbUpsertLabels === "function") {
+        const r = await dbUpsertLabels(item.payload);
+        ok = !!(r && r.ok);
+      } else if (item.type === "deduct" && typeof dbDeductStock === "function") {
+        const r = await dbDeductStock(item.payload);
+        if (r && r.ok) { _applyServerQty(r.rows); ok = true; }
+        // A permission block won't fix itself by retrying — consume the item
+        // (canonical state was already reloaded by the caller's error path).
+        else if (r && r.error === "PERMISSION_OR_MISSING") ok = true;
+      } else {
+        ok = true;
+      }
+    } catch (e) {}
+    if (!ok) failed.push(item);
+  }
+  _saveQueue(failed);
+  const n = q.length - failed.length;
+  if (n > 0) window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: "ซิงค์ข้อมูลค้าง " + n + " รายการสำเร็จ ✓" } }));
+}
+window.addEventListener("online", function() { if (typeof flushOfflineQueue === "function") flushOfflineQueue(); });
+
+function printBarcodeLabels(items, pushToast) {
+  const safe = (str) => String(str == null ? "" : str).replace(/[<>&]/g, "");
+  const filtered = (items || []).filter(Boolean);
+  if (!filtered.length) { if (typeof pushToast === "function") pushToast("ไม่มีสินค้าให้พิมพ์"); return; }
+  const w = window.open("", "_blank", "width=480,height=320");
+  if (!w) { if (typeof pushToast === "function") pushToast("เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วลองใหม่"); return; }
+  const labels = filtered.map((item, idx) => {
+    const svg = (typeof barcodeSvgMarkup === "function") ? barcodeSvgMarkup(item.sku, { height: 80, moduleWidth: 2 }) : "";
+    const isLast = idx === filtered.length - 1;
+    return `<div class="label${isLast ? " last" : ""}"><div class="name">${safe(item.name)}</div><div class="bc">${svg}</div><div class="sku">${safe(item.sku)}</div></div>`;
+  }).join("");
+  w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>บาร์โค้ด</title>
+<style>
+@page{size:50mm 30mm;margin:0}
+html,body{margin:0;padding:0}
+body{font-family:'IBM Plex Mono',monospace}
+.label{width:50mm;height:30mm;overflow:hidden;padding:2.5mm 2mm;box-sizing:border-box;text-align:center;page-break-after:always}
+.label:last-child,.label.last{page-break-after:auto}
+.name{font-size:10px;line-height:1.2;max-height:2.4em;overflow:hidden;margin-bottom:1mm}
+.bc svg{width:auto;max-width:46mm;height:13mm;display:block;margin:0 auto}
+.sku{font-size:13px;font-weight:600;letter-spacing:1px;margin-top:1mm}
+</style></head>
+<body onload="window.focus();window.print();">${labels}</body></html>`);
+  w.document.close();
+}
+
+function openPickListWindow(orders, pushToast) {
+  if (!orders || !orders.length) { if (typeof pushToast === "function") pushToast("ไม่มีออร์เดอร์ที่ต้องหยิบ"); return; }
+  const safe = (str) => String(str == null ? "" : str).replace(/[<>&]/g, "");
+  const w = window.open("", "_blank");
+  if (!w) { if (typeof pushToast === "function") pushToast("เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วลองใหม่"); return; }
+  const rows = orders.map((o, i) => `<tr><td class="mono">${i+1}</td><td class="mono">${safe(o.id)}</td><td>${safe(o.customer)||"—"}</td><td>${safe(o.channel)||"—"}</td><td style="text-align:center">${o.items||0}</td><td>${safe(o.carrier)||"—"}</td><td>${{picking:"กำลังหยิบ",packed:"พร้อมส่ง"}[o.status]||safe(o.status)}</td></tr>`).join("");
+  w.document.write(`<!DOCTYPE html><html><head><title>Pick List</title>
+<style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 2px;font-size:18px}p{margin:0 0 16px;color:#666}button{padding:8px 18px;cursor:pointer;margin-bottom:16px;font-size:13px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}td{padding:8px 10px;border-bottom:1px solid #eee}tr:hover td{background:#fafafa}.mono{font-family:monospace;font-size:12px}@media print{button{display:none!important}}</style>
+</head><body onload="window.focus();window.print();">
+<h2>Pick List</h2><p>${new Date().toLocaleDateString("th-TH",{dateStyle:"full"})} · ${orders.length} ออร์เดอร์</p>
+<button onclick="window.print()">🖨 พิมพ์</button>
+<table><thead><tr><th>#</th><th>เลขออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>รายการ</th><th>ขนส่ง</th><th>สถานะ</th></tr></thead><tbody>${rows}</tbody></table>
+</body></html>`);
+  w.document.close();
+}
+
 Object.assign(window, {
   skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
@@ -1068,11 +1240,13 @@ Object.assign(window, {
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, isoToThai,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
-  loadOrders, saveOrders,
+  loadOrders, saveOrders, appendOrder,
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,
-  bangkokDateStr, workHoursExceptionDate, hasActiveWorkHoursException, workHoursStatusForUser
+  bangkokDateStr, workHoursExceptionDate, hasActiveWorkHoursException, workHoursStatusForUser,
+  loadOfflineQueue, enqueueOfflineWrite, flushOfflineQueue,
+  printBarcodeLabels, openPickListWindow
 });

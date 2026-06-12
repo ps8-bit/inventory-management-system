@@ -28,7 +28,7 @@ function KPIWidget({ goTo }) {
   const outOfStock  = PRODUCTS.filter(p => p.qty === 0).length;
   const allOrders   = typeof loadOrders === "function" ? loadOrders() : [];
   const pending     = allOrders.filter(o => o.status === "picking" || o.status === "packed").length;
-  const todayOrders = allOrders.filter(o => o.dateIso === new Date().toISOString().slice(0, 10)).length;
+  const todayOrders = allOrders.filter(o => o.dateIso === (typeof bangkokDateStr === "function" ? bangkokDateStr() : new Date().toISOString().slice(0, 10))).length;
   return (
     <div style={{ padding: 18, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
       <div>

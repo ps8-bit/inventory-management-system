@@ -13,6 +13,7 @@ function authErrorToThai(message) {
   if (m === "Invalid login credentials")          return "อีเมลหรือรหัสผ่านไม่ถูกต้อง";
   if (/email not confirmed/i.test(m))             return "อีเมลนี้ยังไม่ได้ยืนยัน กรุณาตรวจสอบกล่องจดหมาย";
   if (/rate|too many|429/i.test(m))               return "พยายามบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่";
+  if (/token.*expired|expired.*token|invalid.*token/i.test(m)) return "ลิงก์ตั้งรหัสผ่านหมดอายุ กรุณาขอลิงก์ใหม่";
   if (/network|fetch|failed to fetch/i.test(m))   return "เชื่อมต่อไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่";
   return "เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง";
 }

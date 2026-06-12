@@ -384,7 +384,7 @@ table.t tbody tr:last-child td { border-bottom: none; }
 .label-paper {
   background: white;
   box-shadow: 0 6px 30px oklch(0.2 0.01 80 / 0.12);
-  font-family: "IBM Plex Sans", "IBM Plex Sans Thai", sans-serif;
+  font-family: "IBM Plex Sans Thai", "IBM Plex Sans", sans-serif;
   color: #111;
 }
 

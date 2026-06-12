@@ -1533,35 +1533,19 @@ function queueLabelsAndGo(orders, goTo) {
 /* ========= OUTBOUND ========= */
 function Outbound({ goTo, pushToast }) {
   const [picked, setPicked] = useState({});
-  const [orders, setOrders] = useState(loadOrders);
+  // Tracking-model reader (labels-as-shipments + preserved + DB rows, overrides
+  // applied) — the same source MOutbound and TrackingPage use, so desktop and
+  // mobile show an identical list. Writes go through setOrderField /
+  // appendOrder / deleteOrdersFromDb; the old full-list saveOrders() effect
+  // (which re-upserted every order and diffed-and-DELETED missing ids — a
+  // cross-device data-loss vector) is gone.
+  const orders = useOrders();
   const [issueOpen, setIssueOpen] = useState(false);
   const [obBulkMenu, setObBulkMenu] = useState(null);
   const [obBulkConfirm, setObBulkConfirm] = useState(null);
   const [filterOpen, setFilterOpen] = useState(false);
   const [filterCh, setFilterCh] = useState("all");
   const [filterQ, setFilterQ] = useState("");
-
-  // Persist orders + fire badge-refresh event on every change
-  useEffect(() => { saveOrders(orders); }, [orders]);
-
-  // Reload from DB when a remote team-member change arrives via real-time
-  useEffect(() => {
-    const reload = () => { if (window._DB_ORDERS) setOrders(window._DB_ORDERS); };
-    window.addEventListener("ims-orders-change", reload);
-    return () => window.removeEventListener("ims-orders-change", reload);
-  }, []);
-
-  useEffect(() => {
-    // Drain orders that were dispatched before this component mounted
-    const pending = window.__pendingSellOrders || [];
-    if (pending.length > 0) {
-      setOrders(prev => [...pending, ...prev]);
-      window.__pendingSellOrders = [];
-    }
-    const handler = (e) => setOrders(prev => [e.detail, ...prev]);
-    window.addEventListener("ims-sell-order", handler);
-    return () => window.removeEventListener("ims-sell-order", handler);
-  }, []);
 
   // Bulk-status dropdown ref + click-outside to close
   const obBulkMenuRef = useRef(null);
@@ -1622,12 +1606,12 @@ function Outbound({ goTo, pushToast }) {
           note: `ออร์เดอร์ ${id} · ${channelLabel}`
         });
       }
-      setOrders(prev => [{
+      appendOrder({
         id, channel: channelLabel, customer: data.customer || "ลูกค้าใหม่",
         items: bundle.items.length, status: "picking", carrier: "", tracking: "",
         ts, dateIso, deductions: data.deductions, isBundle: true, bundleName: bundle.name,
         lineItems: bundle.items.map(it => snapLineItem(it.sku, null, it.qty * totalQty))
-      }, ...prev]);
+      });
       pushToast(`ตัดสต็อกชุด "${bundle.name}" ${totalQty} ชุด — ${bundle.items.length} รายการสินค้า`);
       setIssueOpen(false);
       return;
@@ -1642,12 +1626,12 @@ function Outbound({ goTo, pushToast }) {
         note: `ออร์เดอร์ ${id} · ${channelLabel}`
       });
     }
-    setOrders(prev => [{
+    appendOrder({
       id, channel: channelLabel, customer: data.customer || "ลูกค้าใหม่",
       items: data.deductions.length, status: "picking", carrier: "", tracking: "",
       ts, dateIso, deductions: data.deductions, sku: data.sku,
       lineItems: [snapLineItem(data.sku, null, totalQty)]
-    }, ...prev]);
+    });
     pushToast(`ตัดสต็อก ${data.sku} จำนวน ${totalQty} ชิ้น (${data.deductions.length} ช่องทาง)`);
     setIssueOpen(false);
   };
@@ -1672,7 +1656,7 @@ function Outbound({ goTo, pushToast }) {
       changes: [{ label: "สถานะใหม่", to: STATUS_LABEL[status] }],
       action: "อัปเดต",
       onConfirm: () => {
-        setOrders(prev => prev.map(o => picked[o.id] ? { ...o, status } : o));
+        if (typeof setOrderField === "function") pickedIds.forEach(id => setOrderField(id, { status }));
         recordChange({
           entity: "order", action: "bulk-update",
           summary: `เปลี่ยนสถานะ ${pickedCount} ออร์เดอร์เป็น ${STATUS_LABEL[status]}`,
@@ -1693,8 +1677,12 @@ function Outbound({ goTo, pushToast }) {
       count: pickedCount,
       action: "ลบออร์เดอร์",
       danger: true,
-      onConfirm: () => {
-        setOrders(prev => prev.filter(o => !picked[o.id]));
+      onConfirm: async () => {
+        if (typeof deleteOrdersFromDb === "function") {
+          const res = await deleteOrdersFromDb(pickedIds);
+          if (res && res.blocked) { pushToast("ลบไม่ได้ — เฉพาะแอดมิน/ผู้จัดการเท่านั้น"); setObBulkConfirm(null); return; }
+        }
+        if (typeof setOrderField === "function") pickedIds.forEach(id => setOrderField(id, { deleted: true }));
         recordChange({
           entity: "order", action: "bulk-delete",
           summary: `ลบ ${pickedCount} ออร์เดอร์จากหน้าจัดส่ง`,
@@ -1721,17 +1709,7 @@ function Outbound({ goTo, pushToast }) {
           </button>
           <button className="btn" onClick={() => {
             const toPrint = pickedCount > 0 ? orders.filter(o => picked[o.id]) : tabOrders.filter(o => o.status === "picking");
-            if (!toPrint.length) { pushToast("ไม่มีออร์เดอร์ที่ต้องหยิบ"); return; }
-            const w = window.open("", "_blank");
-            w.document.write(`<!DOCTYPE html><html><head><title>Pick List</title>
-<style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 2px;font-size:18px}p{margin:0 0 16px;color:#666}button{padding:8px 18px;cursor:pointer;margin-bottom:16px;font-size:13px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}td{padding:8px 10px;border-bottom:1px solid #eee}tr:hover td{background:#fafafa}.mono{font-family:monospace;font-size:12px}@media print{button{display:none!important}}</style>
-</head><body>
-<h2>Pick List</h2><p>${new Date().toLocaleDateString("th-TH", { dateStyle:"full" })} · ${toPrint.length} ออร์เดอร์</p>
-<button onclick="window.print()">🖨 พิมพ์</button>
-<table><thead><tr><th>#</th><th>เลขออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>รายการ</th><th>ขนส่ง</th><th>สถานะ</th></tr></thead><tbody>
-${toPrint.map((o,i) => `<tr><td class="mono">${i+1}</td><td class="mono">${o.id}</td><td>${o.customer||"—"}</td><td>${o.channel||"—"}</td><td style="text-align:center">${o.items}</td><td>${o.carrier||"—"}</td><td>${{picking:"กำลังหยิบ",packed:"พร้อมส่ง"}[o.status]||o.status}</td></tr>`).join("")}
-</tbody></table></body></html>`);
-            w.document.close();
+            if (typeof openPickListWindow === "function") openPickListWindow(toPrint, pushToast);
           }}><Icons.Print/> รายการหยิบสินค้า</button>
           <button className="btn" onClick={() => setIssueOpen(true)}><Icons.Out size={14}/> ตัดสต็อก</button>
           <button className="btn btn-primary" onClick={() => goTo("labels")}><Icons.Tag/> สร้างฉลากส่ง</button>
@@ -2288,7 +2266,7 @@ function IssueModal({ onClose, onSubmit }) {
                   <span style={{ flex: 1, fontSize: 13, fontWeight: v.on ? 500 : 400, color: v.on ? "var(--fg)" : "var(--fg-2)" }}>{c.name}</span>
                   <div className="qty-stepper">
                     <button onClick={() => setQty(c.id, v.qty - 1)} disabled={v.qty <= 0}>−</button>
-                    <input value={v.qty} onChange={e => setQty(c.id, parseInt(e.target.value) || 0)}/>
+                    <input value={v.qty} onChange={e => setQty(c.id, Math.max(0, parseInt(e.target.value, 10) || 0))}/>
                     <button onClick={() => setQty(c.id, v.qty + 1)}>+</button>
                   </div>
                 </div>
@@ -2445,6 +2423,21 @@ function Inventory({ pushToast, density, goTo }) {
     }
   };
 
+  const exportInventoryCsv = (rows, filename) => {
+    const headers = ["SKU","ชื่อสินค้า","หมวดหมู่","แบรนด์","คงเหลือ","จองแล้ว","จุดสั่งซื้อ","ตำแหน่ง","ราคาขาย","ต้นทุน","ผู้จัดส่ง","สถานะ"];
+    const csvRows = rows.map(p => {
+      const s = stockStatus(p);
+      return [p.sku, p.name, p.cat, p.brand || "", p.qty, p.reserved, p.reorder, p.loc, p.price, p.cost, p.supplier, s.label]
+        .map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",");
+    });
+    const csv = "﻿" + [headers.join(","), ...csvRows].join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
   return (
     <div className="stack" style={{ gap: 20 }}>
       <div className="page-head">
@@ -2454,18 +2447,7 @@ function Inventory({ pushToast, density, goTo }) {
         </div>
         <div className="row">
           <button className="btn" onClick={() => {
-            const headers = ["SKU","ชื่อสินค้า","หมวดหมู่","แบรนด์","คงเหลือ","จองแล้ว","จุดสั่งซื้อ","ตำแหน่ง","ราคาขาย","ต้นทุน","ผู้จัดส่ง","สถานะ"];
-            const rows = filtered.map(p => {
-              const s = stockStatus(p);
-              return [p.sku, p.name, p.cat, p.brand || "", p.qty, p.reserved, p.reorder, p.loc, p.price, p.cost, p.supplier, s.label]
-                .map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",");
-            });
-            const csv = "﻿" + [headers.join(","), ...rows].join("\n");
-            const a = document.createElement("a");
-            a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-            a.download = `สินค้าคงคลัง_${new Date().toISOString().slice(0,10)}.csv`;
-            a.click();
-            URL.revokeObjectURL(a.href);
+            exportInventoryCsv(filtered, `สินค้าคงคลัง_${new Date().toISOString().slice(0,10)}.csv`);
             pushToast(`ส่งออก ${filtered.length} รายการเป็น CSV แล้ว`);
           }}><Icons.Pkg size={14}/> Export CSV</button>
           <button className="btn" onClick={() => {
@@ -2530,8 +2512,8 @@ function Inventory({ pushToast, density, goTo }) {
           <div className="spacer"/>
           <div className="row" style={{ gap: 6 }}>
             <BulkBtn icon={<Icons.Edit size={13}/>} label="แก้ไขทั้งหมด" onClick={() => setBulkOpen(true)}/>
-            <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์บาร์โค้ด" onClick={() => pushToast(`เพิ่ม ${selectedCount} บาร์โค้ดเข้าคิวพิมพ์`)}/>
-            <BulkBtn icon={<Icons.Pkg size={13}/>} label="ส่งออก Excel" onClick={() => pushToast(`กำลังส่งออก ${selectedCount} รายการ`)}/>
+            <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์บาร์โค้ด" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); if (typeof printBarcodeLabels === "function") printBarcodeLabels(items, pushToast); }}/>
+            <BulkBtn icon={<Icons.Pkg size={13}/>} label="ส่งออก Excel" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); exportInventoryCsv(items, `สินค้าคงคลัง_เลือก_${new Date().toISOString().slice(0,10)}.csv`); pushToast(`ส่งออก ${items.length} รายการแล้ว`); }}/>
             <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDelete} danger/>
           </div>
         </div>
@@ -3766,9 +3748,11 @@ function SellProductModal({ onClose, onSellComplete }) {
         : item.items.map(ci => snapLineItem(ci.sku, null, ci.qty * item.qty))
       )
     };
-    window.__pendingSellOrders = window.__pendingSellOrders || [];
-    window.__pendingSellOrders.push(order);
-    window.dispatchEvent(new CustomEvent("ims-sell-order", { detail: order }));
+    // Persist the order directly (single-row optimistic write + DB upsert,
+    // offline-queued on failure). Replaces the old __pendingSellOrders +
+    // ims-sell-order handoff, which silently dropped the order row if the
+    // Outbound screen was never mounted afterwards.
+    if (typeof appendOrder === "function") appendOrder(order);
 
     // Also create the shipping label so the sale shows in ติดตามพัสดุ (labels are
     // the shipment source of truth there) — mirrors the mobile sell flow.
@@ -3779,7 +3763,8 @@ function SellProductModal({ onClose, onSellComplete }) {
           name: ship.name,
           phone: ship.phone,
           addr1: ship.addr1,
-          addr2: [ship.addr2, ship.tambon, ship.amphoe, ship.province, ship.postal].filter(Boolean).join(" "),
+          addr2: ship.addr2,
+          tambon: ship.tambon, amphoe: ship.amphoe, province: ship.province, postal: ship.postal,
           carrier: ship.carrier,
           cod: ship.cod ? (parseFloat(ship.codAmt) || 0) : 0,
           items: order.lineItems,

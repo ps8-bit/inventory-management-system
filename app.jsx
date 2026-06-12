@@ -51,12 +51,20 @@ const CRUMB_MAP = {
    - inbound  : products at or below their reorder point (need restocking)
    - outbound : orders still needing action (picking or packed)
    - labels   : total labels waiting in the print queue               */
+/* Orders for badge / notification / search surfaces — the Tracking model
+   (labels-as-shipments + preserved + DB rows, overrides applied) so counts
+   match what the Outbound / Tracking screens actually display. Falls back to
+   the raw orders cache if tracking.jsx didn't load. */
+function ordersSnapshot() {
+  return (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+}
+
 function computeBadges() {
   // --- inbound: low-stock / out-of-stock products ---
   const inbound = PRODUCTS.filter(p => p.qty <= p.reorder).length;
 
-  // --- outbound: orders not yet shipped (prefer Supabase cache) ---
-  const outbound = loadOrders().filter(o => o.status === "picking" || o.status === "packed").length;
+  // --- outbound: orders not yet shipped (Tracking-model view) ---
+  const outbound = ordersSnapshot().filter(o => o.status === "picking" || o.status === "packed").length;
 
   // --- labels: items in print queue (prefer Supabase cache) ---
   let labelsArr = window._DB_LABELS || SAMPLE_LABELS;
@@ -105,7 +113,7 @@ function SearchOverlay({ q, setQ, onClose, goTo }) {
         p.name.toLowerCase().includes(lq) ||
         p.supplier.toLowerCase().includes(lq)
       ).slice(0, 6),
-      orders: loadOrders().filter(o =>
+      orders: ordersSnapshot().filter(o =>
         o.id.toLowerCase().includes(lq) ||
         (o.customer || "").toLowerCase().includes(lq) ||
         (o.channel || "").toLowerCase().includes(lq)
@@ -187,7 +195,7 @@ function SearchOverlay({ q, setQ, onClose, goTo }) {
 function NotifPopover({ onClose, goTo }) {
   const outOfStock = PRODUCTS.filter(p => p.qty === 0);
   const lowStock   = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder);
-  const pending    = loadOrders().filter(o => o.status === "picking" || o.status === "packed");
+  const pending    = ordersSnapshot().filter(o => o.status === "picking" || o.status === "packed");
   const nothing    = outOfStock.length === 0 && lowStock.length === 0 && pending.length === 0;
 
   return (
@@ -574,6 +582,9 @@ function App({ user, onLogout, onSwitchUser }) {
   const [searchQ, setSearchQ] = useStateApp("");
   const [notifOpen, setNotifOpen] = useStateApp(false);
   const notifRef = useRefApp(null);
+  const [pendingSync, setPendingSync] = useStateApp(() =>
+    typeof loadOfflineQueue === "function" ? loadOfflineQueue().length : 0
+  );
 
   // Expose current user for audit log
   useEffectApp(() => { window.__currentUser = user; }, [user]);
@@ -592,7 +603,9 @@ function App({ user, onLogout, onSwitchUser }) {
     setStoreRaw(prev => {
       const next = typeof updater === "function" ? updater(prev) : updater;
       try { localStorage.setItem("ims_store", JSON.stringify(next)); } catch (e) {}
-      if (window.dbSaveStoreSettings) dbSaveStoreSettings(next).catch(() => {});
+      if (window.dbSaveStoreSettings) dbSaveStoreSettings(next).then(res => {
+        if (res && res.error) window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: "บันทึกการตั้งค่าไม่สำเร็จ — ตรวจสอบสิทธิ์การใช้งาน", type: "error" } }));
+      }).catch(() => {});
       return next;
     });
   };
@@ -655,7 +668,7 @@ function App({ user, onLogout, onSwitchUser }) {
   }, [notifOpen]);
 
   const notifCount = PRODUCTS.filter(p => p.qty <= p.reorder).length +
-    loadOrders().filter(o => o.status === "picking" || o.status === "packed").length;
+    ordersSnapshot().filter(o => o.status === "picking" || o.status === "packed").length;
 
   const pushToast = (msg) => {
     setToast(msg);
@@ -668,6 +681,12 @@ function App({ user, onLogout, onSwitchUser }) {
     const h = (e) => pushToast(e.detail);
     window.addEventListener("ims-toast", h);
     return () => window.removeEventListener("ims-toast", h);
+  }, []);
+
+  useEffectApp(() => {
+    const h = (e) => setPendingSync(e.detail.count);
+    window.addEventListener("ims-queue-change", h);
+    return () => window.removeEventListener("ims-queue-change", h);
   }, []);
 
   const goTo = (p) => { setPage(p); window.scrollTo(0, 0); };
@@ -735,6 +754,12 @@ function App({ user, onLogout, onSwitchUser }) {
               <Icons.Cart size={14}/> ขายสินค้า
             </button>
             <button className="btn btn-ghost btn-icon" title="ช่วยเหลือ" onClick={() => alert("สำหรับคำถามเพิ่มเติม ติดต่อ admin@bangkokfulfill.co")}><Icons.Help size={16}/></button>
+            {pendingSync > 0 && (
+              <div title={`${pendingSync} รายการรอซิงค์`} style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:"var(--warning)", cursor:"default", whiteSpace:"nowrap" }}>
+                <Icons.Refresh size={14}/>
+                <span>{pendingSync} รอซิงค์</span>
+              </div>
+            )}
             <div ref={notifRef} style={{ position:"relative" }}>
               <button className="btn btn-ghost btn-icon" style={{ position:"relative" }} onClick={() => setNotifOpen(o => !o)}>
                 <Icons.Bell size={16}/>

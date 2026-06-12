@@ -14,7 +14,7 @@ Consequences for any change:
 - **Do NOT add `import`/`export`.** Cross-file sharing is done by declaring top-level functions/consts and exposing them via `Object.assign(window, { name })` at the end of a file. Consumers call them **defensively**: `if (typeof helper === "function") helper(...)`.
 - **Script load order is fixed and significant** (in `Inventory Management System.html`): `tweaks-panel → data → supabase → icons → product-images → screens → dashboard → labels → settings → audit → tracking → analytics → handheld → import → bundles → auth → app`. A file can only reference globals from files loaded **before** it at top level; later-loaded helpers must be called through `typeof` guards. `data.jsx` loads early and is the natural home for low-level shared utilities.
 - **React hooks are aliased per file** to avoid global collisions: e.g. `const { useState: useStateApp, useEffect: useEffectApp } = React;` (each file uses its own suffix — `useStateApp`, `useStateDash`, …). Follow the local suffix when editing a file.
-- Adding a new CDN `<script>` requires updating the CSP `script-src` in `vercel.json` (it whitelists exact hosts).
+- Adding a new CDN `<script>` requires updating the CSP `script-src` in `vercel.json` (it whitelists exact hosts). The CSP is strict on every directive: `connect-src` is locked to `'self'` + `*.supabase.co` only, so any new fetch/WebSocket endpoint (another API, a new CDN for `img-src`, etc.) must be added there too or the request is blocked and the app can white-screen.
 
 ## Commands
 
@@ -35,13 +35,16 @@ npx vercel deploy --prod --yes --force
 # Deploy a single Supabase Edge Function (Deno/TS)
 npx supabase functions deploy <name> --project-ref eayufrfkmpeeeuaimvqw
 # track-lookup and store-info are PUBLIC (no auth) → add --no-verify-jwt
+
+# Alternate static host: Cloudflare Pages (project "psstock", via Wrangler) — Vercel is primary
+./deploy-cf.ps1
 ```
 
 There are no lint/test/build commands. Verify changes by running `node server.js` and exercising the app in a browser (auth is real Supabase — there is no login bypass/seed).
 
 ### Cache-bust token — bump on every deploy that changes an asset
 
-Every CSS/JSX `<link>`/`<script>` in `Inventory Management System.html` carries a shared `?v=YYYYMMDDx` query (a moving value — read the HTML for the current one, e.g. `20260606l`). **When you change any `.jsx` or `styles.css`, bump that token** (it's one shared value — replace-all it in the HTML). This is the project's enforced convention to defeat browser/CDN/PWA caching of the changed file. (`vercel.json` also sets `Cache-Control: no-store`, but bump the token regardless.)
+Every CSS/JSX `<link>`/`<script>` in `Inventory Management System.html` carries a shared `?v=YYYYMMDDx` query (a moving value — read the HTML for the current one, e.g. `20260606l`). **When you change any `.jsx` or `styles.css`, bump that token** (it's one shared value — replace-all it in the HTML). This is the project's enforced convention to defeat browser/CDN/PWA caching of the changed file. (`vercel.json` also sets `Cache-Control: no-store`, but bump the token regardless.) A second, complementary cache-bust path exists: `vercel.json` rewrites `/u/:ts/:rest*` → `/:rest*`, so an installed PWA can be force-refreshed by loading it under a throwaway `/u/<timestamp>/` prefix — that's what stray `/u/123456/...` URLs are.
 
 ### PWA / service worker — do NOT add app-code caching
 
@@ -57,16 +60,13 @@ The app is an installable PWA (`manifest.webmanifest` + PWA icons + `sw.js`, reg
 - `handheld.jsx` — the **entire mobile app** (`.m-app` + `m-*` components: MHome, MInbound, MSell, MIssue, MTracking, bottom tab bar). Desktop vs mobile is a **full component fork**, not just responsive CSS.
 - Feature files: `tracking.jsx`, `labels.jsx`, `analytics.jsx`, `bundles.jsx`, `import.jsx`, `settings.jsx`, `audit.jsx`, `dashboard.jsx`, `auth.jsx`. Plus `icons.jsx` (SVG icon set on `Icons`), `product-images.jsx`, `tweaks-panel.jsx` (dev-only tweak-panel shell/protocol).
 
-**Backend:** Supabase Postgres + Auth + Edge Functions in `supabase/functions/*/index.ts` (Deno/TypeScript): `extract-slip` (AI OCR of shipping slips) and `extract-product` (Gemini product-name OCR — both CORS-allowlist + JWT/write-role gated), `parse-recipient` (AI address split), `track-lookup` + `store-info` (PUBLIC customer tracking, deployed `--no-verify-jwt`), `manage-users`/`create-user` (admin), `line-bot`/`line-alert` (LINE), `backup-to-drive` (nightly full-data JSON snapshot to the owner's Google Drive via an OAuth refresh token, run on a cron). Schema + RLS live in `supabase/*.sql` plus root `supabase-schema.sql`/`migration-*.sql`; pg_cron schedules are in `supabase/setup-backup-cron.sql` and `supabase/setup-line-cron.sql`.
+**Backend:** Supabase Postgres + Auth + Edge Functions in `supabase/functions/*/index.ts` (Deno/TypeScript): `extract-slip` (AI OCR of shipping slips) and `extract-product` (Gemini product-name OCR — both CORS-allowlist + JWT/write-role gated), `extract-og-image` (fetches a product page server-side and returns its `og:image` to backfill catalog photos the CSV lacks; same CORS+JWT model as `extract-product`, SSRF-guarded), `parse-recipient` (AI address split), `track-lookup` + `store-info` (PUBLIC customer tracking, deployed `--no-verify-jwt`), `manage-users`/`create-user` (admin), `line-bot`/`line-alert` (LINE), `backup-to-drive` (nightly full-data JSON snapshot to the owner's Google Drive via an OAuth refresh token, run on a cron). Schema + RLS live in `supabase/*.sql` plus root `supabase-schema.sql`/`migration-*.sql`; pg_cron schedules are in `supabase/setup-backup-cron.sql` and `supabase/setup-line-cron.sql`.
 
 **Styling:** `styles.css` is token-driven (CSS custom properties on `:root`). It contains several appended refresh blocks and **the last `:root`/block wins** — the active theme (clean white background, orange×black PS TACTICAL brand, layered elevation/depth) lives in the trailing appended blocks. Drive UI from tokens (`--accent`, `--surface`, `--fg`, `--*-soft`, `--elev-1/2`, `--brand-grad`) so a change flows to both desktop and mobile at once. Mobile is engaged via device detection setting `html[data-mobile="1"]` + `.mobile-fullscreen`; **every UI change must be verified on both desktop and the mobile (`m-*`) view.**
 
 ## Two structural gotchas (verify against current code)
 
-1. **There are two parallel order stores** answering "what orders exist?", both upserting the same Supabase `orders` table and both firing/listening on `ims-orders-change`:
-   - *Tracking model* — `useOrders`/`buildOrders` in `tracking.jsx` (treats labels as shipments; single writer `setOrderField`). Feeds desktop Tracking, mobile MTracking, and the public `track-lookup` function.
-   - *Outbound model* — `loadOrders`/`saveOrders` in `data.jsx` over `ims_orders` + `window._DB_ORDERS`; drives **all sidebar badge counts**. Sales enter via `window.__pendingSellOrders` + `ims-sell-order`.
-   A sale only reaches Tracking if a **label** is created for it. For order/shipment work, prefer converging onto the Tracking model rather than bridging the two (a naive "write to both" amplifies duplicate-row and event-loop risk).
+1. **Orders are converged onto the Tracking model** (2026-06-12). `useOrders` (hook) / `buildOrders` (sync) in `tracking.jsx` merge labels-as-shipments + preserved + the `orders`-table cache (`loadOrders()` / `window._DB_ORDERS`), deduped by id with `ims_order_overrides` applied — and feed **everything**: desktop Outbound + Tracking, mobile MOutbound + MTracking, sidebar badges, search, notifications, and the public `track-lookup` function. Writers are: `setOrderField(id, changes)` (status/edits via overrides), `appendOrder(order)` in `data.jsx` (new orders — single-row optimistic write + DB upsert, offline-queued on failure), and `deleteOrdersFromDb`. **Do NOT reintroduce the legacy paths**: `saveOrders()` (full-list upsert that also diffs-and-DELETEs missing ids — a cross-device data-loss vector; kept only for backward compat, nothing calls it) and the retired `window.__pendingSellOrders`/`ims-sell-order` handoff. Analytics intentionally still reads raw `loadOrders()` rows — it needs `lineItems`, which label-derived rows lack.
 
 2. **Product barcode/SKU scans resolve in exactly two places**: desktop `Inbound.submitScan` (`screens.jsx`) and mobile `MInbound.submit` (`handheld.jsx`); both route camera (`CameraScanner`) and keyboard-wedge input through one funnel. Other "scan"-labelled UIs (`SlipScanModal` OCR, the labels "คัดแยก" parser, `SellProductModal` search) are **not** barcode scanners — don't treat them as scan funnels.
 

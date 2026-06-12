@@ -231,9 +231,11 @@ function orderMatchesQuery(o, raw) {
   return false;
 }
 
-/* Synchronous merged order list (labels-as-shipments + preserved + base, with
-   overrides applied) for non-hook callers like badge counts. Mirrors useOrders'
-   merge minus the async Supabase rows. */
+/* Synchronous merged order list (labels-as-shipments + preserved + DB-cache,
+   with overrides applied) for non-hook callers like badge counts. Mirrors
+   useOrders' merge exactly: loadOrders() reads the same orders-table rows that
+   useOrders fetches asynchronously (window._DB_ORDERS cache), so sync consumers
+   (badges, search, notifications) see the same set as Tracking/MOutbound. */
 function buildOrders() {
   const overrides = loadOrderOverrides();
   const out = [];
@@ -242,6 +244,7 @@ function buildOrders() {
     OUTBOUND,
     (typeof loadLabels === "function" ? loadLabels() : []).map(labelToOrder),
     loadPreservedOrders(),
+    (typeof loadOrders === "function" ? loadOrders() : []),
   ];
   for (const src of sources) {
     for (const o of src) {

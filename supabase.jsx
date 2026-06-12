@@ -57,6 +57,37 @@ async function dbDeleteProducts(skus) {
   return { ok: true, deleted };
 }
 
+/* Atomic server-side stock deduction (migration-atomic-stock.sql).
+   One UPDATE per SKU with qty = GREATEST(0, qty - n) — concurrent sells on
+   two devices serialize on the row lock instead of overwriting each other
+   via the old read-modify-write full-catalog upsert.
+   Returns { ok, rows: [{sku, qty}] } with the server-canonical quantities,
+   { error: 'RPC_MISSING' } if the migration hasn't been applied yet, or
+   { error: 'PERMISSION_OR_MISSING', rows } when RLS blocked some rows. */
+async function dbDeductStock(deductions) {
+  const items = (deductions || [])
+    .filter(d => d && d.sku && Number(d.qty) > 0)
+    .map(d => ({ sku: d.sku, qty: Number(d.qty) }));
+  if (!items.length) return { ok: true, rows: [] };
+  const { data, error } = await sb.rpc('deduct_stock', { deductions: items });
+  if (error) {
+    console.error('[DB] deduct_stock:', error.message);
+    // PGRST202 = function not found → migration not applied; caller falls back
+    const missing = (error.code === 'PGRST202') || /function|deduct_stock/i.test(error.message || '');
+    return { error: missing ? 'RPC_MISSING' : error.message };
+  }
+  const rows = Array.isArray(data) ? data : [];
+  // Distinct SKUs that came back vs requested (the same SKU may legitimately
+  // appear twice in one cart — e.g. alone and inside a bundle).
+  const got = new Set(rows.map(r => r.sku));
+  const want = new Set(items.map(i => i.sku));
+  if (got.size < want.size) {
+    console.error('[DB] deduct_stock blocked/missing:', got.size, 'of', want.size, 'SKUs updated');
+    return { error: 'PERMISSION_OR_MISSING', rows };
+  }
+  return { ok: true, rows };
+}
+
 /* ═══════════════════════════════════════════
    ORDERS
    ═══════════════════════════════════════════ */
@@ -119,9 +150,15 @@ async function dbLoadOrders() {
 // All columns now present after 2026-06-01 migration:
 // item_count, bundle_name, line_items, deductions, date_iso added via Management API.
 async function dbUpsertOrders(orders) {
-  if (!orders || !orders.length) return;
-  const { error } = await sb.from('orders').upsert(orders.map(_orderToRow));
-  if (error) console.error('[DB] upsert orders:', error.message);
+  if (!orders || !orders.length) return { ok: true };
+  const rows = orders.map(_orderToRow);
+  const { data, error } = await sb.from('orders').upsert(rows).select('id');
+  if (error) { console.error('[DB] upsert orders:', error.message); return { error: error.message }; }
+  if (!data || data.length < rows.length) {
+    console.error('[DB] upsert orders blocked (RLS) —', data?.length ?? 0, 'of', rows.length);
+    return { error: 'PERMISSION_OR_MISSING' };
+  }
+  return { ok: true };
 }
 async function dbDeleteOrder(id) {
   // .select() lets us detect an RLS-blocked delete (0 rows, no error).
@@ -186,10 +223,15 @@ async function dbLoadLabels() {
   return data.map(l => ({ ...l.data, id: l.id }));
 }
 async function dbUpsertLabels(labels) {
-  if (!labels || !labels.length) return;
+  if (!labels || !labels.length) return { ok: true };
   const rows = labels.map(l => ({ id: l.id, so_id: l.soId || '', data: l }));
-  const { error } = await sb.from('labels').upsert(rows);
-  if (error) console.error('[DB] upsert labels:', error.message);
+  const { data, error } = await sb.from('labels').upsert(rows).select('id');
+  if (error) { console.error('[DB] upsert labels:', error.message); return { error: error.message }; }
+  if (!data || data.length < rows.length) {
+    console.error('[DB] upsert labels blocked (RLS) —', data?.length ?? 0, 'of', rows.length);
+    return { error: 'PERMISSION_OR_MISSING' };
+  }
+  return { ok: true };
 }
 async function dbDeleteLabel(id) {
   const { data, error } = await sb.from('labels').delete().eq('id', id).select('id');
@@ -660,7 +702,7 @@ async function downloadBackup() {
 Object.assign(window, {
   sb, readProductNameFromImage, resolveWebImages, buildBackupSnapshot, downloadBackup,
   dbInit, setupRealtimeSync,
-  dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,
+  dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,
   dbLoadLabels,        dbUpsertLabels,       dbDeleteLabel,

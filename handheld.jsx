@@ -82,7 +82,16 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
     return { ...r, view: prev.view, params: prev.params, history: h };
   });
 
-  const ctx = { route, switchTab, push, back, pushToast, user, onLogout, onSwitchUser, fullscreen };
+  const [pendingSync, setPendingSync] = useStateM(() =>
+    typeof loadOfflineQueue === "function" ? loadOfflineQueue().length : 0
+  );
+  useEffectM(() => {
+    const h = (e) => setPendingSync(e.detail.count);
+    window.addEventListener("ims-queue-change", h);
+    return () => window.removeEventListener("ims-queue-change", h);
+  }, []);
+
+  const ctx = { route, switchTab, push, back, pushToast, user, onLogout, onSwitchUser, fullscreen, pendingSync };
 
   return (
     <div className="m-app">
@@ -213,9 +222,9 @@ function MHome({ ctx }) {
         <div className="m-card">
           <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
             <div style={{ fontWeight: 600, fontSize: 13 }}>ออร์เดอร์ตามช่องทาง</div>
-            <span style={{ fontSize: 11, color: "var(--muted)" }}>วันนี้ • 295</span>
+            <span style={{ fontSize: 11, color: "var(--muted)" }}>วันนี้ • {CHANNELS.reduce((s, c) => s + (c.today || 0), 0)}</span>
           </div>
-          {CHANNELS.slice(0, 4).map(c => {
+          {CHANNELS.map(c => {
             const meta = CHANNEL_LIST.find(x => x.id === c.id) || {};
             return (
               <div key={c.id} style={{ padding: "6px 0" }}>
@@ -322,6 +331,7 @@ function MInbound({ ctx }) {
   const [scan, setScan] = useStateM("");
   const [flash, setFlash] = useStateM(null);
   const [camOpen, setCamOpen] = useStateM(false);
+  const lastScanRef = useRefM(null);
   const [quickAdd, setQuickAdd] = useStateM(null); // null | { sku }
   const [similar, setSimilar] = useStateM(null); // null | { code, candidates } — near-duplicate prompt
   const [closed, setClosed] = useStateM(false);
@@ -329,6 +339,7 @@ function MInbound({ ctx }) {
   const inputRef = useRefM(null);
   // Persist the receiving draft on every change; clear it once the job is committed.
   useEffectM(() => { if (typeof saveInboundDraft === "function") saveInboundDraft(closed ? [] : received); }, [received, closed]);
+  useEffectM(() => () => setCamOpen(false), []);
 
   // Active GR = first in-progress or scheduled document in the queue
   const activeGR = grQueue.find(r => r.status !== "received") || grQueue[0] || null;
@@ -352,6 +363,9 @@ function MInbound({ ctx }) {
     if (closed) return;
     const code = (override ?? scan).trim();
     if (!code) return;
+    if (lastScanRef.current === code) return;
+    lastScanRef.current = code;
+    setTimeout(() => { if (lastScanRef.current === code) lastScanRef.current = null; }, 300);
     const p = PRODUCTS.find(x => x.sku.toLowerCase() === code.toLowerCase());
     setScan("");
     if (!p) {
@@ -593,21 +607,34 @@ function MInbound({ ctx }) {
 function MOutbound({ ctx }) {
   const tabs = ["ทั้งหมด", "รอหยิบ", "พร้อมส่ง", "ส่งแล้ว"];
   const [tab, setTab] = useStateM(0);
+  const [q, setQ] = useStateM("");
+  const [chanFilter, setChanFilter] = useStateM("all");
   // Single source of truth shared with ติดตามพัสดุ: labels-as-shipments + overrides.
   const orders = useOrders();
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
   const [bulkMenu, setBulkMenu] = useStateM(null);
 
-  const filtered = tab === 0 ? orders :
-    tab === 1 ? orders.filter(o => o.status === "picking") :
-    tab === 2 ? orders.filter(o => o.status === "packed") :
-    orders.filter(o => o.status === "shipped");
+  const channels = useMemoM(() => {
+    const set = new Set(orders.map(o => (o.channel || "").trim()).filter(Boolean));
+    return ["all", ...set];
+  }, [orders.length]);
+
+  const filtered = useMemoM(() => {
+    const lq = q.trim().toLowerCase();
+    const byStatus = tab === 0 ? orders :
+      tab === 1 ? orders.filter(o => o.status === "picking") :
+      tab === 2 ? orders.filter(o => o.status === "packed") :
+      orders.filter(o => o.status === "shipped");
+    return byStatus
+      .filter(o => chanFilter === "all" || (o.channel || "").trim() === chanFilter)
+      .filter(o => !lq || (o.id || "").toLowerCase().includes(lq) || (o.customer || "").toLowerCase().includes(lq));
+  }, [orders, tab, q, chanFilter]);
 
   const selectedIds = Object.keys(selected).filter(k => selected[k]);
   const selectedCount = selectedIds.length;
   const toggle = (id) => setSelected(s => { const n = { ...s }; if (n[id]) delete n[id]; else n[id] = true; return n; });
-  const clear = () => { setSelected({}); setSelecting(false); setBulkMenu(null); };
+  const clear = () => { setSelected({}); setSelecting(false); setBulkMenu(null); setQ(""); setChanFilter("all"); };
 
   // Open the shipping label that backs this order so it can be viewed / saved as PDF.
   // labelToOrder ids: soId unless it's a "ฉลากใหม่ N" placeholder, then the label id.
@@ -639,6 +666,16 @@ function MOutbound({ ctx }) {
     <>
       <div className="m-topbar">
         <div className="m-title">จัดส่งสินค้า</div>
+        <button className="m-action" onClick={() => {
+          let list;
+          if (selecting && selectedCount > 0) {
+            list = selectedIds.map(id => filtered.find(o => o.id === id)).filter(Boolean);
+          } else {
+            list = filtered.filter(o => o.status === "picking");
+          }
+          if (!list.length) { ctx.pushToast("ไม่มีออร์เดอร์ที่ต้องหยิบ"); return; }
+          if (typeof openPickListWindow === "function") openPickListWindow(list, ctx.pushToast);
+        }}><Icons.Print size={14}/></button>
         <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)}>
           {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
         </button>
@@ -665,11 +702,31 @@ function MOutbound({ ctx }) {
           </div>
         )}
 
-        <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
+        <div className="m-search" style={{ marginBottom: 8 }}>
+          <Icons.Search size={14} style={{ color: "var(--muted)" }}/>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา ออร์เดอร์ หรือชื่อลูกค้า..."/>
+          {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+        </div>
+
+        <div className="m-chips-scroll" style={{ marginBottom: 6 }}>
           {tabs.map((t, i) => (
             <button key={t} className={"m-chip" + (tab === i ? " on" : "")} onClick={() => setTab(i)}>{t}</button>
           ))}
         </div>
+
+        {channels.length > 1 && (
+          <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
+            {channels.map(ch => {
+              const meta = ch !== "all" ? CHANNEL_LIST.find(c => c.name === ch) : null;
+              return (
+                <button key={ch} className={"m-chip" + (chanFilter === ch ? " on" : "")} onClick={() => setChanFilter(ch)}
+                  style={chanFilter === ch && meta ? { background: meta.color, borderColor: meta.color, color: "#fff" } : {}}>
+                  {ch === "all" ? "ทุกช่องทาง" : ch}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {selecting && (
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8, padding: "0 4px" }}>
@@ -811,6 +868,19 @@ function MInventory({ ctx }) {
     setBulkOpen(false);
   };
 
+  const exportInventoryCsv = () => {
+    const csvRows = [["SKU", "ชื่อสินค้า", "หมวด", "คงเหลือ", "จุดสั่ง", "ราคา", "ต้นทุน"]];
+    filtered.forEach(p => {
+      csvRows.push([p.sku, `"${(p.name || "").replace(/"/g, '""')}"`, p.cat || "", p.qty, p.reorder || 0, p.price || 0, p.cost || 0]);
+    });
+    const csv = "﻿" + csvRows.map(r => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "inventory.csv"; a.click();
+    URL.revokeObjectURL(url);
+    ctx.pushToast(`ส่งออก CSV ${filtered.length} รายการ`);
+  };
+
   const addProduct = (p) => {
     addProductToStore({ ...p, reserved: 0 });
     ctx.pushToast(`เพิ่ม SKU ${p.sku} แล้ว`);
@@ -828,6 +898,7 @@ function MInventory({ ctx }) {
     <>
       <div className="m-topbar">
         <div className="m-title">สินค้าคงคลัง</div>
+        {!selecting && <button className="m-action" title="ส่งออก CSV" onClick={exportInventoryCsv}><Icons.Pkg size={14}/></button>}
         <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)}>
           {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
         </button>
@@ -907,7 +978,7 @@ function MInventory({ ctx }) {
           <span style={{ width: 26, height: 26, borderRadius: 999, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600 }} className="tnum">{selectedCount}</span>
           <span style={{ fontSize: 12, flex: 1 }}>เลือก {selectedCount} รายการ</span>
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkOpen(true)}><Icons.Edit size={14}/></button>
-          <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => ctx.pushToast("เพิ่มเข้าคิวพิมพ์บาร์โค้ด")}><Icons.Print size={14}/></button>
+          <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); if (typeof printBarcodeLabels === "function") printBarcodeLabels(items, ctx.pushToast); }}><Icons.Print size={14}/></button>
           <button className="m-action" style={{ background: "rgba(255,90,90,0.3)", color: "white", width: 36, height: 36 }} onClick={async () => { if (!confirm(`ลบ ${selectedCount} รายการ?`)) return; const rm = [...selectedSkus]; clear(); const res = await removeProductsFromStore(rm); if (res && res.ok === false) { ctx.pushToast(res.error); return; } ctx.pushToast(`ลบ ${rm.length} รายการ`); }}><Icons.Trash size={14}/></button>
         </div>
       )}
@@ -1245,6 +1316,16 @@ function MProductDetail({ ctx }) {
           })()}
         </div>
 
+        <div className="m-section-label" style={{ padding: "8px 4px" }}>บาร์โค้ดสินค้า</div>
+        <div className="m-card" style={{ textAlign: "center", padding: "14px 12px" }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>บาร์โค้ดสินค้า</div>
+            <button className="btn btn-sm" onClick={() => { if (typeof printBarcodeLabels === "function") printBarcodeLabels([p], ctx.pushToast); }}><Icons.Print size={13}/> พิมพ์</button>
+          </div>
+          <Barcode value={p.sku} height={50}/>
+          <div className="mono" style={{ fontSize: 12, marginTop: 4, letterSpacing: "0.06em" }}>{p.sku}</div>
+        </div>
+
         <button className="m-btn-big success" style={{ marginTop: 8 }} disabled={(p.qty - (p.reserved || 0)) <= 0} onClick={() => ctx.push("sell", { sku: p.sku })}>
           <Icons.Cart size={16}/> ขายสินค้า
         </button>
@@ -1347,6 +1428,7 @@ function MIssue({ ctx }) {
   const [channels, setChannels] = useStateM(() =>
     Object.fromEntries(CHANNEL_LIST.map(c => [c.id, { on: c.id === "shopee", qty: c.id === "shopee" ? 1 : 0 }]))
   );
+  const [submitting, setSubmitting] = useStateM(false);
 
   const effQty = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
   const product = PRODUCTS.find(p => p.sku === skuId) || PRODUCTS[0];
@@ -1362,8 +1444,10 @@ function MIssue({ ctx }) {
   const overStock = total > stockCap;
   const canSubmit = total > 0 && !overStock && !noBundles && (isBundle ? !!bundle : true);
 
-  const submit = () => {
-    if (!canSubmit) return;
+  const submit = async () => {
+    if (!canSubmit || submitting) return;
+    if (!navigator.onLine) { ctx.pushToast("ไม่มีการเชื่อมต่ออินเทอร์เน็ต — กรุณาตรวจสอบเครือข่าย"); return; }
+    setSubmitting(true);
     if (isBundle) {
       deductManyAndPersist(bundle.items.map(it => ({ sku: it.sku, qty: it.qty * total })));
     } else {
@@ -1387,7 +1471,7 @@ function MIssue({ ctx }) {
     // queue — mirrors the desktop stock-out (submitIssue). Synced via the orders
     // realtime arm; track-lookup dedups id|tracking so no double-show for customers.
     if (typeof dbUpsertOrders === "function") {
-      dbUpsertOrders([{
+      const issueRow = [{
         id,
         channel: "ตัดสต็อก",
         customer: customer || "ลูกค้าใหม่",
@@ -1399,7 +1483,12 @@ function MIssue({ ctx }) {
         isBundle,
         bundleName: isBundle ? bundle.name : "",
         lineItems,
-      }]).catch(() => {});
+      }];
+      const dbRes = await dbUpsertOrders(issueRow);
+      if (dbRes && dbRes.error) {
+        if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("orders", issueRow);
+        ctx.pushToast("⚠️ ออร์เดอร์จะซิงค์อัตโนมัติเมื่อออนไลน์");
+      }
     }
 
     if (typeof recordChange === "function") {
@@ -1424,7 +1513,7 @@ function MIssue({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.X size={14}/></button>
         <div className="m-title-sub">ตัดสต็อก / ขาย</div>
-        <button className="m-action accent" disabled={!canSubmit} onClick={submit} style={!canSubmit ? { opacity: 0.4 } : {}}>
+        <button className="m-action accent" disabled={!canSubmit || submitting} onClick={submit} style={(!canSubmit || submitting) ? { opacity: 0.4 } : {}}>
           <Icons.Check size={14}/>
         </button>
       </div>
@@ -1625,7 +1714,7 @@ function MSell({ ctx }) {
     !q || b.name.toLowerCase().includes(qL) || b.id.toLowerCase().includes(qL)
   );
 
-  const cartValue = cart.reduce((s, i) => s + (i.price || 0) * i.qty, 0);
+  const cartValue = cart.reduce((s, i) => s + (i.price || 0) * (i.qty || 0), 0);
   const cartTotal = cart.reduce((s, i) => s + i.qty, 0);
 
   const addProduct = (p) => setCart(prev => {
@@ -1646,6 +1735,8 @@ function MSell({ ctx }) {
 
   // Scan a barcode/SKU → add the matching product to the cart (same beep feedback as Inbound)
   const [camOpen, setCamOpen] = useStateM(false);
+  const [submitting, setSubmitting] = useStateM(false);
+  useEffectM(() => () => setCamOpen(false), []);
   const addByScan = (code) => {
     const sku = String(code || "").trim();
     if (!sku) return;
@@ -1669,13 +1760,16 @@ function MSell({ ctx }) {
   const shipValid = ship.name.trim() && ship.phone.trim() && ship.addr1.trim();
   const cartReady = cart.length > 0 && cartErrors.length === 0;
 
-  const submitOrder = () => {
+  const submitOrder = async () => {
+    if (submitting) return;
+    if (!navigator.onLine) { ctx.pushToast("ไม่มีการเชื่อมต่ออินเทอร์เน็ต — กรุณาตรวจสอบเครือข่าย"); return; }
+    setSubmitting(true);
     // Re-validate against live stock at submit time (stock may have changed mid-wizard)
     const liveErrors = cart.map(item => {
       const avail = item.type === "product" ? effQty(item.sku) : bMax(item);
       return item.qty > avail ? item.name : null;
     }).filter(Boolean);
-    if (cart.length === 0 || liveErrors.length > 0) { ctx.pushToast("สต็อกไม่พอ — ตรวจสอบรายการอีกครั้ง"); return; }
+    if (cart.length === 0 || liveErrors.length > 0) { setSubmitting(false); ctx.pushToast("สต็อกไม่พอ — ตรวจสอบรายการอีกครั้ง"); return; }
     const allDeductions = [];
     cart.forEach(item => {
       if (item.type === "product") allDeductions.push({ sku: item.sku, qty: item.qty });
@@ -1713,7 +1807,8 @@ function MSell({ ctx }) {
           name: ship.name,
           phone: ship.phone,
           addr1: ship.addr1,
-          addr2: [ship.addr2, ship.tambon, ship.amphoe, ship.province, ship.postal].filter(Boolean).join(" "),
+          addr2: ship.addr2,
+          tambon: ship.tambon, amphoe: ship.amphoe, province: ship.province, postal: ship.postal,
           carrier: ship.carrier,
           cod: ship.cod ? (parseFloat(ship.codAmt) || 0) : 0,
           items: lineItems,
@@ -1727,7 +1822,7 @@ function MSell({ ctx }) {
     // customer track-lookup dedups by id|tracking, so this won't double-show.
     if (typeof dbUpsertOrders === "function") {
       const hasBundle = cart.some(i => i.type === "bundle");
-      dbUpsertOrders([{
+      const sellRow = [{
         id: orderId,
         channel: "ขายตรง",
         customer: ship.name,
@@ -1744,7 +1839,12 @@ function MSell({ ctx }) {
         codAmount: ship.cod ? (parseFloat(ship.codAmt) || 0) : 0,
         lineItems,
         deductions: [{ id: "direct", name: "ขายตรง", color: "#8B5CF6", qty: cartTotal }],
-      }]).catch(() => {});
+      }];
+      const dbRes = await dbUpsertOrders(sellRow);
+      if (dbRes && dbRes.error) {
+        if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("orders", sellRow);
+        ctx.pushToast("⚠️ ออร์เดอร์จะซิงค์อัตโนมัติเมื่อออนไลน์");
+      }
     }
 
     ctx.pushToast(`ขายสำเร็จ ${orderId} · สร้างฉลากแล้ว`);
@@ -2044,7 +2144,7 @@ function MSell({ ctx }) {
             </button>
           )}
           {step === 3 && (
-            <button className="m-btn-big success" style={{ flex: 1, ...(cartReady ? {} : { opacity: 0.5 }) }} disabled={!cartReady} onClick={submitOrder}>
+            <button className="m-btn-big success" style={{ flex: 1, ...(!cartReady || submitting ? { opacity: 0.5 } : {}) }} disabled={!cartReady || submitting} onClick={submitOrder}>
               <Icons.Check size={16}/> ยืนยันการขาย
             </button>
           )}
@@ -2378,6 +2478,12 @@ function MMore({ ctx }) {
       <div className="m-topbar">
         <div className="m-title">เพิ่มเติม</div>
       </div>
+      {ctx.pendingSync > 0 && (
+        <div style={{ background: "var(--warning)", color: "#000", fontSize: 12, padding: "6px 16px", display: "flex", alignItems: "center", gap: 8 }}>
+          <Icons.Refresh size={12}/>
+          <span>{ctx.pendingSync} รายการรอซิงค์ — จะอัปโหลดอัตโนมัติเมื่อออนไลน์</span>
+        </div>
+      )}
       <div className="m-content">
         <div className="m-card" style={{ display: "flex", gap: 12, alignItems: "center", padding: 16 }}>
           <div style={{ width: 48, height: 48, borderRadius: 999, background: role.color, color: "white", display: "grid", placeItems: "center", fontWeight: 600, flexShrink: 0 }}>{user.avatar || user.name?.slice(0,2)}</div>
@@ -2388,7 +2494,10 @@ function MMore({ ctx }) {
         </div>
 
         <div className="m-list">
-          {items.map(it => {
+          {items.filter(it =>
+            it.id === "catalog" ||
+            (typeof ROLE_NAV !== "undefined" && ROLE_NAV[user.role] && ROLE_NAV[user.role].includes(it.id))
+          ).map(it => {
             const I = it.icon;
             return (
               <button key={it.id} className="m-row" onClick={() => ctx.push(it.id)}>
@@ -2423,7 +2532,7 @@ function MMore({ ctx }) {
           <div className="m-row" style={{ cursor: "default" }}>
             <div className="m-row-main">
               <div className="m-row-title" style={{ fontSize: 13 }}>เวอร์ชัน</div>
-              <div className="m-row-sub">2.6.0 (Build 2026.05.19)</div>
+              <div className="m-row-sub">2.7.0 (Build 2026.06.12)</div>
             </div>
           </div>
           <div className="m-row" style={{ cursor: "default" }}>
@@ -2563,6 +2672,7 @@ function MLocations({ ctx }) {
   }, []);
 
   const buildings = (tree && tree.buildings) || [];
+  const [selectedPos, setSelectedPos] = useStateM(null);
   const allowDelete = typeof canDeleteData === "function" ? canDeleteData() : true;
   const posCount = buildings.reduce((s, b) => s + (b.floors || []).reduce((t, f) => t + (f.positions || []).length, 0), 0);
 
@@ -2574,8 +2684,25 @@ function MLocations({ ctx }) {
   const askP = (b, f) => { const n = prompt(`เพิ่มตำแหน่งใน ${b} · ${f} (เช่น A1)`); if (n && n.trim()) addPosition(b, f, n.trim()); };
   const editB = (b) => { const n = prompt("เปลี่ยนชื่ออาคาร", b); if (n && n.trim() && n.trim() !== b) renameBuilding(b, n.trim()); };
   const tapPos = (b, f, p) => {
-    if (!allowDelete) return;
-    if (confirm(`ลบตำแหน่ง ${p}?`)) removePosition(b, f, p);
+    const code = locCode(b, f, p);
+    setSelectedPos({ b, f, p, code });
+  };
+  const printPosQr = (sel) => {
+    const svg = (typeof qrSvgMarkup === "function") ? qrSvgMarkup(sel.code, 360) : "";
+    const w = window.open("", "_blank", "width=420,height=470");
+    if (!w) return;
+    w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>ป้าย ${sel.p}</title>
+      <style>
+        @page{size:50mm 50mm;margin:0}html,body{margin:0;padding:0}
+        body{font-family:'IBM Plex Sans Thai','IBM Plex Mono',monospace;text-align:center;padding:4mm}
+        .qr{width:30mm;height:30mm;margin:0 auto 2mm}.qr svg{width:100%;height:100%;display:block}
+        .pos{font-size:20px;font-weight:700}.path{font-size:11px;color:#555;margin-top:1mm}
+      </style></head>
+      <body onload="window.focus();window.print();">
+        <div class="qr">${svg}</div><div class="pos">${sel.p}</div>
+        <div class="path">${sel.b} · ${sel.f}</div>
+      </body></html>`);
+    w.document.close();
   };
 
   return (
@@ -2640,9 +2767,55 @@ function MLocations({ ctx }) {
 
         <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 12, fontSize: 11, color: "var(--muted)", display: "flex", gap: 10, alignItems: "center" }}>
           <Icons.Refresh size={14}/>
-          <span>แตะตำแหน่งเพื่อลบ · แตะชื่ออาคารเพื่อแก้ไข · SKU คำนวณจากสินค้าจริง</span>
+          <span>แตะตำแหน่งเพื่อดูรายละเอียด · แตะชื่ออาคารเพื่อแก้ไข</span>
         </div>
       </div>
+
+      {selectedPos && (() => {
+        const items = PRODUCTS.filter(p => (p.loc || "") === selectedPos.code);
+        return (
+          <>
+            <div className="m-sheet-backdrop" onClick={() => setSelectedPos(null)}/>
+            <div className="m-sheet">
+              <div className="m-sheet-grabber"/>
+              <div className="m-sheet-head">
+                <div>
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>{selectedPos.b} · {selectedPos.f}</div>
+                  <h3 className="mono" style={{ marginTop: 2 }}>{selectedPos.p}</h3>
+                </div>
+                <button style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer" }} onClick={() => setSelectedPos(null)}><Icons.X size={18}/></button>
+              </div>
+              <div className="m-sheet-body">
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>สินค้าในตำแหน่งนี้ ({items.length})</div>
+                {items.length === 0
+                  ? <div style={{ padding: 16, textAlign: "center", color: "var(--muted)", fontSize: 12, border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้</div>
+                  : items.slice(0, 40).map(p => (
+                    <div key={p.sku} className="row" style={{ padding: "8px 10px", background: "var(--surface-2)", borderRadius: 8, marginBottom: 6 }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13 }}>{p.name}</div>
+                        <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</div>
+                      </div>
+                      <div className="tnum" style={{ fontSize: 14, fontWeight: 500 }}>{p.qty} ชิ้น</div>
+                    </div>
+                  ))
+                }
+                <button className="m-btn-big" style={{ marginTop: 16, background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={() => printPosQr(selectedPos)}><Icons.Print size={15}/> พิมพ์ป้าย QR</button>
+              </div>
+              <div className="m-sheet-foot" style={{ display: "flex", gap: 8 }}>
+                {allowDelete && (
+                  <button className="m-btn-big" style={{ flex: 1, background: "var(--danger-soft)", color: "var(--danger)", border: "none" }} onClick={() => { if (confirm(`ลบตำแหน่ง ${selectedPos.p}?`)) { removePosition(selectedPos.b, selectedPos.f, selectedPos.p); setSelectedPos(null); } }}>
+                    <Icons.Trash size={14}/> ลบ
+                  </button>
+                )}
+                <button className="m-btn-big" style={{ flex: 1, background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={() => { const n = prompt("เปลี่ยนชื่อตำแหน่ง", selectedPos.p); if (n && n.trim() && n.trim() !== selectedPos.p) { renamePosition(selectedPos.b, selectedPos.f, selectedPos.p, n.trim()); setSelectedPos(null); } }}>
+                  <Icons.Edit size={14}/> เปลี่ยนชื่อ
+                </button>
+                <button className="m-btn-big accent" style={{ flex: 1 }} onClick={() => setSelectedPos(null)}>เสร็จสิ้น</button>
+              </div>
+            </div>
+          </>
+        );
+      })()}
     </>
   );
 }
@@ -2651,11 +2824,28 @@ function MLocations({ ctx }) {
 
 function MLabels({ ctx }) {
   const [labels, setLabels] = useStateM(() => typeof loadLabels === "function" ? loadLabels() : SAMPLE_LABELS);
+  const [selecting, setSelecting] = useStateM(false);
+  const [selected, setSelected] = useStateM({});
+  const [batchLabels, setBatchLabels] = useStateM([]);
+  const [batchLoading, setBatchLoading] = useStateM(false);
+  const batchContainerRef = useRefM(null);
+
   useEffectM(() => {
     const refresh = () => setLabels(typeof loadLabels === "function" ? loadLabels() : SAMPLE_LABELS);
     window.addEventListener("ims-labels-change", refresh);
     return () => window.removeEventListener("ims-labels-change", refresh);
   }, []);
+
+  const store = (() => {
+    if (window._DB_STORE) return { ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...window._DB_STORE };
+    try { return { ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...JSON.parse(localStorage.getItem("ims_store") || "{}") }; }
+    catch (e) { return typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}; }
+  })();
+
+  const selectedIds = Object.keys(selected).filter(k => selected[k]);
+  const selectedCount = selectedIds.length;
+  const toggle = (id) => setSelected(s => { const n = { ...s }; if (n[id]) delete n[id]; else n[id] = true; return n; });
+  const clearSelect = () => { setSelected({}); setSelecting(false); };
 
   const createLabel = () => {
     const fresh = (typeof blankLabel === "function") ? blankLabel() : { id: "L" + Date.now(), soId: "", recipient: { name: "", addr1: "", addr2: "", phone: "" }, items: [], weight: "", carrier: "", box: "" };
@@ -2664,12 +2854,34 @@ function MLabels({ ctx }) {
     ctx.push("label-edit", fresh);
   };
 
+  const printSelected = async () => {
+    const sel = labels.filter(l => selected[l.id]);
+    if (!sel.length) { ctx.pushToast("ไม่ได้เลือกฉลาก"); return; }
+    if (typeof labelsToPDF !== "function") { ctx.pushToast("ฟังก์ชัน PDF ยังไม่พร้อม"); return; }
+    setBatchLoading(true);
+    setBatchLabels(sel);
+    await new Promise(r => setTimeout(r, 450));
+    const container = batchContainerRef.current;
+    const els = container ? [...container.querySelectorAll(".label-paper")] : [];
+    if (els.length) {
+      await labelsToPDF(els, LABEL_SIZES[0], sel.length > 1 ? "batch" : (sel[0].soId || sel[0].id), ctx.pushToast);
+    } else {
+      ctx.pushToast("สร้าง PDF ไม่สำเร็จ — ลองอีกครั้ง");
+    }
+    setBatchLabels([]);
+    setBatchLoading(false);
+    clearSelect();
+  };
+
   return (
     <>
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub">ฉลากจัดส่ง</div>
-        <button className="m-action accent" onClick={createLabel}><Icons.Plus size={14}/></button>
+        <button className="m-action" onClick={() => selecting ? clearSelect() : setSelecting(true)}>
+          {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
+        </button>
+        {!selecting && <button className="m-action accent" onClick={createLabel}><Icons.Plus size={14}/></button>}
       </div>
       <div className="m-content">
         <div className="m-card" style={{ display: "flex", gap: 10 }}>
@@ -2677,26 +2889,32 @@ function MLabels({ ctx }) {
             <div style={{ fontSize: 12, color: "var(--muted)" }}>คิวพิมพ์</div>
             <div style={{ fontSize: 24, fontWeight: 600, marginTop: 2 }} className="tnum">{labels.length}</div>
           </div>
-          <button className="m-btn-big" style={{ width: "auto", padding: "12px 16px" }} onClick={createLabel}>
-            <Icons.Plus size={14}/> สร้างฉลาก
-          </button>
+          {!selecting && (
+            <button className="m-btn-big" style={{ width: "auto", padding: "12px 16px" }} onClick={createLabel}>
+              <Icons.Plus size={14}/> สร้างฉลาก
+            </button>
+          )}
         </div>
 
-        <div className="m-section-label" style={{ padding: "8px 4px" }}>รายการฉลาก</div>
+        <div className="m-section-label" style={{ padding: "8px 4px" }}>รายการฉลาก{selecting && <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}> · แตะเพื่อเลือก</span>}</div>
         <div className="m-list">
-          {labels.map(l => (
-            <button key={l.id} className="m-row" onClick={() => ctx.push("label-view", l)}>
-              <div className="m-row-thumb" style={{ background: "var(--surface-2)", color: "var(--accent)" }}><Icons.Tag size={16}/></div>
-              <div className="m-row-main">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{l.soId || "ฉลากใหม่"}</span>
-                  <span style={{ fontSize: 10, color: "var(--muted)" }}>{(l.carrier || "").split(" ")[0]}</span>
+          {labels.map(l => {
+            const isSelected = !!selected[l.id];
+            return (
+              <button key={l.id} className={"m-row" + (isSelected ? " selected" : "")} onClick={() => selecting ? toggle(l.id) : ctx.push("label-view", l)}>
+                {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
+                <div className="m-row-thumb" style={{ background: isSelected ? "var(--accent)" : "var(--surface-2)", color: isSelected ? "white" : "var(--accent)" }}><Icons.Tag size={16}/></div>
+                <div className="m-row-main">
+                  <div className="row" style={{ justifyContent: "space-between" }}>
+                    <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{l.soId || "ฉลากใหม่"}</span>
+                    <span style={{ fontSize: 10, color: "var(--muted)" }}>{(l.carrier || "").split(" ")[0]}</span>
+                  </div>
+                  <div className="m-row-sub">{l.recipient.name || "ยังไม่ระบุผู้รับ"} · {l.items.length} รายการ · {l.weight || "—"}</div>
                 </div>
-                <div className="m-row-sub">{l.recipient.name || "ยังไม่ระบุผู้รับ"} · {l.items.length} รายการ · {l.weight || "—"}</div>
-              </div>
-              <Icons.Chev size={14} className="m-row-chev"/>
-            </button>
-          ))}
+                {!selecting && <Icons.Chev size={14} className="m-row-chev"/>}
+              </button>
+            );
+          })}
           {labels.length === 0 && (
             <div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
               <Icons.Tag size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>
@@ -2718,6 +2936,25 @@ function MLabels({ ctx }) {
           ))}
         </div>
       </div>
+
+      {selecting && selectedCount > 0 && (
+        <div className="m-bulk-bar">
+          <span style={{ width: 26, height: 26, borderRadius: 999, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600 }} className="tnum">{selectedCount}</span>
+          <span style={{ fontSize: 12, flex: 1 }}>เลือก {selectedCount} ฉลาก</span>
+          <button className="m-action" style={{ background: "var(--accent)", color: "white", width: "auto", padding: "0 14px", borderRadius: 10, fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }} onClick={printSelected} disabled={batchLoading}>
+            <Icons.Print size={14}/> {batchLoading ? "กำลังสร้าง…" : "PDF"}
+          </button>
+        </div>
+      )}
+
+      {/* Hidden container for batch PDF rendering */}
+      {batchLabels.length > 0 && (
+        <div ref={batchContainerRef} style={{ position: "fixed", left: -9999, top: 0, pointerEvents: "none", zIndex: -1 }}>
+          {batchLabels.map(l => (
+            <LabelPaper key={l.id} label={l} size={LABEL_SIZES[0]} store={store}/>
+          ))}
+        </div>
+      )}
     </>
   );
 }
@@ -2741,16 +2978,35 @@ function MLabelView({ ctx }) {
   })();
   const size = LABEL_SIZES[0]; // 100x150
 
+  // Exact-size PDF (SVG→jsPDF) so the label fills a real 100×150mm page with
+  // correct Thai. Falls back to native print if rasterising isn't supported
+  // (e.g. some iOS Safari builds choke on SVG <foreignObject>).
   const downloadPDF = async () => {
-    if (typeof exportLabelPDF !== "function") { ctx.pushToast("ฟังก์ชัน PDF ยังไม่พร้อม"); return; }
     const el = paperRef.current ? paperRef.current.querySelector(".label-paper") : null;
+    if (!el) { ctx.pushToast("ไม่พบฉลาก"); return; }
     setPdfLoading(true);
     try {
-      await exportLabelPDF(el, size, l.soId, ctx.pushToast, 4);
+      if (typeof labelsToPDF === "function") {
+        await labelsToPDF([el], size, l.soId, ctx.pushToast);
+      } else if (typeof printLabels === "function") {
+        printLabels([el], size, ctx.pushToast);
+      } else {
+        ctx.pushToast("ฟังก์ชัน PDF ยังไม่พร้อม");
+      }
     } catch (e) {
-      ctx.pushToast("สร้าง PDF ไม่สำเร็จ: " + (e.message || e));
+      console.error("PDF failed, native print fallback:", e);
+      try { printLabels([el], size, ctx.pushToast); } catch (e2) { ctx.pushToast("ทำ PDF ไม่สำเร็จ"); }
     }
     setPdfLoading(false);
+  };
+
+  // Send straight to a printer via the browser print dialog (no file download).
+  const printNative = () => {
+    const el = paperRef.current ? paperRef.current.querySelector(".label-paper") : null;
+    if (!el) { ctx.pushToast("ไม่พบฉลาก"); return; }
+    if (typeof printLabels !== "function") { ctx.pushToast("ฟังก์ชันพิมพ์ยังไม่พร้อม"); return; }
+    try { printLabels([el], size, ctx.pushToast); }
+    catch (e) { ctx.pushToast("เปิดหน้าต่างพิมพ์ไม่สำเร็จ"); }
   };
 
   return (
@@ -2766,9 +3022,12 @@ function MLabelView({ ctx }) {
             <LabelPaper label={l} size={size} store={store}/>
           </div>
         </div>
-        <div style={{ marginTop: -80 }}>
+        <div style={{ marginTop: -80, display: "flex", flexDirection: "column", gap: 10 }}>
           <button className="m-btn-big" onClick={downloadPDF} disabled={pdfLoading} style={pdfLoading ? { opacity: 0.7 } : {}}>
-            <Icons.Print size={16}/> {pdfLoading ? "กำลังสร้าง PDF…" : "ส่งออก PDF"}
+            <Icons.Print size={16}/> {pdfLoading ? "กำลังสร้าง PDF…" : "บันทึก PDF"}
+          </button>
+          <button className="m-btn-big" onClick={printNative} disabled={pdfLoading} style={{ background: "var(--surface-2, #f1f1f3)", color: "var(--fg, #111)", border: "1px solid var(--border, #ddd)" }}>
+            <Icons.Print size={16}/> พิมพ์
           </button>
         </div>
       </div>
@@ -2799,10 +3058,15 @@ function MLabelEdit({ ctx }) {
     const parsed = (typeof parseRecipientBlob === "function") ? parseRecipientBlob(pasteText) : {};
     if (!parsed.name && !parsed.phone && !parsed.addr1) { ctx.pushToast("ไม่พบข้อมูลที่จะคัดแยก"); return; }
     setLabel(l => ({ ...l, recipient: {
-      name: parsed.name || l.recipient.name,
-      phone: parsed.phone || l.recipient.phone,
-      addr1: parsed.addr1 || l.recipient.addr1,
-      addr2: parsed.addr2 || l.recipient.addr2,
+      ...l.recipient,
+      name:    parsed.name    || l.recipient.name,
+      phone:   parsed.phone   || l.recipient.phone,
+      addr1:   parsed.addr1   || l.recipient.addr1,
+      addr2:    parsed.tambon ? "" : (parsed.addr2 || l.recipient.addr2),
+      tambon:   parsed.tambon   || l.recipient.tambon   || "",
+      amphoe:   parsed.amphoe   || l.recipient.amphoe   || "",
+      province: parsed.province || l.recipient.province || "",
+      postal:   parsed.zip      || l.recipient.postal   || "",
     }}));
     setPasteText(""); setPasteOpen(false);
     const hasAddr = parsed.addr1 || parsed.addr2;
@@ -2825,14 +3089,26 @@ function MLabelEdit({ ctx }) {
       });
       const j = await r.json();
       if (!j.success) throw new Error(j.error || "parse failed");
+      if (typeof ensureThaiAddrIndex === "function") { try { await ensureThaiAddrIndex(); } catch (e) {} }
+      let aiTambon = "", aiAmphoe = "", aiProvince = "", aiPostal = "";
+      const aiFullAddr = [j.addr1, j.addr2].filter(Boolean).join(" ");
+      if (aiFullAddr && typeof getThaiAddrIndex === "function" && getThaiAddrIndex() && typeof parseThaiAddrTail === "function") {
+        const g = parseThaiAddrTail(aiFullAddr);
+        if (g && g.tambon) { aiTambon = g.tambon; aiAmphoe = g.amphoe; aiProvince = g.province; aiPostal = g.zip || ""; }
+      }
       setLabel(l => ({ ...l, recipient: {
-        name: j.name || l.recipient.name,
-        phone: j.phone || l.recipient.phone,
-        addr1: j.addr1 || l.recipient.addr1,
-        addr2: j.addr2 || l.recipient.addr2,
+        ...l.recipient,
+        name:     j.name     || l.recipient.name,
+        phone:    j.phone    || l.recipient.phone,
+        addr1:    j.addr1    || l.recipient.addr1,
+        addr2:    aiTambon ? "" : (j.addr2 || l.recipient.addr2),
+        tambon:   aiTambon   || l.recipient.tambon   || "",
+        amphoe:   aiAmphoe   || l.recipient.amphoe   || "",
+        province: aiProvince || l.recipient.province || "",
+        postal:   aiPostal   || l.recipient.postal   || "",
       }}));
       setPasteText(""); setPasteOpen(false);
-      ctx.pushToast("AI คัดแยกข้อมูลแล้ว");
+      ctx.pushToast("AI คัดแยกแล้ว" + (aiTambon ? " · ✓ ตรงรหัสไปรษณีย์" : ""));
     } catch (e) {
       ctx.pushToast("AI คัดแยกไม่สำเร็จ: " + e.message);
     } finally {
@@ -2908,8 +3184,16 @@ function MLabelEdit({ ctx }) {
         {/* recipient fields */}
         <div className="m-section-label" style={{ padding: "0 4px 6px" }}>ผู้รับ</div>
         <input className="m-input" value={label.recipient.name} onChange={e => setRecip("name", e.target.value)} placeholder="ชื่อ-นามสกุล" style={{ marginBottom: 8 }}/>
-        <input className="m-input" value={label.recipient.addr1} onChange={e => setRecip("addr1", e.target.value)} placeholder="ที่อยู่ (บรรทัด 1)" style={{ marginBottom: 8 }}/>
-        <input className="m-input" value={label.recipient.addr2} onChange={e => setRecip("addr2", e.target.value)} placeholder="ที่อยู่ (บรรทัด 2)" style={{ marginBottom: 8 }}/>
+        <input className="m-input" value={label.recipient.addr1} onChange={e => setRecip("addr1", e.target.value)} placeholder="บ้านเลขที่ ถนน ซอย หมู่บ้าน" style={{ marginBottom: 8 }}/>
+        <input className="m-input" value={label.recipient.addr2 || ""} onChange={e => setRecip("addr2", e.target.value)} placeholder="อาคาร ชั้น ห้อง (ถ้ามี)" style={{ marginBottom: 8 }}/>
+        {typeof ThaiAddrAutocomplete === "function" && (
+          <div style={{ marginBottom: 8 }}>
+            <ThaiAddrAutocomplete
+              value={{ tambon: label.recipient.tambon || "", amphoe: label.recipient.amphoe || "", province: label.recipient.province || "", postal: label.recipient.postal || "" }}
+              onChange={partial => setLabel(l => ({ ...l, recipient: { ...l.recipient, ...partial } }))}
+            />
+          </div>
+        )}
         <input className="m-input mono" value={label.recipient.phone} onChange={e => setRecip("phone", e.target.value)} placeholder="โทรศัพท์" style={{ marginBottom: 12 }}/>
 
         {/* sender (ผู้ส่ง) — defaults to store settings; pick/save profiles */}
@@ -3131,6 +3415,91 @@ function MImport({ ctx }) {
   );
 }
 
+/* =============== CATEGORY MANAGER (used inside MSettings) =============== */
+
+function MCategoryManagerSection({ pushToast }) {
+  const [cats, setCats] = useStateM(() => (typeof loadCategories === "function" ? loadCategories() : []));
+  const [newName, setNewName] = useStateM("");
+
+  useEffectM(() => {
+    const refresh = () => setCats(typeof loadCategories === "function" ? loadCategories() : []);
+    window.addEventListener("ims-categories-change", refresh);
+    window.addEventListener("ims-products-change", refresh);
+    return () => {
+      window.removeEventListener("ims-categories-change", refresh);
+      window.removeEventListener("ims-products-change", refresh);
+    };
+  }, []);
+
+  const countProducts = (cat) => PRODUCTS.filter(p => p.cat === cat).length;
+
+  const handleAdd = () => {
+    const name = newName.trim();
+    if (!name) return;
+    if (typeof addCategory === "function") {
+      if (!addCategory(name)) { pushToast("หมวดหมู่นี้มีอยู่แล้ว"); return; }
+    }
+    setCats(typeof loadCategories === "function" ? loadCategories() : []);
+    setNewName("");
+    pushToast(`เพิ่มหมวดหมู่ "${name}" แล้ว`);
+  };
+
+  const handleRename = (oldName) => {
+    const n = prompt("เปลี่ยนชื่อหมวดหมู่", oldName);
+    if (!n || !n.trim() || n.trim() === oldName) return;
+    if (typeof renameCategory === "function") {
+      if (!renameCategory(oldName, n.trim())) { pushToast("ชื่อนี้มีอยู่แล้ว"); return; }
+    }
+    setCats(typeof loadCategories === "function" ? loadCategories() : []);
+    pushToast(`เปลี่ยนชื่อเป็น "${n.trim()}" แล้ว`);
+  };
+
+  const handleDelete = (cat) => {
+    const count = countProducts(cat);
+    const msg = count > 0
+      ? `ลบหมวดหมู่ "${cat}"?\nสินค้า ${count} รายการจะถูกย้ายไปหมวด "ทั่วไป"`
+      : `ลบหมวดหมู่ "${cat}"?`;
+    if (!confirm(msg)) return;
+    if (typeof deleteCategory === "function") deleteCategory(cat);
+    setCats(typeof loadCategories === "function" ? loadCategories() : []);
+    pushToast(`ลบหมวดหมู่ "${cat}" แล้ว`);
+  };
+
+  return (
+    <>
+      <div className="m-section-label" style={{ padding: "16px 4px 8px" }}>หมวดหมู่สินค้า</div>
+      <div className="m-card" style={{ padding: 14 }}>
+        <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+          <input
+            className="m-input"
+            style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--fg)", fontSize: 13 }}
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleAdd()}
+            placeholder="ชื่อหมวดหมู่ใหม่"
+          />
+          <button className="btn btn-sm btn-accent" onClick={handleAdd}><Icons.Plus size={12}/> เพิ่ม</button>
+        </div>
+        <div className="m-list" style={{ margin: "0 -14px -14px" }}>
+          {cats.map(cat => (
+            <div key={cat} className="m-row" style={{ cursor: "default" }}>
+              <div className="m-row-main">
+                <div className="m-row-title" style={{ fontSize: 13 }}>{cat}</div>
+                <div className="m-row-sub">{countProducts(cat)} รายการ</div>
+              </div>
+              <div className="row" style={{ gap: 6 }}>
+                <button className="btn btn-sm btn-ghost" onClick={() => handleRename(cat)}><Icons.Edit size={12}/></button>
+                <button className="btn btn-sm btn-ghost" style={{ color: "var(--danger)" }} onClick={() => handleDelete(cat)}><Icons.Trash size={12}/></button>
+              </div>
+            </div>
+          ))}
+          {cats.length === 0 && <div style={{ padding: "10px 14px", fontSize: 12, color: "var(--muted)" }}>ยังไม่มีหมวดหมู่</div>}
+        </div>
+      </div>
+    </>
+  );
+}
+
 /* =============== SETTINGS =============== */
 
 function MSettings({ ctx }) {
@@ -3216,6 +3585,8 @@ function MSettings({ ctx }) {
           <SettingField label="บรรทัด 2" value={store.sender.addr2} onChange={v => save({ ...store, sender: { ...store.sender, addr2: v } })}/>
           <SettingField label="โทรศัพท์" value={store.sender.phone} onChange={v => save({ ...store, sender: { ...store.sender, phone: v } })}/>
         </div>
+
+        <MCategoryManagerSection pushToast={ctx.pushToast}/>
 
         <div className="m-section-label" style={{ padding: "16px 4px 8px" }}>เสียง</div>
         <div className="m-row" style={{ cursor: "pointer", border: "1px solid " + (soundOn ? "var(--accent)" : "var(--border)"), borderRadius: 12, background: "var(--surface)" }} onClick={toggleSound}>
@@ -3541,15 +3912,22 @@ function MAnalytics({ ctx }) {
             </div>
           </div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>{def.label} · หน่วย: {isRev ? "บาท" : "ออร์เดอร์"}</div>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 120 }}>
-            {chart.map((v, i) => (
-              <div key={i} title={isRev ? mMoney(v) : `${mFmt(v)} ออร์เดอร์`} style={{
-                flex: 1,
-                height: Math.max(2, (v / chartMax) * 100) + "%",
-                background: "linear-gradient(180deg, var(--accent), oklch(0.55 0.18 38))",
-                borderRadius: "3px 3px 0 0"
-              }}/>
-            ))}
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 160, position: "relative" }}>
+            {chart.map((v, i) => {
+              const pct = Math.max(2, (v / chartMax) * 100);
+              const showLabel = v > 0 && pct >= 35;
+              return (
+                <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                  {showLabel && <div style={{ fontSize: 9, color: "var(--fg)", marginBottom: 2, lineHeight: 1, whiteSpace: "nowrap", overflow: "hidden", maxWidth: "100%", textAlign: "center" }}>{isRev ? mMoney(v).replace("฿","") : v}</div>}
+                  <div title={isRev ? mMoney(v) : `${mFmt(v)} ออร์เดอร์`} style={{
+                    width: "100%",
+                    height: pct + "%",
+                    background: "linear-gradient(180deg, var(--accent), oklch(0.55 0.18 38))",
+                    borderRadius: "3px 3px 0 0"
+                  }}/>
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -3630,6 +4008,8 @@ function MSumCell({ label, value, accent }) {
 function MStockTake({ ctx }) {
   const [counts, setCounts] = useStateM(loadStockTake);
   const [q, setQ] = useStateM("");
+  const [cat, setCat] = useStateM("all");
+  const [onlyCounted, setOnlyCounted] = useStateM(false);
   const [camOpen, setCamOpen] = useStateM(false);
   const [tick, setTick] = useStateM(0);
 
@@ -3638,6 +4018,7 @@ function MStockTake({ ctx }) {
     window.addEventListener("ims-products-change", refresh);
     return () => window.removeEventListener("ims-products-change", refresh);
   }, []);
+  useEffectM(() => () => setCamOpen(false), []);
 
   const setCount = (sku, val) => {
     setCounts(prev => {
@@ -3651,6 +4032,33 @@ function MStockTake({ ctx }) {
   const bump = (sku, d) => {
     const cur = parseInt(counts[sku] || "0", 10) || 0;
     setCount(sku, Math.max(0, cur + d));
+  };
+
+  const cats = useMemoM(() => ["all", ...Array.from(new Set(PRODUCTS.map(p => p.cat).filter(Boolean)))], [tick]);
+
+  const fillSystem = () => {
+    setCounts(prev => {
+      const next = { ...prev };
+      rows.forEach(p => { next[p.sku] = String(p.qty); });
+      saveStockTake(next);
+      return next;
+    });
+  };
+
+  const exportCsv = () => {
+    const csvRows = [["SKU", "ชื่อสินค้า", "สต็อกระบบ", "นับได้", "ส่วนต่าง"]];
+    PRODUCTS.forEach(p => {
+      const raw = counts[p.sku];
+      const counted = (raw !== undefined && raw !== "") ? (parseInt(raw, 10) || 0) : "";
+      const delta = counted !== "" ? counted - p.qty : "";
+      csvRows.push([p.sku, `"${(p.name || "").replace(/"/g, '""')}"`, p.qty, counted, delta]);
+    });
+    const csv = "﻿" + csvRows.map(r => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "stocktake.csv"; a.click();
+    URL.revokeObjectURL(url);
+    ctx.pushToast("ส่งออก CSV แล้ว");
   };
 
   const submit = (override) => {
@@ -3667,8 +4075,13 @@ function MStockTake({ ctx }) {
 
   const rows = useMemoM(() => {
     const lq = q.trim().toLowerCase();
-    return PRODUCTS.filter(p => !lq || p.sku.toLowerCase().includes(lq) || (p.name || "").toLowerCase().includes(lq));
-  }, [q, tick]);
+    return PRODUCTS.filter(p => {
+      if (cat !== "all" && p.cat !== cat) return false;
+      if (onlyCounted && counts[p.sku] === undefined) return false;
+      if (!lq) return true;
+      return p.sku.toLowerCase().includes(lq) || (p.name || "").toLowerCase().includes(lq);
+    });
+  }, [q, cat, onlyCounted, counts, tick]);
 
   const summary = useMemoM(() => {
     let counted = 0, disc = 0, net = 0;
@@ -3678,7 +4091,8 @@ function MStockTake({ ctx }) {
       counted++; const v = (parseInt(counts[sku], 10) || 0) - p.qty;
       if (v !== 0) disc++; net += v;
     });
-    return { counted, disc, net };
+    const uncounted = PRODUCTS.length - counted;
+    return { counted, uncounted, disc, net };
   }, [counts, tick]);
 
   const changeList = useMemoM(() => {
@@ -3714,21 +4128,35 @@ function MStockTake({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub">ตรวจนับสต็อก</div>
+        <button className="m-action" title="ส่งออก CSV" onClick={exportCsv}><Icons.Pkg size={14}/></button>
         <button className="m-action accent" onClick={save} disabled={!changeList.length} style={!changeList.length ? { opacity: 0.4 } : {}}><Icons.Check size={16}/></button>
       </div>
       <div className="m-content">
-        <div className="m-kpi-row" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+        <div className="m-kpi-row">
           <div className="m-kpi"><div className="m-kpi-label">นับแล้ว</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{summary.counted}</div></div>
+          <div className="m-kpi"><div className="m-kpi-label">ยังไม่นับ</div><div className="m-kpi-value" style={{ fontSize: 18, color: summary.uncounted > 0 ? "var(--warning)" : "var(--success)" }}>{summary.uncounted}</div></div>
           <div className="m-kpi"><div className="m-kpi-label">ส่วนต่าง</div><div className="m-kpi-value" style={{ fontSize: 18, color: summary.disc ? "var(--warning)" : "var(--success)" }}>{summary.disc}</div></div>
           <div className="m-kpi"><div className="m-kpi-label">สุทธิ</div><div className="m-kpi-value" style={{ fontSize: 18, color: summary.net > 0 ? "var(--info)" : summary.net < 0 ? "var(--danger)" : "var(--fg)" }}>{summary.net > 0 ? "+" : ""}{summary.net}</div></div>
         </div>
 
-        {!camOpen && <button className="m-btn-big dark" style={{ marginBottom: 12 }} onClick={() => setCamOpen(true)}><Icons.Camera size={18}/> สแกนเพื่อนับ +1</button>}
+        {!camOpen && (
+          <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+            <button className="m-btn-big dark" style={{ flex: 1, marginBottom: 0 }} onClick={() => setCamOpen(true)}><Icons.Camera size={18}/> สแกนเพื่อนับ +1</button>
+            <button style={{ padding: "0 14px", height: 48, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, color: "var(--fg)", fontSize: 12, display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }} onClick={fillSystem} title="ใส่จำนวนในระบบให้ทุกแถวที่แสดงอยู่"><Icons.Refresh size={13}/> ใส่ค่าระบบ</button>
+          </div>
+        )}
         {camOpen && <CameraScanner onScan={code => { submit(code); }} onClose={() => setCamOpen(false)}/>}
 
         <div className="m-search">
           <Icons.Search size={16} style={{ color: "var(--muted)" }}/>
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา SKU หรือชื่อสินค้า..."/>
+        </div>
+
+        <div className="m-chips-scroll" style={{ marginBottom: 10 }}>
+          {cats.map(c => (
+            <button key={c} className={"m-chip" + (cat === c ? " on" : "")} onClick={() => setCat(c)}>{c === "all" ? "ทุกหมวด" : c}</button>
+          ))}
+          <button className={"m-chip" + (onlyCounted ? " on" : "")} onClick={() => setOnlyCounted(v => !v)}>นับแล้วเท่านั้น</button>
         </div>
 
         <div className="m-list">

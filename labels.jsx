@@ -72,7 +72,7 @@ function makeBlankLabel(existing) {
     id: "LBL-NEW-" + Date.now() + "-" + Math.floor(Math.random() * 1000),
     soId: "ฉลากใหม่ " + ((existing ? existing.length : 0) + 1),
     sender: senderTemplate,
-    recipient: { name: "", addr1: "", addr2: "", phone: "" },
+    recipient: { name: "", addr1: "", addr2: "", tambon: "", amphoe: "", province: "", postal: "", phone: "" },
     carrier: "",
     tracking: "",
     cod: 0,
@@ -86,7 +86,7 @@ function makeBlankLabel(existing) {
    Every sale (POS / stock-out / desktop) is a shipment, so it becomes a label —
    labels are the single source of truth that feeds คิวฉลาก + ติดตามพัสดุ + จัดส่ง.
    `created_at` is set so labelToOrder gives the row a real date (sorts correctly). */
-function createSaleLabel({ orderId, name, phone, addr1, addr2, carrier, cod, items, created_at }) {
+function createSaleLabel({ orderId, name, phone, addr1, addr2, tambon, amphoe, province, postal, carrier, cod, items, created_at }) {
   const existing = (typeof loadLabels === "function") ? loadLabels() : [];
   const base = (typeof makeBlankLabel === "function")
     ? makeBlankLabel(existing)
@@ -95,7 +95,7 @@ function createSaleLabel({ orderId, name, phone, addr1, addr2, carrier, cod, ite
     ...base,
     soId: orderId,
     created_at: created_at || new Date().toISOString(),
-    recipient: { name: name || "", phone: phone || "", addr1: addr1 || "", addr2: addr2 || "" },
+    recipient: { name: name || "", phone: phone || "", addr1: addr1 || "", addr2: addr2 || "", tambon: tambon || "", amphoe: amphoe || "", province: province || "", postal: postal || "" },
     carrier: carrier || "",
     cod: (typeof cod === "number" && cod > 0) ? cod : 0,
     items: (items || []).map(it => ({ sku: it.sku, name: it.name, qty: it.qty })),
@@ -113,25 +113,53 @@ async function exportLabelPDF(el, size, soId, pushToast, scale) {
     if (pushToast) pushToast("⚠️ ไลบรารี PDF ยังโหลดไม่เสร็จ กรุณารอสักครู่แล้วลองใหม่");
     return false;
   }
+  // Pre-load every weight used in LabelPaper so they're in the HTTP cache
+  // before html2canvas clones the document.
+  try {
+    await document.fonts.ready;
+    await Promise.all(["300","400","500","600","700"].map(w =>
+      document.fonts.load(w + ' 16px "IBM Plex Sans Thai"', 'กขคง')
+    ));
+  } catch (e) {}
   const canvas = await window.html2canvas(el, {
-    scale: scale || 4,
+    scale: scale || 2,
     useCORS: true,
     allowTaint: true,
     backgroundColor: "#ffffff",
     logging: false,
-    onclone: (doc) => {
-      // html2canvas 1.4.1 throws on oklch() in stylesheets; LabelPaper is fully
-      // inline-styled (hex only), so dropping external sheets is visually safe.
-      doc.querySelectorAll('link[rel="stylesheet"]').forEach(n => n.remove());
+    // html2canvas 1.4.1 awaits an async onclone — we use that to wait for the
+    // font to be ready in the CLONE's FontFaceSet before rendering starts.
+    // Root cause of "letters running together": html2canvas captures layout
+    // metrics from the original element (IBM Plex Sans Thai) then the clone
+    // renders with a different font → width mismatch → characters overlap.
+    // Keeping IBM Plex Sans Thai in the clone (via Google Fonts link) and
+    // explicitly loading it here eliminates the mismatch.
+    onclone: async (doc) => {
+      // Remove app CSS (oklch crash) but KEEP Google Fonts so the same font
+      // is available in the clone as in the original element.
+      doc.querySelectorAll('link[rel="stylesheet"]').forEach(n => {
+        if (!(n.href && n.href.includes('googleapis.com'))) n.remove();
+      });
       doc.querySelectorAll('style').forEach(n => n.remove());
       const st = doc.createElement("style");
       st.textContent = [
         "*, *::before, *::after { box-sizing: border-box; }",
         "body { margin: 0; }",
-        '.label-paper { background: #fff; font-family: "IBM Plex Sans","IBM Plex Sans Thai",sans-serif; color: #111; }',
-        '.mono { font-family: "IBM Plex Mono",monospace; }',
+        '.label-paper, .label-paper * { letter-spacing: normal !important; }',
+        '.label-paper { background: #fff; font-family: "IBM Plex Sans Thai","IBM Plex Sans","Leelawadee UI","Leelawadee","TH Sarabun New",Tahoma,Arial,sans-serif; color: #111; }',
+        '.mono { font-family: "IBM Plex Mono","Courier New",monospace; }',
       ].join("\n");
       doc.head.appendChild(st);
+      // Wait for IBM Plex Sans Thai in the clone — served from HTTP cache
+      // (parent loaded it moments ago) so typically < 10 ms.
+      try {
+        await Promise.race([
+          Promise.all(["300","400","500","600","700"].map(w =>
+            doc.fonts.load(w + ' 16px "IBM Plex Sans Thai"', 'กขคง')
+          )),
+          new Promise(r => setTimeout(r, 3000)),
+        ]);
+      } catch (e) {}
     },
   });
   const { jsPDF } = window.jspdf;
@@ -143,11 +171,219 @@ async function exportLabelPDF(el, size, soId, pushToast, scale) {
   return true;
 }
 
+/* Native browser print — the reliable path for Thai text.
+   html2canvas rasterises text and mis-measures Thai combining vowels/tone marks,
+   so glyphs overlap in the PNG it produces. Native printing instead hands the
+   real HTML to the browser's own text engine (HarfBuzz), which shapes Thai
+   correctly, and "Save as PDF" in the print dialog yields true vector text.
+
+   We print the TOP-LEVEL document, NOT an iframe: Chromium only honours
+   `@page { size }` for the main frame — when you print an iframe via
+   contentWindow.print() it ignores the iframe's @page and falls back to the
+   default paper (A4), which is why the label came out A4-sized before.
+
+   So we clone the `.label-paper` nodes into a print-only container on the main
+   document, hide everything else with `@media print`, and put `@page { size }`
+   on the main document where it IS honoured → exact 100×150 mm output.
+   `els` = array of .label-paper DOM nodes; `size` = a LABEL_SIZES entry. */
+function printLabels(els, size, pushToast) {
+  els = (els || []).filter(Boolean);
+  if (!els.length) { if (pushToast) pushToast("ไม่พบฉลากที่จะพิมพ์"); return false; }
+
+  // Clear any leftover scaffolding from an interrupted previous run.
+  const stale = document.getElementById("__labelPrintRoot");
+  if (stale) stale.remove();
+  const staleStyle = document.getElementById("__labelPrintStyle");
+  if (staleStyle) staleStyle.remove();
+
+  // Clone each .label-paper (NOT its scaled preview wrapper) into a sheet.
+  const root = document.createElement("div");
+  root.id = "__labelPrintRoot";
+  els.forEach(e => {
+    const sheet = document.createElement("div");
+    sheet.className = "__labelSheet";
+    sheet.appendChild(e.cloneNode(true));
+    root.appendChild(sheet);
+  });
+  document.body.appendChild(root);
+
+  const style = document.createElement("style");
+  style.id = "__labelPrintStyle";
+  style.textContent =
+    // Hidden on screen; only revealed inside the print box.
+    "#__labelPrintRoot{display:none}" +
+    // @page MUST be top-level, NOT nested in @media print — Chromium ignores the
+    // page size when @page is inside a media query (that's why output was A4).
+    "@page{size:" + size.w + "mm " + size.h + "mm;margin:0}" +
+    "@media print{" +
+      "html,body{margin:0!important;padding:0!important;background:#fff!important}" +
+      // Hide the whole app, show only our print root.
+      "body>*{display:none!important}" +
+      "body>#__labelPrintRoot{display:block!important}" +
+      ".__labelSheet{break-after:page;page-break-after:always}" +
+      ".__labelSheet:last-child{break-after:auto;page-break-after:auto}" +
+      "#__labelPrintRoot .label-paper{width:" + size.w + "mm!important;height:" + size.h + "mm!important;box-shadow:none!important;margin:0!important;overflow:hidden!important}" +
+      // Print the orange strips + black PAID badge with their real colours,
+      // and never let letter-spacing creep in (it breaks Thai shaping).
+      "#__labelPrintRoot .label-paper *{-webkit-print-color-adjust:exact;print-color-adjust:exact;letter-spacing:normal!important}" +
+    "}";
+  document.head.appendChild(style);
+
+  const cleanup = () => {
+    try { root.remove(); } catch (e) {}
+    try { style.remove(); } catch (e) {}
+    window.removeEventListener("afterprint", cleanup);
+  };
+  window.addEventListener("afterprint", cleanup);
+
+  let fired = false;
+  const fire = () => { if (fired) return; fired = true; try { window.focus(); window.print(); } catch (e) {} };
+  // Fonts are already loaded by the running app, so this resolves immediately.
+  try {
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => setTimeout(fire, 50));
+  } catch (e) {}
+  setTimeout(fire, 800);       // fallback if fonts.ready never resolves
+  setTimeout(cleanup, 60000);  // safety net if afterprint never fires
+  if (pushToast) pushToast("เปิดหน้าต่างพิมพ์ — เลือก \"บันทึกเป็น PDF\" หรือเครื่องพิมพ์");
+  return true;
+}
+
+/* Inline a single <img> as a data: URI by drawing the already-loaded original
+   to a canvas. Avoids fetch() (CSP connect-src forbids remote hosts) and works
+   for data:, same-origin and CORS-enabled images. Returns null if it can't
+   (tainted canvas / not loaded) so the caller can drop the image. */
+function _imgToDataUri(liveImg) {
+  try {
+    if (!liveImg || !liveImg.complete || !liveImg.naturalWidth) return null;
+    const src = liveImg.getAttribute("src") || "";
+    if (src.indexOf("data:") === 0) return src;
+    const c = document.createElement("canvas");
+    c.width = liveImg.naturalWidth; c.height = liveImg.naturalHeight;
+    c.getContext("2d").drawImage(liveImg, 0, 0);
+    return c.toDataURL("image/png");   // throws if the canvas is tainted
+  } catch (e) { return null; }
+}
+
+/* Rasterise one .label-paper DOM node to a PNG data URL at `scale`× density.
+   Uses SVG <foreignObject>, so the BROWSER's own text engine lays out and
+   shapes the Thai (correct combining marks — unlike html2canvas which mis-
+   measures them). Web fonts don't load inside an <img>-rendered SVG, so we pin
+   a locally-installed Thai font (Leelawadee UI / Tahoma on Windows) which the
+   rasteriser CAN use. `el` = live, on-screen .label-paper; w/hPx = its CSS px
+   size; returns a Promise<string> PNG data URL. */
+function rasterizeLabel(el, wPx, hPx, scale) {
+  return new Promise((resolve, reject) => {
+    const clone = el.cloneNode(true);
+    clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    clone.classList.add("__lpRoot");
+    clone.style.width = wPx + "px";
+    clone.style.height = hPx + "px";
+    clone.style.margin = "0";
+    clone.style.boxShadow = "none";
+    clone.style.background = "#fff";
+
+    // Inline every <img> (logo) from its live, loaded counterpart; drop any we
+    // can't (keeps the label rendering instead of failing the whole rasterise).
+    const liveImgs = el.querySelectorAll("img");
+    const cloneImgs = clone.querySelectorAll("img");
+    for (let i = 0; i < cloneImgs.length; i++) {
+      const uri = _imgToDataUri(liveImgs[i]);
+      if (uri) cloneImgs[i].setAttribute("src", uri);
+      else cloneImgs[i].remove();
+    }
+
+    let xhtml;
+    try { xhtml = new XMLSerializer().serializeToString(clone); }
+    catch (e) { reject(e); return; }
+
+    const W = Math.round(wPx * scale);
+    const H = Math.round(hPx * scale);
+    const css =
+      '.__lpRoot{font-family:"Leelawadee UI","Leelawadee","TH Sarabun New","Tahoma",sans-serif;}' +
+      '.__lpRoot .mono{font-family:"Consolas","Courier New",monospace;}';
+    // IMPORTANT: do NOT scale via the SVG viewBox. iOS Safari rasterises a
+    // viewBox-scaled <foreignObject> at 1× CSS resolution and then upscales,
+    // which turns small text to overlapping mush (large text survives). Instead
+    // make the foreignObject the FULL raster size and scale the content up with
+    // a CSS transform, so the browser lays out and rasterises at full resolution.
+    const scaledHtml =
+      '<div xmlns="http://www.w3.org/1999/xhtml" style="width:' + wPx + 'px;height:' + hPx +
+      'px;transform:scale(' + scale + ');transform-origin:0 0">' + xhtml + "</div>";
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '">' +
+      "<style>" + css + "</style>" +
+      '<foreignObject x="0" y="0" width="' + W + '" height="' + H + '">' +
+      scaledHtml +
+      "</foreignObject></svg>";
+
+    const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/png"));
+      } catch (e) { reject(e); }
+    };
+    img.onerror = () => reject(new Error("SVG rasterise failed"));
+    img.src = url;
+  });
+}
+
+/* Build an exact-size PDF (one page per label) by rasterising each label and
+   placing it edge-to-edge on a [w,h]mm page. This is the RELIABLE path for an
+   exact 100×150 mm output: jsPDF sets the page geometry directly, so it never
+   depends on the browser print dialog honouring @page (which it often ignores,
+   defaulting to A4). `els` = .label-paper nodes; `size` = a LABEL_SIZES entry. */
+async function labelsToPDF(els, size, soId, pushToast) {
+  els = (els || []).filter(Boolean);
+  if (!els.length) { if (pushToast) pushToast("ไม่พบฉลากที่จะบันทึก"); return false; }
+  if (!window.jspdf) { if (pushToast) pushToast("⚠️ ไลบรารี PDF ยังโหลดไม่เสร็จ ลองใหม่อีกครั้ง"); return false; }
+
+  try { await document.fonts.ready; } catch (e) {}
+  const wPx = Math.round(size.w * MM_TO_PX);
+  const hPx = Math.round(size.h * MM_TO_PX);
+  const SCALE = 4;   // ~380dpi at 100mm — crisp for both screen and label printers
+  const orient = size.w > size.h ? "landscape" : "portrait";
+
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h], orientation: orient });
+
+  let added = 0;
+  for (let i = 0; i < els.length; i++) {
+    let png;
+    try { png = await rasterizeLabel(els[i], wPx, hPx, SCALE); } catch (e) {
+      console.error("[labels] rasterize failed label", i, e);
+      continue;
+    }
+    if (added > 0) pdf.addPage([size.w, size.h], orient);
+    pdf.addImage(png, "PNG", 0, 0, size.w, size.h);
+    added++;
+  }
+  if (!added) { if (pushToast) pushToast("ไม่สามารถสร้าง PDF ได้ — กรุณาลองใหม่"); return false; }
+  const filename = String(soId || "label").replace(/[/\\:*?"<>|]/g, "_") + "_label.pdf";
+  pdf.save(filename);
+  const failCount = els.length - added;
+  if (pushToast) pushToast(failCount > 0
+    ? `ดาวน์โหลดแล้ว ${added}/${els.length} ฉลาก (${failCount} ล้มเหลว)`
+    : "ดาวน์โหลด " + filename + " แล้ว ✓"
+  );
+  return true;
+}
+
 /* Parse a pasted recipient blob (common Thai formats — labeled or freeform,
    single or multi-line) into { name, phone, addr1, addr2 }. Best-effort: the
    user reviews/edits the result. Returns null if there's nothing to parse. */
 function parseRecipientBlob(raw) {
   let text = String(raw || "").replace(/\r/g, "").trim();
+  // Strip surrounding straight/curly quotes that appear when copy-pasting from
+  // a chat message or code block (e.g. "ชื่อ: …" including the outer quotes).
+  text = text.replace(/^["'""]|["'""]$/g, "").trim();
   if (!text) return null;
   const out = { name: "", phone: "", addr1: "", addr2: "" };
   const addrKw = /(บ้านเลขที่|เลขที่|ห้อง|อาคาร|ตึก|ชั้น|หมู่บ้าน|หมู่|ม\.|ซอย|ซ\.|ถนน|ถ\.|ตำบล|ต\.|แขวง|อำเภอ|อ\.|เขต|จังหวัด|จ\.|รหัสไปรษณีย์|\d{1,4}\/\d{1,4}|\d{5})/;
@@ -192,7 +428,20 @@ function parseRecipientBlob(raw) {
     .replace(/(?:^|[\n\s])(?:เบอร์โทรศัพท์|เบอร์โทร|เบอร์|โทรศัพท์|โทร\.?|tel|phone|มือถือ)(?=$|[\n\s])/gi, " ")
     .trim();
 
-  // 3) Fallback: line-based heuristics for whatever the labels didn't capture.
+  // 3a) Multi-line ที่อยู่: — the label grab only captures the first line.
+  //     Append any remaining subdistrict/province/zip lines from rest so they
+  //     feed into the step-4 gazetteer split.
+  //     Uses a stricter word-edge check (keyword must follow whitespace or start
+  //     of line) so ranks like นสต./จ.ส.อ. whose dots contain ต./อ./จ. as
+  //     substrings don't cause false positives.
+  if (addr) {
+    const subKw = /(?:^|[ \t,])(?:ตำบล|ต\.|แขวง|อำเภอ|อ\.|เขต|จังหวัด|จ\.|รหัสไปรษณีย์|\d{5})/;
+    const looksSubDist = (line) => subKw.test(line.replace(RANK, " "));
+    const extra = rest.split(/\n+/).map(s => s.trim()).filter(s => s && looksSubDist(s));
+    if (extra.length) addr = addr + " " + extra.join(" ");
+  }
+
+  // 3b) Fallback: line-based heuristics for whatever the labels didn't capture.
   if (!out.name || !addr) {
     const lines = rest.split(/\n+/).map(s => s.trim()).filter(Boolean);
     if (!out.name) {
@@ -397,10 +646,16 @@ function Labels({ pushToast, store }) {
       ...l,
       recipient: {
         ...l.recipient,
-        name: parsed.name || l.recipient.name,
-        phone: parsed.phone || l.recipient.phone,
-        addr1: parsed.addr1 || l.recipient.addr1,
-        addr2: parsed.addr2 || l.recipient.addr2,
+        name:    parsed.name    || l.recipient.name,
+        phone:   parsed.phone   || l.recipient.phone,
+        addr1:   parsed.addr1   || l.recipient.addr1,
+        // when the gazetteer resolved structured fields, clear addr2 to avoid
+        // printing both the baked-in subdistrict string and the structured fields
+        addr2:    parsed.tambon ? "" : (parsed.addr2 || l.recipient.addr2),
+        tambon:   parsed.tambon   || l.recipient.tambon   || "",
+        amphoe:   parsed.amphoe   || l.recipient.amphoe   || "",
+        province: parsed.province || l.recipient.province || "",
+        postal:   parsed.zip      || l.recipient.postal   || "",
       },
     }));
     const got = [parsed.name && "ชื่อ", parsed.phone && "เบอร์", (parsed.addr1 || parsed.addr2) && "ที่อยู่"].filter(Boolean).join(" · ");
@@ -427,17 +682,31 @@ function Labels({ pushToast, store }) {
       });
       const j = await res.json();
       if (!res.ok || !j.success) { pushToast(j.error || "คัดแยกด้วย AI ไม่สำเร็จ"); return; }
+      // Run the gazetteer over the AI-returned address to extract structured fields,
+      // mirroring what the local parser does. ensureThaiAddrIndex was already called
+      // by applyPaste; call it again here in case this path is taken directly.
+      if (typeof ensureThaiAddrIndex === "function") { try { await ensureThaiAddrIndex(); } catch (e) {} }
+      let aiTambon = "", aiAmphoe = "", aiProvince = "", aiPostal = "";
+      const aiFullAddr = [j.addr1, j.addr2].filter(Boolean).join(" ");
+      if (aiFullAddr && typeof getThaiAddrIndex === "function" && getThaiAddrIndex() && typeof parseThaiAddrTail === "function") {
+        const g = parseThaiAddrTail(aiFullAddr);
+        if (g && g.tambon) { aiTambon = g.tambon; aiAmphoe = g.amphoe; aiProvince = g.province; aiPostal = g.zip || ""; }
+      }
       updateActive(l => ({
         ...l,
         recipient: {
           ...l.recipient,
-          name: j.name || l.recipient.name,
-          phone: j.phone || l.recipient.phone,
-          addr1: j.addr1 || l.recipient.addr1,
-          addr2: j.addr2 || l.recipient.addr2,
+          name:     j.name     || l.recipient.name,
+          phone:    j.phone    || l.recipient.phone,
+          addr1:    j.addr1    || l.recipient.addr1,
+          addr2:    aiTambon ? "" : (j.addr2 || l.recipient.addr2),
+          tambon:   aiTambon   || l.recipient.tambon   || "",
+          amphoe:   aiAmphoe   || l.recipient.amphoe   || "",
+          province: aiProvince || l.recipient.province || "",
+          postal:   aiPostal   || l.recipient.postal   || "",
         },
       }));
-      const got = [j.name && "ชื่อ", j.phone && "เบอร์", (j.addr1 || j.addr2) && "ที่อยู่"].filter(Boolean).join(" · ");
+      const got = [j.name && "ชื่อ", j.phone && "เบอร์", (j.addr1 || j.addr2) && "ที่อยู่", aiTambon && "✓ ตรงรหัสไปรษณีย์"].filter(Boolean).join(" · ");
       pushToast("AI คัดแยกแล้ว: " + (got || "—"));
       setPasteText("");
     } catch (e) {
@@ -494,29 +763,44 @@ function Labels({ pushToast, store }) {
   };
 
   /* ── PDF export helpers ─────────────────────────────────────────────────── */
-  const _capturePaper = (el) =>
-    window.html2canvas(el, {
-      scale: 4 / zoom,   // compensate for CSS zoom transform on parent
+  const _capturePaper = async (el) => {
+    try {
+      await document.fonts.ready;
+      await Promise.all(["300","400","500","600","700"].map(w =>
+        document.fonts.load(w + ' 16px "IBM Plex Sans Thai"', 'กขคง')
+      ));
+    } catch (e) {}
+    return window.html2canvas(el, {
+      scale: 2 / zoom,
       useCORS: true,
       allowTaint: true,
       backgroundColor: "#ffffff",
       logging: false,
-      onclone: (clonedDoc) => {
-        // html2canvas 1.4.1 throws on oklch() in stylesheets.
-        // LabelPaper is 100% inline-styled (hex/rgb only), so dropping
-        // all external sheets from the clone has zero visual effect.
-        clonedDoc.querySelectorAll('link[rel="stylesheet"]').forEach(n => n.remove());
+      onclone: async (clonedDoc) => {
+        clonedDoc.querySelectorAll('link[rel="stylesheet"]').forEach(n => {
+          if (!(n.href && n.href.includes('googleapis.com'))) n.remove();
+        });
         clonedDoc.querySelectorAll('style').forEach(n => n.remove());
         const s = clonedDoc.createElement("style");
         s.textContent = [
           "*, *::before, *::after { box-sizing: border-box; }",
           "body { margin: 0; }",
-          '.label-paper { background: #fff; font-family: "IBM Plex Sans","IBM Plex Sans Thai",sans-serif; color: #111; }',
-          '.mono { font-family: "IBM Plex Mono",monospace; }',
+          '.label-paper, .label-paper * { letter-spacing: normal !important; }',
+          '.label-paper { background: #fff; font-family: "IBM Plex Sans Thai","IBM Plex Sans","Leelawadee UI","Leelawadee","TH Sarabun New",Tahoma,Arial,sans-serif; color: #111; }',
+          '.mono { font-family: "IBM Plex Mono","Courier New",monospace; }',
         ].join("\n");
         clonedDoc.head.appendChild(s);
+        try {
+          await Promise.race([
+            Promise.all(["300","400","500","600","700"].map(w =>
+              clonedDoc.fonts.load(w + ' 16px "IBM Plex Sans Thai"', 'กขคง')
+            )),
+            new Promise(r => setTimeout(r, 3000)),
+          ]);
+        } catch (e) {}
       },
     });
+  };
 
   const exportSinglePDF = async () => {
     const el = document.querySelector(".label-stage .label-paper");
@@ -547,23 +831,51 @@ function Labels({ pushToast, store }) {
     pushToast("ดาวน์โหลด PDF ชุด " + sel.length + " ใบแล้ว ✓");
   };
 
+  // Build an exact-size PDF (SVG→jsPDF). jsPDF sets the page to exactly the
+  // chosen mm size, so the label fills the page with no A4 letterboxing — unlike
+  // native print, which depends on the dialog honouring @page. Thai is rendered
+  // by the browser's own engine via SVG <foreignObject>, so it stays correct.
+  // Falls back to native print only if rasterisation isn't supported.
   const printNow = async () => {
-    if (!window.html2canvas || !window.jspdf) {
-      pushToast("⚠️ ไลบรารี PDF ยังโหลดไม่เสร็จ กรุณารอสักครู่แล้วลองใหม่");
-      return;
+    let els, soId;
+    if (view === "batch") {
+      els = [...document.querySelectorAll(".batch-card .label-paper")];
+      if (!els.length) { pushToast("ไม่พบฉลากในชุดพิมพ์"); return; }
+      soId = "labels_batch_" + els.length + "pcs";
+    } else {
+      const el = document.querySelector(".label-stage .label-paper");
+      if (!el) { pushToast("ยังไม่ได้เลือกฉลาก"); return; }
+      els = [el];
+      soId = active ? active.soId : "label";
     }
     setPdfLoading(true);
     try {
-      if (view === "batch") {
-        await exportBatchPDF();
-      } else {
-        await exportSinglePDF();
-      }
+      await labelsToPDF(els, size, soId, pushToast);
     } catch (e) {
-      console.error("PDF export error:", e);
-      pushToast("เกิดข้อผิดพลาด: " + (e.message || String(e)));
+      console.error("PDF export failed, falling back to native print:", e);
+      pushToast("สร้าง PDF ไม่สำเร็จ — เปิดหน้าต่างพิมพ์แทน");
+      try { printLabels(els, size, pushToast); } catch (e2) {}
     }
     setPdfLoading(false);
+  };
+
+  // Send straight to a printer via the browser print dialog (no file download).
+  const printNative = () => {
+    let els;
+    if (view === "batch") {
+      els = [...document.querySelectorAll(".batch-card .label-paper")];
+      if (!els.length) { pushToast("ไม่พบฉลากในชุดพิมพ์"); return; }
+    } else {
+      const el = document.querySelector(".label-stage .label-paper");
+      if (!el) { pushToast("ยังไม่ได้เลือกฉลาก"); return; }
+      els = [el];
+    }
+    try {
+      printLabels(els, size, pushToast);
+    } catch (e) {
+      console.error("print error:", e);
+      pushToast("เปิดหน้าต่างพิมพ์ไม่สำเร็จ: " + (e.message || String(e)));
+    }
   };
 
   const selectedCount = Object.values(selected).filter(Boolean).length;
@@ -589,6 +901,15 @@ function Labels({ pushToast, store }) {
             pushToast("สร้างฉลากใหม่แล้ว");
           }}><Icons.Plus/> สร้างฉลากใหม่</button>
           <button
+            className="btn"
+            onClick={printNative}
+            disabled={pdfLoading}
+            title="เปิดหน้าต่างพิมพ์ของเบราว์เซอร์ ส่งเข้าเครื่องพิมพ์โดยตรง"
+            style={{ padding: "9px 16px", fontSize: 14, fontWeight: 600, gap: 8 }}
+          >
+            <Icons.Print size={16}/> พิมพ์
+          </button>
+          <button
             className="btn btn-primary"
             onClick={printNow}
             disabled={pdfLoading}
@@ -605,7 +926,7 @@ function Labels({ pushToast, store }) {
             {pdfLoading ? "⏳ กำลังสร้าง PDF…" : (
               <>
                 <Icons.Print size={16}/>
-                {" "}ส่งออก PDF
+                {" "}บันทึก PDF
                 {view === "batch" && selectedCount > 0 && (
                   <span style={{ background: "rgba(255,255,255,0.28)", borderRadius: 20, padding: "1px 8px", fontSize: 12, marginLeft: 4 }}>
                     {selectedCount} ใบ
@@ -849,8 +1170,14 @@ function Labels({ pushToast, store }) {
 
               <div className="stack" style={{ gap: 8 }}>
                 <Field label="ชื่อ-นามสกุล" value={active.recipient.name} onChange={v => updateActive(l => ({ ...l, recipient: { ...l.recipient, name: v } }))}/>
-                <Field label="ที่อยู่ (บรรทัด 1)" value={active.recipient.addr1} onChange={v => updateActive(l => ({ ...l, recipient: { ...l.recipient, addr1: v } }))}/>
-                <Field label="ที่อยู่ (บรรทัด 2)" value={active.recipient.addr2} onChange={v => updateActive(l => ({ ...l, recipient: { ...l.recipient, addr2: v } }))}/>
+                <Field label="ที่อยู่ (บ้านเลขที่ ถนน ซอย หมู่บ้าน)" value={active.recipient.addr1} onChange={v => updateActive(l => ({ ...l, recipient: { ...l.recipient, addr1: v } }))}/>
+                <Field label="ที่อยู่เพิ่มเติม (อาคาร ชั้น ห้อง)" value={active.recipient.addr2 || ""} onChange={v => updateActive(l => ({ ...l, recipient: { ...l.recipient, addr2: v } }))}/>
+                {typeof ThaiAddrAutocomplete === "function" && (
+                  <ThaiAddrAutocomplete
+                    value={{ tambon: active.recipient.tambon || "", amphoe: active.recipient.amphoe || "", province: active.recipient.province || "", postal: active.recipient.postal || "" }}
+                    onChange={partial => updateActive(l => ({ ...l, recipient: { ...l.recipient, ...partial } }))}
+                  />
+                )}
                 <Field label="โทรศัพท์" value={active.recipient.phone} onChange={v => updateActive(l => ({ ...l, recipient: { ...l.recipient, phone: v } }))}/>
               </div>
 
@@ -948,7 +1275,7 @@ function Labels({ pushToast, store }) {
         </div>
         )
       ) : (
-        <BatchView labels={labels} selected={selected} setSelected={setSelected} size={size} zoom={zoom} store={store} onExportPDF={printNow} pdfLoading={pdfLoading}/>
+        <BatchView labels={labels} selected={selected} setSelected={setSelected} size={size} zoom={zoom} store={store} onExportPDF={printNow} onPrint={printNative} pdfLoading={pdfLoading}/>
       )}
 
       <ConfirmDialog
@@ -1140,7 +1467,7 @@ function LabelPaper({ label, size, store }) {
       {/* Sender */}
       <div style={{ padding: compact ? "7px 0 5px" : "10px 0 8px", borderBottom: "1px dashed #cfcfcf" }}>
         <Eyebrow text="From · ผู้ส่ง"/>
-        <div style={{ fontSize: compact ? 9.5 : 11, marginTop: 4, lineHeight: 1.4, color: "#111" }}>
+        <div style={{ fontSize: compact ? 9.5 : 11, marginTop: 4, lineHeight: 1.6, color: "#111" }}>
           <div style={{ fontWeight: 700, fontSize: compact ? 11.5 : 13 }}>{label.sender.name}</div>
           <div>{label.sender.addr1}</div>
           <div>{label.sender.addr2}</div>
@@ -1154,11 +1481,13 @@ function LabelPaper({ label, size, store }) {
         ? { padding: "7px 0", borderBottom: "2px solid #111" }
         : { marginTop: 11, padding: "13px 15px", background: "#f6f5f3", borderRadius: 9, border: "1px solid #e7e5e1" }}>
         <Eyebrow text="To · ผู้รับ"/>
-        <div style={{ marginTop: compact ? 4 : 6, lineHeight: 1.45, color: "#111" }}>
-          <div style={{ fontSize: compact ? 16 : 21, fontWeight: 700, letterSpacing: "-0.01em" }}>{label.recipient.name}</div>
-          <div style={{ fontSize: compact ? 10.5 : 14, marginTop: compact ? 3 : 6, fontWeight: 500 }}>{label.recipient.addr1}</div>
-          <div style={{ fontSize: compact ? 10.5 : 14, fontWeight: 500 }}>{label.recipient.addr2}</div>
-          <div className="mono" style={{ fontSize: compact ? 10 : 12.5, marginTop: compact ? 3 : 6, fontWeight: 600 }}>โทร. {label.recipient.phone}</div>
+        <div style={{ marginTop: compact ? 4 : 6, lineHeight: 1.65, color: "#111" }}>
+          <div style={{ fontSize: compact ? 16 : 21, fontWeight: 700, letterSpacing: "0em", marginBottom: compact ? 7 : 12 }}>{label.recipient.name}</div>
+          {label.recipient.addr1 && <div style={{ fontSize: compact ? 10.5 : 14, fontWeight: 500, marginBottom: compact ? 2 : 3 }}>{label.recipient.addr1}</div>}
+          {[label.recipient.addr2, label.recipient.tambon, label.recipient.amphoe, label.recipient.province, label.recipient.postal].filter(Boolean).join(" ") && (
+            <div style={{ fontSize: compact ? 10.5 : 14, fontWeight: 500, marginBottom: compact ? 2 : 3 }}>{[label.recipient.addr2, label.recipient.tambon, label.recipient.amphoe, label.recipient.province, label.recipient.postal].filter(Boolean).join(" ")}</div>
+          )}
+          <div className="mono" style={{ fontSize: compact ? 10 : 12.5, marginTop: compact ? 4 : 7, fontWeight: 600 }}>โทร. {label.recipient.phone}</div>
         </div>
       </div>
 
@@ -1208,7 +1537,7 @@ function LabelPaper({ label, size, store }) {
 }
 
 /* ===== Batch view ===== */
-function BatchView({ labels, selected, setSelected, size, zoom, store, onExportPDF, pdfLoading }) {
+function BatchView({ labels, selected, setSelected, size, zoom, store, onExportPDF, onPrint, pdfLoading }) {
   const sel = labels.filter(l => selected[l.id]);
   return (
     <div className="stack" style={{ gap: 16 }}>
@@ -1263,9 +1592,12 @@ function BatchView({ labels, selected, setSelected, size, zoom, store, onExportP
           <div style={{ fontSize: 13 }}>
             พร้อมพิมพ์ <strong className="tnum">{sel.length}</strong> ใบ · ขนาด {size.label} · กระดาษโดยประมาณ {sel.length} แผ่น
           </div>
-          <div className="row">
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn" onClick={onPrint} disabled={pdfLoading} title="เปิดหน้าต่างพิมพ์ของเบราว์เซอร์">
+              <Icons.Print size={14}/> พิมพ์ (ชุด)
+            </button>
             <button className="btn btn-primary" onClick={onExportPDF} disabled={pdfLoading} style={pdfLoading ? { opacity: 0.75, cursor: "wait" } : {}}>
-              <Icons.Print size={14}/> {pdfLoading ? "กำลังสร้าง…" : "ส่งออก PDF (ชุด)"}
+              <Icons.Print size={14}/> {pdfLoading ? "กำลังสร้าง…" : "บันทึก PDF (ชุด)"}
             </button>
           </div>
         </div>
@@ -1274,4 +1606,4 @@ function BatchView({ labels, selected, setSelected, size, zoom, store, onExportP
   );
 }
 
-Object.assign(window, { Labels, LabelPaper, loadLabels, saveLabels, parseRecipientBlob, blankLabel: makeBlankLabel, createSaleLabel, exportLabelPDF, SenderPicker, loadSenders, saveSenders, storeSenderTemplate });
+Object.assign(window, { Labels, LabelPaper, loadLabels, saveLabels, parseRecipientBlob, blankLabel: makeBlankLabel, createSaleLabel, exportLabelPDF, printLabels, labelsToPDF, rasterizeLabel, SenderPicker, loadSenders, saveSenders, storeSenderTemplate });
