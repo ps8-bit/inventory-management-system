@@ -118,7 +118,7 @@ async function exportLabelPDF(el, size, soId, pushToast, scale) {
   try {
     await document.fonts.ready;
     await Promise.all(["300","400","500","600","700"].map(w =>
-      document.fonts.load(w + ' 16px "IBM Plex Sans Thai"', 'กขคง')
+      document.fonts.load(w + ' 16px "Sarabun"', 'กขคง')
     ));
   } catch (e) {}
   const canvas = await window.html2canvas(el, {
@@ -146,7 +146,7 @@ async function exportLabelPDF(el, size, soId, pushToast, scale) {
         "*, *::before, *::after { box-sizing: border-box; }",
         "body { margin: 0; }",
         '.label-paper, .label-paper * { letter-spacing: normal !important; }',
-        '.label-paper { background: #fff; font-family: "IBM Plex Sans Thai","IBM Plex Sans","Leelawadee UI","Leelawadee","TH Sarabun New",Tahoma,Arial,sans-serif; color: #111; }',
+        '.label-paper { background: #fff; font-family: "Sarabun","IBM Plex Sans Thai","IBM Plex Sans","Leelawadee UI","Leelawadee","TH Sarabun New",Tahoma,Arial,sans-serif; color: #111; }',
         '.mono { font-family: "IBM Plex Mono","Courier New",monospace; }',
       ].join("\n");
       doc.head.appendChild(st);
@@ -155,7 +155,7 @@ async function exportLabelPDF(el, size, soId, pushToast, scale) {
       try {
         await Promise.race([
           Promise.all(["300","400","500","600","700"].map(w =>
-            doc.fonts.load(w + ' 16px "IBM Plex Sans Thai"', 'กขคง')
+            doc.fonts.load(w + ' 16px "Sarabun"', 'กขคง')
           )),
           new Promise(r => setTimeout(r, 3000)),
         ]);
@@ -222,7 +222,7 @@ function printLabels(els, size, pushToast) {
       "body>#__labelPrintRoot{display:block!important}" +
       ".__labelSheet{break-after:page;page-break-after:always}" +
       ".__labelSheet:last-child{break-after:auto;page-break-after:auto}" +
-      "#__labelPrintRoot .label-paper{width:" + size.w + "mm!important;height:" + size.h + "mm!important;box-shadow:none!important;margin:0!important;overflow:hidden!important}" +
+      "#__labelPrintRoot .label-paper{width:" + size.w + "mm!important;height:" + size.h + "mm!important;box-shadow:none!important;margin:0!important;overflow:hidden!important;font-family:'Sarabun','IBM Plex Sans Thai','Leelawadee UI','TH Sarabun New',Tahoma,sans-serif!important}" +
       // Print the orange strips + black PAID badge with their real colours,
       // and never let letter-spacing creep in (it breaks Thai shaping).
       "#__labelPrintRoot .label-paper *{-webkit-print-color-adjust:exact;print-color-adjust:exact;letter-spacing:normal!important}" +
@@ -264,6 +264,37 @@ function _imgToDataUri(liveImg) {
   } catch (e) { return null; }
 }
 
+/* Lazily fetch Sarabun from our own origin and inline it as base64 @font-face rules.
+   A web font referenced by URL won't load inside an <img>-rendered SVG (the rasterise
+   context blocks external resources), but a data: URI @font-face DOES work — so the
+   downloaded PDF renders in Sarabun, matching the on-screen label. Fetched once per
+   session (same-origin, allowed by CSP connect-src 'self'); on any failure we resolve
+   to "" and rasterizeLabel falls back to the locally-installed Thai fonts. */
+let _sarabunFaceCss = null;
+function ensureSarabunFaceCss() {
+  if (_sarabunFaceCss !== null) return _sarabunFaceCss;
+  const files = [
+    { weight: 400, url: "/fonts/Sarabun-Regular.ttf" },
+    { weight: 700, url: "/fonts/Sarabun-Bold.ttf" },
+  ];
+  const toB64 = (buf) => {
+    const bytes = new Uint8Array(buf);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  };
+  _sarabunFaceCss = Promise.all(files.map(f =>
+    fetch(f.url)
+      .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.arrayBuffer(); })
+      .then(buf => '@font-face{font-family:"Sarabun";font-style:normal;font-weight:' + f.weight +
+        ';src:url(data:font/ttf;base64,' + toB64(buf) + ') format("truetype");}')
+  )).then(faces => faces.join("")).catch(e => {
+    console.warn("[labels] Sarabun embed unavailable, using local fallback:", e);
+    return "";
+  });
+  return _sarabunFaceCss;
+}
+
 /* Rasterise one .label-paper DOM node to a PNG data URL at `scale`× density.
    Uses SVG <foreignObject>, so the BROWSER's own text engine lays out and
    shapes the Thai (correct combining marks — unlike html2canvas which mis-
@@ -271,7 +302,8 @@ function _imgToDataUri(liveImg) {
    a locally-installed Thai font (Leelawadee UI / Tahoma on Windows) which the
    rasteriser CAN use. `el` = live, on-screen .label-paper; w/hPx = its CSS px
    size; returns a Promise<string> PNG data URL. */
-function rasterizeLabel(el, wPx, hPx, scale) {
+async function rasterizeLabel(el, wPx, hPx, scale) {
+  const fontFaceCss = await ensureSarabunFaceCss();
   return new Promise((resolve, reject) => {
     const clone = el.cloneNode(true);
     clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
@@ -299,8 +331,9 @@ function rasterizeLabel(el, wPx, hPx, scale) {
     const W = Math.round(wPx * scale);
     const H = Math.round(hPx * scale);
     const css =
-      '.__lpRoot{font-family:"Leelawadee UI","Leelawadee","TH Sarabun New","Tahoma",sans-serif;}' +
-      '.__lpRoot .mono{font-family:"Consolas","Courier New",monospace;}';
+      fontFaceCss +
+      '.__lpRoot{font-family:"Sarabun","Leelawadee UI","Leelawadee","TH Sarabun New","Tahoma",sans-serif;}' +
+      '.__lpRoot .mono{font-family:"Sarabun","Consolas","Courier New",monospace;}';
     // IMPORTANT: do NOT scale via the SVG viewBox. iOS Safari rasterises a
     // viewBox-scaled <foreignObject> at 1× CSS resolution and then upscales,
     // which turns small text to overlapping mush (large text survives). Instead
@@ -919,7 +952,7 @@ function Labels({ pushToast, store }) {
     try {
       await document.fonts.ready;
       await Promise.all(["300","400","500","600","700"].map(w =>
-        document.fonts.load(w + ' 16px "IBM Plex Sans Thai"', 'กขคง')
+        document.fonts.load(w + ' 16px "Sarabun"', 'กขคง')
       ));
     } catch (e) {}
     return window.html2canvas(el, {
@@ -938,14 +971,14 @@ function Labels({ pushToast, store }) {
           "*, *::before, *::after { box-sizing: border-box; }",
           "body { margin: 0; }",
           '.label-paper, .label-paper * { letter-spacing: normal !important; }',
-          '.label-paper { background: #fff; font-family: "IBM Plex Sans Thai","IBM Plex Sans","Leelawadee UI","Leelawadee","TH Sarabun New",Tahoma,Arial,sans-serif; color: #111; }',
+          '.label-paper { background: #fff; font-family: "Sarabun","IBM Plex Sans Thai","IBM Plex Sans","Leelawadee UI","Leelawadee","TH Sarabun New",Tahoma,Arial,sans-serif; color: #111; }',
           '.mono { font-family: "IBM Plex Mono","Courier New",monospace; }',
         ].join("\n");
         clonedDoc.head.appendChild(s);
         try {
           await Promise.race([
             Promise.all(["300","400","500","600","700"].map(w =>
-              clonedDoc.fonts.load(w + ' 16px "IBM Plex Sans Thai"', 'กขคง')
+              clonedDoc.fonts.load(w + ' 16px "Sarabun"', 'กขคง')
             )),
             new Promise(r => setTimeout(r, 3000)),
           ]);
@@ -1593,7 +1626,11 @@ function formatRecipientLocality(r) {
   return parts.filter(v => v && String(v).trim()).join(" ");
 }
 
-/* ===== Label paper (the actual printed thing) — minimal modern, no barcode/QR ===== */
+/* ===== Label paper (the actual printed thing) — clean, uniform black ink, Sarabun =====
+   Design rules (per shop request): one font (Sarabun) and ONE ink colour (#111) for
+   ALL text — hierarchy comes from size/weight only, never colour. Sender AND recipient
+   are both clear blocks. Carrier + tracking are hidden when empty. With no items the
+   sender/recipient text grows so the sheet fills out. The only colour is the brand strip. */
 function LabelPaper({ label, size, store }) {
   const wPx = size.w * MM_TO_PX;
   const hPx = size.h * MM_TO_PX;
@@ -1602,20 +1639,33 @@ function LabelPaper({ label, size, store }) {
   const compact = size.w * size.h < 100 * 130;
   const s = store || DEFAULT_STORE;
 
-  // Brand accents — hardcoded hex (html2canvas 1.4.1 can't parse oklch()/CSS vars).
-  // PS TACTICAL orange. Used ONLY for decorative elements; ALL text stays #111 (black).
-  const ACCENT = "#f15a22";
+  // Single ink colour for every glyph (uniform black, no grey). Hardcoded hex —
+  // html2canvas / the SVG rasteriser can't resolve CSS vars / oklch().
+  const INK = "#111";
   const ACCENT_GRAD = "linear-gradient(135deg, #ff8a3d, #ef5a1c)";
 
-  // Section eyebrow with a small orange brand tick — reused across blocks.
-  const Eyebrow = ({ text, onTint }) => (
-    <div style={{ display: "flex", alignItems: "center", gap: compact ? 4 : 5 }}>
-      <span style={{ width: compact ? 3 : 3.5, height: compact ? 9 : 11, background: ACCENT, borderRadius: 2, flexShrink: 0 }}/>
-      <span style={{ fontSize: compact ? 6.5 : 7.5, color: "#111", letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600 }}>{text}</span>
-    </div>
+  // Thai-only section label — small + bold, same black ink as everything else.
+  // No letter-spacing (the print/PDF paths force it to normal anyway; it can break
+  // Thai shaping). Tracking digits get a touch of tracking inline below.
+  const Tag = ({ text }) => (
+    <div style={{ fontSize: compact ? 8 : 10, fontWeight: 700, color: INK }}>{text}</div>
   );
 
+  const items = Array.isArray(label.items) ? label.items : [];
+  const hasItems = items.length > 0;
+  const hasTracking = !!(label.tracking && String(label.tracking).trim());
+  const hasCarrier = !!(label.carrier && String(label.carrier).trim());
   const locality = formatRecipientLocality(label.recipient);
+  // No items → grow the sender + recipient text so the sheet fills out instead of
+  // leaving a big empty gap above the footer ("fuller text" when there's nothing to list).
+  const roomy = !hasItems;
+  const itemCap = compact ? 3 : 6;
+
+  // Font sizes scale up in the roomy (no-items) layout.
+  const nameSize  = compact ? (roomy ? 18 : 16)   : (roomy ? 25 : 21);
+  const recipBody = compact ? (roomy ? 12 : 10.5) : (roomy ? 16 : 14);
+  const sendName  = compact ? (roomy ? 12 : 11)   : (roomy ? 15.5 : 13);
+  const sendBody  = compact ? (roomy ? 11 : 9.5)  : (roomy ? 14 : 12);
 
   return (
     <div
@@ -1623,97 +1673,93 @@ function LabelPaper({ label, size, store }) {
       style={{
         width: wPx,
         height: hPx,
-        padding: compact ? "13px 13px 11px" : "18px 17px 15px",
+        padding: compact ? "14px 13px 12px" : "18px 17px 15px",
         position: "relative",
         overflow: "hidden",
         boxSizing: "border-box",
+        color: INK,
+        fontFamily: '"Sarabun","IBM Plex Sans Thai","Leelawadee UI","Leelawadee","TH Sarabun New",Tahoma,sans-serif',
         fontSize: compact ? 9 : 10
       }}
     >
-      {/* Brand accent strip across the very top edge (decorative) */}
+      {/* The one brand strip across the top edge (only decorative element). */}
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: compact ? 4 : 5, background: ACCENT_GRAD }}/>
 
-      {/* Header: store logo + name on left, carrier + SO on right */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "2px solid #111", paddingBottom: compact ? 8 : 10, gap: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: compact ? 8 : 10, minWidth: 0 }}>
-          <StoreLogoMark store={s} size={compact ? 32 : 42} forLabel/>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: compact ? 11.5 : 14, fontWeight: 700, color: "#111", letterSpacing: "-0.01em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</div>
-            <div style={{ fontSize: compact ? 7 : 8, color: "#111", marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.tagline}</div>
+      {/* Header: store logo + name · order no. + carrier (carrier hidden when empty) */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: compact ? 7 : 9, minWidth: 0 }}>
+          <StoreLogoMark store={s} size={compact ? 28 : 34} forLabel/>
+          <div style={{ fontSize: compact ? 13 : 15.5, fontWeight: 700, color: INK, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0, lineHeight: 1.35 }}>
+          <div style={{ fontSize: compact ? 10.5 : 12, fontWeight: 700, color: INK }}>{label.soId}</div>
+          {hasCarrier && <div style={{ fontSize: compact ? 9.5 : 11, fontWeight: 400, color: INK }}>{label.carrier}</div>}
+        </div>
+      </div>
+
+      {/* Sender — clear block, same ink */}
+      <div style={{ borderTop: "2px solid " + INK, marginTop: compact ? 8 : 10, paddingTop: compact ? 8 : 10 }}>
+        <Tag text="ผู้ส่ง"/>
+        <div style={{ marginTop: 3, lineHeight: 1.5, color: INK }}>
+          <div style={{ fontSize: sendName, fontWeight: 700 }}>{label.sender.name}</div>
+          {label.sender.addr1 && <div style={{ fontSize: sendBody }}>{label.sender.addr1}</div>}
+          {label.sender.addr2 && <div style={{ fontSize: sendBody }}>{label.sender.addr2}</div>}
+          {label.sender.phone && <div style={{ fontSize: sendBody, fontFeatureSettings: '"tnum"' }}>โทร. {label.sender.phone}</div>}
+        </div>
+      </div>
+
+      {/* Recipient — the largest block (what the courier reads) */}
+      <div style={{ borderTop: "1px dashed " + INK, marginTop: compact ? 8 : (roomy ? 16 : 11), paddingTop: compact ? 8 : (roomy ? 14 : 11) }}>
+        <Tag text="ผู้รับ"/>
+        <div style={{ marginTop: compact ? 3 : (roomy ? 6 : 4), lineHeight: 1.45, color: INK }}>
+          <div style={{ fontSize: nameSize, fontWeight: 700, marginBottom: compact ? 4 : (roomy ? 8 : 6) }}>{label.recipient.name}</div>
+          {label.recipient.addr1 && <div style={{ fontSize: recipBody, marginBottom: 2 }}>{label.recipient.addr1}</div>}
+          {locality && <div style={{ fontSize: recipBody, marginBottom: 2 }}>{locality}</div>}
+          {label.recipient.phone && <div style={{ fontSize: recipBody, fontWeight: 700, marginTop: compact ? 3 : 6, fontFeatureSettings: '"tnum"' }}>โทร. {label.recipient.phone}</div>}
+        </div>
+      </div>
+
+      {/* Items — full list; only rendered when there are items */}
+      {hasItems && (
+        <div style={{ borderTop: "1px dashed " + INK, marginTop: compact ? 8 : 10, paddingTop: compact ? 7 : 8, overflow: "hidden" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+            <Tag text={`รายการ (${items.reduce((a, i) => a + (i.qty || 0), 0)})`}/>
+            {label.weight && <span style={{ fontSize: compact ? 9 : 11, color: INK }}>น้ำหนัก {label.weight}</span>}
+          </div>
+          <div style={{ fontSize: compact ? 9 : 11.5, lineHeight: 1.5, color: INK, ...(compact ? { maxHeight: 44, overflow: "hidden" } : {}) }}>
+            {items.slice(0, itemCap).map((it, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "1px 0" }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {it.sku && <span style={{ fontWeight: 700, marginRight: 5 }}>{it.sku}</span>}
+                  {it.name}
+                </span>
+                <span style={{ flexShrink: 0, fontWeight: 700, fontFeatureSettings: '"tnum"' }}>× {it.qty}</span>
+              </div>
+            ))}
+            {items.length > itemCap && (
+              <div style={{ fontSize: compact ? 8.5 : 10, color: INK, marginTop: 2 }}>… และอีก {items.length - itemCap} รายการ</div>
+            )}
           </div>
         </div>
-        <div style={{ textAlign: "right", flexShrink: 0 }}>
-          <div style={{ fontSize: compact ? 6.5 : 7.5, color: "#111", letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600 }}>Shipping Label</div>
-          <div className="mono" style={{ fontSize: compact ? 9.5 : 11, fontWeight: 600, marginTop: 2, color: "#111" }}>{label.soId}</div>
-          <div style={{ fontSize: compact ? 7.5 : 8.5, color: "#111", marginTop: 2, fontWeight: 600 }}>{label.carrier}</div>
-          {(label.created_at || label.updatedAt) && <div style={{ fontSize: compact ? 5.5 : 6.5, color: "#111", marginTop: 2 }}>{fmtLabelDate(label.created_at || label.updatedAt)}</div>}
-        </div>
-      </div>
+      )}
 
-      {/* Sender */}
-      <div style={{ padding: compact ? "7px 0 5px" : "10px 0 8px", borderBottom: "1px dashed #cfcfcf" }}>
-        <Eyebrow text="From · ผู้ส่ง"/>
-        <div style={{ fontSize: compact ? 9.5 : 11, marginTop: 4, lineHeight: 1.6, color: "#111" }}>
-          <div style={{ fontWeight: 700, fontSize: compact ? 11.5 : 13 }}>{label.sender.name}</div>
-          <div>{label.sender.addr1}</div>
-          <div>{label.sender.addr2}</div>
-          <div className="mono" style={{ marginTop: 1 }}>โทร. {label.sender.phone}</div>
-        </div>
-      </div>
-
-      {/* Recipient — hero card on standard labels; a tighter plain block on tiny labels to save room.
-          Address text is enlarged in both cases (the focus of this layout). */}
-      <div style={compact
-        ? { padding: "7px 0", borderBottom: "2px solid #111" }
-        : { marginTop: 11, padding: "13px 15px", background: "#f6f5f3", borderRadius: 9, border: "1px solid #e7e5e1" }}>
-        <Eyebrow text="To · ผู้รับ"/>
-        <div style={{ marginTop: compact ? 4 : 6, lineHeight: 1.65, color: "#111" }}>
-          <div style={{ fontSize: compact ? 16 : 21, fontWeight: 700, letterSpacing: "0em", marginBottom: compact ? 7 : 12 }}>{label.recipient.name}</div>
-          {label.recipient.addr1 && <div style={{ fontSize: compact ? 10.5 : 14, fontWeight: 500, marginBottom: compact ? 2 : 3 }}>{label.recipient.addr1}</div>}
-          {locality && (
-            <div style={{ fontSize: compact ? 10.5 : 14, fontWeight: 500, marginBottom: compact ? 2 : 3 }}>{locality}</div>
-          )}
-          <div className="mono" style={{ fontSize: compact ? 10 : 12.5, marginTop: compact ? 4 : 7, fontWeight: 600 }}>โทร. {label.recipient.phone}</div>
-        </div>
-      </div>
-
-      {/* Items list */}
-      <div style={{ padding: compact ? "6px 0" : "10px 0", overflow: "hidden" }}>
-        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-          <Eyebrow text={`Items · รายการ (${label.items.reduce((s,i)=>s+i.qty,0)})`}/>
-          <span style={{ fontSize: compact ? 7.5 : 8.5, color: "#111", fontWeight: 600 }}>น้ำหนัก {label.weight}</span>
-        </div>
-        <div style={{ fontSize: compact ? 8.5 : 10, lineHeight: 1.45, color: "#111", ...(compact ? { maxHeight: 42, overflow: "hidden" } : {}) }}>
-          {label.items.slice(0, compact ? 2 : 6).map((it, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "2px 0" }}>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {it.sku && <span className="mono" style={{ fontSize: compact ? 7 : 8, color: "#111", marginRight: 6 }}>{it.sku}</span>}
-                {it.name}
-              </span>
-              <span className="mono" style={{ flexShrink: 0, fontWeight: 600 }}>× {it.qty}</span>
-            </div>
-          ))}
-          {label.items.length > (compact ? 2 : 6) && (
-            <div style={{ fontSize: compact ? 7.5 : 8.5, color: "#111", marginTop: 3, fontStyle: "italic" }}>… และอีก {label.items.length - (compact ? 2 : 6)} รายการ</div>
-          )}
-        </div>
-      </div>
-
-      {/* Footer: tracking + payment — pinned to the bottom via absolute position
-          so it renders identically in html2canvas (which mishandles flex:1). */}
-      <div style={{ position: "absolute", left: compact ? 13 : 17, right: compact ? 13 : 17, bottom: compact ? 11 : 15, display: "flex", justifyContent: "space-between", alignItems: "flex-end", borderTop: "2px solid #111", paddingTop: compact ? 8 : 10, gap: 10 }}>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <Eyebrow text="Tracking · เลขพัสดุ"/>
-          <div className="mono" style={{ fontSize: compact ? 12.5 : 15.5, fontWeight: 700, marginTop: 3, letterSpacing: "0.04em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "#111" }}>{label.tracking}</div>
-        </div>
+      {/* Footer: tracking (hidden when empty) + payment badge — pinned to the bottom via
+          absolute position so it renders identically in html2canvas (which mishandles flex:1). */}
+      <div style={{ position: "absolute", left: compact ? 13 : 17, right: compact ? 13 : 17, bottom: compact ? 12 : 15, display: "flex", justifyContent: "space-between", alignItems: "flex-end", borderTop: "2px solid " + INK, paddingTop: compact ? 8 : 10, gap: 10 }}>
+        {hasTracking ? (
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <Tag text="เลขพัสดุ"/>
+            <div style={{ fontSize: compact ? 13 : 16, fontWeight: 700, marginTop: 2, letterSpacing: "0.03em", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: INK, fontFeatureSettings: '"tnum"' }}>{label.tracking}</div>
+          </div>
+        ) : <div style={{ flex: 1 }}/>}
         <div style={{ flexShrink: 0 }}>
           {label.cod > 0 ? (
-            <div style={{ background: "#111", color: "white", padding: compact ? "5px 11px" : "7px 14px", fontSize: compact ? 10 : 12, fontWeight: 700, letterSpacing: "0.06em", borderRadius: 999 }}>
-              COD ฿{label.cod.toLocaleString()}
+            <div style={{ background: INK, color: "#fff", padding: compact ? "5px 11px" : "7px 14px", fontSize: compact ? 10.5 : 12.5, fontWeight: 700, borderRadius: 999, fontFeatureSettings: '"tnum"' }}>
+              COD ฿{Number(label.cod).toLocaleString()}
             </div>
           ) : (
-            <div style={{ border: "1.5px solid #111", padding: compact ? "4px 10px" : "5px 12px", fontSize: compact ? 9 : 10.5, fontWeight: 700, letterSpacing: "0.08em", borderRadius: 999, color: "#111" }}>
-              PAID · ชำระแล้ว
+            <div style={{ border: "1.5px solid " + INK, padding: compact ? "4px 10px" : "5px 12px", fontSize: compact ? 9.5 : 11, fontWeight: 700, borderRadius: 999, color: INK }}>
+              ชำระแล้ว
             </div>
           )}
         </div>

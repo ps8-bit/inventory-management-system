@@ -77,6 +77,11 @@ html, body {
 .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-feature-settings: "tnum"; }
 .num  { font-family: "IBM Plex Sans", "IBM Plex Sans Thai", sans-serif; font-feature-settings: "tnum"; }
 
+/* Shipping labels print in Sarabun (per shop request) — falls back to IBM Plex /
+   locally-installed Thai fonts. Also set inline on the .label-paper root so it
+   survives the print + PDF clone paths. */
+.label-paper { font-family: "Sarabun", "IBM Plex Sans Thai", "Leelawadee UI", "Leelawadee", "TH Sarabun New", Tahoma, sans-serif; }
+
 /* ============ LAYOUT ============ */
 .app {
   display: grid;
