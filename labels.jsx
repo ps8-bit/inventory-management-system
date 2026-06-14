@@ -376,6 +376,142 @@ async function labelsToPDF(els, size, soId, pushToast) {
   return true;
 }
 
+function scoreRecipientParse(fields, leftover, originalText) {
+  const f = fields || {};
+  const zip = f.zip || f.postal || "";
+  const req = [
+    [f.name, "ชื่อผู้รับ"],
+    [f.phone, "เบอร์โทร"],
+    [f.addr1, "ที่อยู่ (บ้านเลขที่/ถนน)"],
+    [f.tambon, "ตำบล/แขวง"],
+    [f.amphoe, "อำเภอ/เขต"],
+    [f.province, "จังหวัด"],
+    [zip, "รหัสไปรษณีย์"],
+  ];
+  const ok = (v) => !!(v && String(v).trim());
+  const missing = req.filter(([v]) => !ok(v)).map(([, l]) => l);
+  const filled = req.length - missing.length;
+  const completeness = filled / req.length;
+  const cnt = (s) => ((String(s || "").match(/[฀-๿a-z0-9]/gi)) || []).length;
+  const totalChars = cnt(originalText);
+  const loChars = cnt(leftover);
+  const coverage = totalChars > 0 ? Math.max(0, 1 - Math.min(1, loChars / totalChars)) : 1;
+  const hasLeftover = !!(leftover && String(leftover).trim());
+  const percent = Math.round(Math.min(completeness, coverage) * 100);
+  return { percent, missing, filled, total: req.length, hasLeftover };
+}
+
+function computeRecipientLeftover(originalText, fields) {
+  const stopwords = new Set([
+    "ชื่อ","ชื่อผู้รับ","ผู้รับ","ชื่อ-นามสกุล","ชื่อนามสกุล",
+    "ที่อยู่","ที่อยู่จัดส่ง","address","name",
+    "เบอร์","เบอร์โทร","เบอร์โทรศัพท์","โทร","โทร.","โทรศัพท์","มือถือ","tel","phone",
+    "จัดส่ง","รหัสไปรษณีย์",
+  ]);
+  const tokens = String(originalText || "").split(/[\s,\n\r]+/).filter(Boolean);
+  const haystack = [
+    fields.name, fields.phone, fields.addr1, fields.addr2,
+    fields.tambon, fields.amphoe, fields.province, fields.zip,
+  ].filter(Boolean).join(" ").toLowerCase().replace(/[^฀-๿a-z0-9]/g, "");
+  const remaining = tokens.filter(tok => {
+    const stripped = tok.replace(/[:：.。,]/g, "").toLowerCase();
+    if (!stripped || stripped.length < 2) return false;
+    if (stopwords.has(stripped)) return false;
+    const alphOnly = stripped.replace(/[^฀-๿a-z0-9]/g, "");
+    if (alphOnly.length < 2) return false;
+    if (haystack.includes(alphOnly)) return false;
+    const core = alphOnly.replace(/^(ตำบล|ตําบล|แขวง|อำเภอ|อําเภอ|เขต|จังหวัด)/, "");
+    if (core && core.length >= 2 && core !== alphOnly && haystack.includes(core)) return false;
+    if (/^\d+$/.test(alphOnly) && (alphOnly === (fields.phone || "").replace(/\D/g, "") || alphOnly === (fields.zip || ""))) return false;
+    return true;
+  });
+  const joined = remaining.join(" ").replace(/\s+/g, " ").trim();
+  if ((joined.match(/[฀-๿a-z0-9]/gi) || []).length < 2) return "";
+  return joined;
+}
+
+function RecipientParseNote({ summary, leftover, onAppend, onSkip, onDismiss, mobile, percent, missing }) {
+  const baseStyle = {
+    background: "var(--surface-2)",
+    borderRadius: mobile ? 10 : 8,
+    padding: mobile ? "10px 12px" : "8px 10px",
+    fontSize: mobile ? 13 : 12,
+    marginTop: 8,
+    border: "1px solid var(--border)",
+  };
+  const rowStyle = { display: "flex", alignItems: "flex-start", gap: 6, justifyContent: "space-between" };
+  const warnStyle = {
+    marginTop: 6,
+    background: "var(--warning-soft, #fff3cd)",
+    border: "1px solid var(--warning, #f5a623)",
+    borderRadius: 6,
+    padding: "6px 8px",
+    fontSize: mobile ? 12 : 11,
+  };
+  const badgeColor = typeof percent === "number"
+    ? (percent >= 85
+        ? { bg: "var(--success-soft, #dcfce7)", fg: "var(--success, #16a34a)", border: "var(--success, #16a34a)" }
+        : percent >= 50
+          ? { bg: "var(--warning-soft, #fff3cd)", fg: "var(--warning, #b45309)", border: "var(--warning, #f5a623)" }
+          : { bg: "var(--danger-soft, #fee2e2)", fg: "var(--danger, #dc2626)", border: "var(--danger, #dc2626)" })
+    : null;
+  return React.createElement("div", { style: baseStyle },
+    React.createElement("div", { style: rowStyle },
+      React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 5, color: "var(--success, #22c55e)", flexWrap: "wrap", flex: 1 } },
+        React.createElement(Icons.Check, { size: mobile ? 14 : 12 }),
+        React.createElement("span", null, summary),
+        badgeColor ? React.createElement("span", {
+          style: {
+            display: "inline-block",
+            background: badgeColor.bg,
+            color: badgeColor.fg,
+            border: "1px solid " + badgeColor.border,
+            borderRadius: 99,
+            padding: "0px 7px",
+            fontSize: mobile ? 11 : 10,
+            fontWeight: 600,
+            lineHeight: "18px",
+            flexShrink: 0,
+          }
+        }, "คัดแยกได้ ~" + percent + "%") : null
+      ),
+      React.createElement("button", {
+        onClick: onDismiss,
+        style: { background: "none", border: "none", cursor: "pointer", color: "var(--muted)", padding: "0 2px", lineHeight: 1, flexShrink: 0 },
+        title: "ปิด",
+      }, React.createElement(Icons.X, { size: mobile ? 14 : 12 }))
+    ),
+    typeof percent === "number" ? React.createElement("div", {
+      style: { marginTop: 5, fontSize: mobile ? 12 : 11, color: "var(--muted)" }
+    },
+      (missing && missing.length > 0)
+        ? React.createElement(React.Fragment, null,
+            React.createElement("span", { style: { color: "var(--fg-muted, var(--muted))" } }, "ต้องกรอกเอง: "),
+            React.createElement("span", null, missing.join(" · "))
+          )
+        : (!leftover
+            ? React.createElement("span", { style: { color: "var(--success, #16a34a)" } }, "✓ ครบทุกช่องที่จำเป็น")
+            : null)
+    ) : null,
+    leftover ? React.createElement("div", { style: warnStyle },
+      React.createElement("div", { style: { fontWeight: 600, marginBottom: 4, color: "var(--warning, #b45309)" } }, "⚠️ ข้อความที่ยังไม่ได้จัดลงช่อง:"),
+      React.createElement("div", { style: { userSelect: "all", wordBreak: "break-word", marginBottom: 6, color: "var(--fg)" } }, leftover),
+      React.createElement("div", { style: { display: "flex", gap: 6 } },
+        React.createElement("button", {
+          className: "btn btn-sm btn-primary",
+          style: { fontSize: mobile ? 12 : 11, padding: "3px 8px" },
+          onClick: () => onAppend(leftover),
+        }, "＋ เพิ่มลงที่อยู่"),
+        React.createElement("button", {
+          className: "btn btn-sm",
+          style: { fontSize: mobile ? 12 : 11, padding: "3px 8px", color: "var(--muted)" },
+          onClick: () => onSkip && onSkip(),
+        }, "ไม่เพิ่ม")
+      )
+    ) : null
+  );
+}
+
 /* Parse a pasted recipient blob (common Thai formats — labeled or freeform,
    single or multi-line) into { name, phone, addr1, addr2 }. Best-effort: the
    user reviews/edits the result. Returns null if there's nothing to parse. */
@@ -384,7 +520,9 @@ function parseRecipientBlob(raw) {
   // Strip surrounding straight/curly quotes that appear when copy-pasting from
   // a chat message or code block (e.g. "ชื่อ: …" including the outer quotes).
   text = text.replace(/^["'""]|["'""]$/g, "").trim();
+  text = text.replace(/[๐-๙]/g, d => "๐๑๒๓๔๕๖๗๘๙".indexOf(d));
   if (!text) return null;
+  const text0 = text;
   const out = { name: "", phone: "", addr1: "", addr2: "" };
   const addrKw = /(บ้านเลขที่|เลขที่|ห้อง|อาคาร|ตึก|ชั้น|หมู่บ้าน|หมู่|ม\.|ซอย|ซ\.|ถนน|ถ\.|ตำบล|ต\.|แขวง|อำเภอ|อ\.|เขต|จังหวัด|จ\.|รหัสไปรษณีย์|\d{1,4}\/\d{1,4}|\d{5})/;
   // A leading chain of single-letter dotted groups is a Thai military/police/
@@ -397,18 +535,35 @@ function parseRecipientBlob(raw) {
   // 1) Phone — exact-length patterns so it can't bleed into an adjacent number.
   //    Mobile = 10 digits (0[689]+8), +66 mobile, or landline = 9 digits (0[2-7]+7).
   const phonePatterns = [
-    /0[689](?:[ \-.]?\d){8}/,         // 08x/06x/09x mobile
-    /(?:\+?66)[ \-.]?[689](?:[ \-.]?\d){8}/, // +66 mobile (0 dropped)
-    /0[2-7](?:[ \-.]?\d){7}/,         // 02x landline / provincial
+    /\(?0[689](?:[ \-.()\/]*\d){8}/,
+    /\(?(?:\+?66)[ \-.()\/]*[689](?:[ \-.()\/]*\d){8}/,
+    /\(?0[2-7](?:[ \-.()\/]*\d){7}/,
   ];
+  let primaryPhoneRaw = null;
   for (const re of phonePatterns) {
     const pm = text.match(re);
     if (pm) {
       let d = pm[0].replace(/\D/g, "");
       if (d.startsWith("66")) d = "0" + d.slice(2);
-      if (d.length === 9 || d.length === 10) { out.phone = d; text = text.replace(pm[0], "\n"); break; }
+      if (d.length === 9 || d.length === 10) {
+        out.phone = d;
+        primaryPhoneRaw = pm[0];
+        text = text.replace(pm[0], "\n");
+        break;
+      }
     }
   }
+  for (const re of phonePatterns) {
+    let safety = 0;
+    let m;
+    while ((m = text.match(re)) && safety++ < 5) {
+      const d = m[0].replace(/\D/g, "");
+      const len = d.startsWith("66") ? d.length - 1 : d.length;
+      if (len === 9 || len === 10) text = text.replace(m[0], " ");
+      else break;
+    }
+  }
+  text = text.replace(/[ \t]*,[ \t]*(?=\n|$)/g, "").replace(/(^|\n)[ \t]*[,;]+[ \t]*/g, "$1");
 
   // 2) Labeled fields (ชื่อ: / ที่อยู่: ...).
   const grab = (labels) => {
@@ -428,29 +583,23 @@ function parseRecipientBlob(raw) {
     .replace(/(?:^|[\n\s])(?:เบอร์โทรศัพท์|เบอร์โทร|เบอร์|โทรศัพท์|โทร\.?|tel|phone|มือถือ)(?=$|[\n\s])/gi, " ")
     .trim();
 
-  // 3a) Multi-line ที่อยู่: — the label grab only captures the first line.
-  //     Append any remaining subdistrict/province/zip lines from rest so they
-  //     feed into the step-4 gazetteer split.
-  //     Uses a stricter word-edge check (keyword must follow whitespace or start
-  //     of line) so ranks like นสต./จ.ส.อ. whose dots contain ต./อ./จ. as
-  //     substrings don't cause false positives.
-  if (addr) {
-    const subKw = /(?:^|[ \t,])(?:ตำบล|ต\.|แขวง|อำเภอ|อ\.|เขต|จังหวัด|จ\.|รหัสไปรษณีย์|\d{5})/;
-    const looksSubDist = (line) => subKw.test(line.replace(RANK, " "));
-    const extra = rest.split(/\n+/).map(s => s.trim()).filter(s => s && looksSubDist(s));
-    if (extra.length) addr = addr + " " + extra.join(" ");
-  }
-
-  // 3b) Fallback: line-based heuristics for whatever the labels didn't capture.
-  if (!out.name || !addr) {
-    const lines = rest.split(/\n+/).map(s => s.trim()).filter(Boolean);
+  // 3a/3b) Resolve name then build addr from remaining lines.
+  {
+    let restLines = rest.split(/\n+/).map(s => s.trim()).filter(Boolean);
     if (!out.name) {
-      const nameLine = lines.find(l => !looksAddr(l));
-      if (nameLine) out.name = nameLine;
+      const nameLine = restLines.find(l => !looksAddr(l));
+      if (nameLine) {
+        out.name = nameLine;
+        let removed = false;
+        restLines = restLines.filter(l => { if (!removed && l === nameLine) { removed = true; return false; } return true; });
+      }
     }
-    if (!addr) {
-      const addrLines = lines.filter(l => l !== out.name);
-      addr = addrLines.join(" ");
+    if (addr) {
+      const addrLow = addr.toLowerCase();
+      const extra = restLines.filter(l => !addrLow.includes(l.toLowerCase()));
+      if (extra.length) addr = addr + " " + extra.join(" ");
+    } else {
+      addr = restLines.join(" ");
     }
   }
 
@@ -497,6 +646,8 @@ function parseRecipientBlob(raw) {
   }
 
   if (!out.name && !out.phone && !out.addr1 && !out.addr2) return null;
+  const leftoverBase = primaryPhoneRaw ? text0.replace(primaryPhoneRaw, " ") : text0;
+  out.leftover = computeRecipientLeftover(leftoverBase, out);
   return out;
 }
 
@@ -578,6 +729,7 @@ function Labels({ pushToast, store }) {
   const [pdfLoading, setPdfLoading] = useStateLB(false);
   const [pasteText, setPasteText] = useStateLB("");
   const [aiLoading, setAiLoading] = useStateLB(false);
+  const [pasteNote, setPasteNote] = useStateLB(null);
   const autoPrintRef = React.useRef(false);
 
   const size = LABEL_SIZES.find(s => s.id === sizeId);
@@ -649,8 +801,6 @@ function Labels({ pushToast, store }) {
         name:    parsed.name    || l.recipient.name,
         phone:   parsed.phone   || l.recipient.phone,
         addr1:   parsed.addr1   || l.recipient.addr1,
-        // when the gazetteer resolved structured fields, clear addr2 to avoid
-        // printing both the baked-in subdistrict string and the structured fields
         addr2:    parsed.tambon ? "" : (parsed.addr2 || l.recipient.addr2),
         tambon:   parsed.tambon   || l.recipient.tambon   || "",
         amphoe:   parsed.amphoe   || l.recipient.amphoe   || "",
@@ -663,8 +813,8 @@ function Labels({ pushToast, store }) {
     const tail = !hasAddr ? "" : parsed.addrConfidence === "high"
       ? " · ✓ ตรงรหัสไปรษณีย์"
       : " · ที่อยู่อาจไม่ครบ ลองปุ่ม AI";
-    pushToast("คัดแยกแล้ว: " + (got || "—") + tail);
-    setPasteText("");
+    const summary = "คัดแยกแล้ว: " + (got || "—") + tail;
+    setPasteNote({ summary, leftover: parsed.leftover || "", original: pasteText });
   };
 
   // Same as applyPaste but via Gemini (more forgiving of messy/unusual pastes).
@@ -707,8 +857,10 @@ function Labels({ pushToast, store }) {
         },
       }));
       const got = [j.name && "ชื่อ", j.phone && "เบอร์", (j.addr1 || j.addr2) && "ที่อยู่", aiTambon && "✓ ตรงรหัสไปรษณีย์"].filter(Boolean).join(" · ");
-      pushToast("AI คัดแยกแล้ว: " + (got || "—"));
-      setPasteText("");
+      const aiLeftover = (typeof computeRecipientLeftover === "function")
+        ? computeRecipientLeftover(text, { name: j.name, phone: j.phone, addr1: j.addr1, addr2: j.addr2, tambon: aiTambon, amphoe: aiAmphoe, province: aiProvince, zip: aiPostal })
+        : "";
+      setPasteNote({ summary: "AI คัดแยกแล้ว: " + (got || "—"), leftover: aiLeftover, original: pasteText });
     } catch (e) {
       pushToast("คัดแยกด้วย AI ไม่สำเร็จ: " + (e.message || e));
     } finally {
@@ -1166,6 +1318,19 @@ function Labels({ pushToast, store }) {
                   </button>
                   {pasteText && !aiLoading && <button className="btn btn-sm" onClick={() => setPasteText("")}>ล้าง</button>}
                 </div>
+                {pasteNote && (() => {
+                  const r = active.recipient;
+                  const sc = (typeof scoreRecipientParse === "function")
+                    ? scoreRecipientParse({ name: r.name, phone: r.phone, addr1: r.addr1, addr2: r.addr2, tambon: r.tambon, amphoe: r.amphoe, province: r.province, zip: r.postal }, pasteNote.leftover, pasteNote.original)
+                    : { percent: null, missing: [] };
+                  return <RecipientParseNote
+                    summary={pasteNote.summary} percent={sc.percent} missing={sc.missing} leftover={pasteNote.leftover}
+                    onAppend={lo => { updateActive(l => ({ ...l, recipient: { ...l.recipient, addr2: (l.recipient.addr2 ? l.recipient.addr2 + " " : "") + lo } })); setPasteNote(n => n && ({ ...n, leftover: "" })); }}
+                    onSkip={() => setPasteNote(n => n && ({ ...n, leftover: "" }))}
+                    onDismiss={() => { setPasteNote(null); setPasteText(""); }}
+                    mobile={false}
+                  />;
+                })()}
               </div>
 
               <div className="stack" style={{ gap: 8 }}>
@@ -1247,7 +1412,7 @@ function Labels({ pushToast, store }) {
                         <span style={{ fontSize: 11, color: "var(--muted)" }}>จำนวน</span>
                         <div className="qty-stepper">
                           <button onClick={() => updateActive(l => ({ ...l, items: l.items.map((x, j) => j === i ? { ...x, qty: Math.max(0, x.qty - 1) } : x) }))} disabled={it.qty <= 0}>−</button>
-                          <input value={it.qty} onChange={e => updateActive(l => ({ ...l, items: l.items.map((x, j) => j === i ? { ...x, qty: parseInt(e.target.value) || 0 } : x) }))}/>
+                          <input value={it.qty} onChange={e => updateActive(l => ({ ...l, items: l.items.map((x, j) => j === i ? { ...x, qty: parseInt(e.target.value, 10) || 0 } : x) }))}/>
                           <button onClick={() => updateActive(l => ({ ...l, items: l.items.map((x, j) => j === i ? { ...x, qty: x.qty + 1 } : x) }))}>+</button>
                         </div>
                         {it.sku && <span className="mono" style={{ fontSize: 10, color: "var(--muted)", marginLeft: "auto" }}>{it.sku}</span>}
@@ -1268,7 +1433,7 @@ function Labels({ pushToast, store }) {
                 <Field label="ผู้ให้บริการ" value={active.carrier} onChange={v => updateActive(l => ({ ...l, carrier: v }))}/>
                 <Field label="เลขพัสดุ" value={active.tracking} onChange={v => updateActive(l => ({ ...l, tracking: v }))} mono/>
                 <Field label="น้ำหนัก" value={active.weight} onChange={v => updateActive(l => ({ ...l, weight: v }))}/>
-                <Field label="COD (บาท)" value={String(active.cod)} onChange={v => updateActive(l => ({ ...l, cod: parseInt(v) || 0 }))} num/>
+                <Field label="COD (บาท)" value={String(active.cod)} onChange={v => updateActive(l => ({ ...l, cod: parseInt(v, 10) || 0 }))} num/>
               </div>
             </div>
           </div>
@@ -1409,6 +1574,25 @@ function fmtLabelDate(iso) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear() + 543} ${pad(d.getHours())}:${pad(d.getMinutes())} น.`;
 }
 
+function formatRecipientLocality(r) {
+  const rc = r || {};
+  const isBkk = /กรุงเทพ/.test(rc.province || "");
+  const pref = (val, abbr) => {
+    const v = String(val || "").trim();
+    if (!v) return "";
+    if (/^(ต\.|ตำบล|แขวง|อ\.|อำเภอ|เขต|จ\.|จังหวัด)/.test(v)) return v;
+    return abbr + v;
+  };
+  const parts = [
+    rc.addr2,
+    pref(rc.tambon, isBkk ? "แขวง" : "ต."),
+    pref(rc.amphoe, isBkk ? "เขต" : "อ."),
+    isBkk ? (rc.province || "") : pref(rc.province, "จ."),
+    rc.postal,
+  ];
+  return parts.filter(v => v && String(v).trim()).join(" ");
+}
+
 /* ===== Label paper (the actual printed thing) — minimal modern, no barcode/QR ===== */
 function LabelPaper({ label, size, store }) {
   const wPx = size.w * MM_TO_PX;
@@ -1430,6 +1614,8 @@ function LabelPaper({ label, size, store }) {
       <span style={{ fontSize: compact ? 6.5 : 7.5, color: "#111", letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 600 }}>{text}</span>
     </div>
   );
+
+  const locality = formatRecipientLocality(label.recipient);
 
   return (
     <div
@@ -1484,8 +1670,8 @@ function LabelPaper({ label, size, store }) {
         <div style={{ marginTop: compact ? 4 : 6, lineHeight: 1.65, color: "#111" }}>
           <div style={{ fontSize: compact ? 16 : 21, fontWeight: 700, letterSpacing: "0em", marginBottom: compact ? 7 : 12 }}>{label.recipient.name}</div>
           {label.recipient.addr1 && <div style={{ fontSize: compact ? 10.5 : 14, fontWeight: 500, marginBottom: compact ? 2 : 3 }}>{label.recipient.addr1}</div>}
-          {[label.recipient.addr2, label.recipient.tambon, label.recipient.amphoe, label.recipient.province, label.recipient.postal].filter(Boolean).join(" ") && (
-            <div style={{ fontSize: compact ? 10.5 : 14, fontWeight: 500, marginBottom: compact ? 2 : 3 }}>{[label.recipient.addr2, label.recipient.tambon, label.recipient.amphoe, label.recipient.province, label.recipient.postal].filter(Boolean).join(" ")}</div>
+          {locality && (
+            <div style={{ fontSize: compact ? 10.5 : 14, fontWeight: 500, marginBottom: compact ? 2 : 3 }}>{locality}</div>
           )}
           <div className="mono" style={{ fontSize: compact ? 10 : 12.5, marginTop: compact ? 4 : 7, fontWeight: 600 }}>โทร. {label.recipient.phone}</div>
         </div>
@@ -1606,4 +1792,4 @@ function BatchView({ labels, selected, setSelected, size, zoom, store, onExportP
   );
 }
 
-Object.assign(window, { Labels, LabelPaper, loadLabels, saveLabels, parseRecipientBlob, blankLabel: makeBlankLabel, createSaleLabel, exportLabelPDF, printLabels, labelsToPDF, rasterizeLabel, SenderPicker, loadSenders, saveSenders, storeSenderTemplate });
+Object.assign(window, { Labels, LabelPaper, loadLabels, saveLabels, parseRecipientBlob, computeRecipientLeftover, scoreRecipientParse, RecipientParseNote, blankLabel: makeBlankLabel, createSaleLabel, exportLabelPDF, printLabels, labelsToPDF, rasterizeLabel, SenderPicker, loadSenders, saveSenders, storeSenderTemplate });

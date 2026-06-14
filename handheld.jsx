@@ -1637,6 +1637,7 @@ function MSell({ ctx }) {
   const [pasteText, setPasteText] = useStateM("");
   const [pasteOpen, setPasteOpen] = useStateM(false);
   const [aiLoading, setAiLoading] = useStateM(false);
+  const [pasteNote, setPasteNote] = useStateM(null);
 
   const applyParse = async () => {
     if (typeof ensureThaiAddrIndex === "function") { try { await ensureThaiAddrIndex(); } catch (e) {} }
@@ -1648,11 +1649,10 @@ function MSell({ ctx }) {
       addr1: parsed.addr1 || s.addr1,
       addr2: parsed.addr2 || s.addr2,
     }));
-    setPasteText(""); setPasteOpen(false);
     const hasAddr = parsed.addr1 || parsed.addr2;
-    ctx.pushToast(!hasAddr ? "คัดแยกข้อมูลแล้ว"
-      : parsed.addrConfidence === "high" ? "คัดแยกแล้ว · ✓ ตรงรหัสไปรษณีย์"
-      : "คัดแยกแล้ว · ที่อยู่อาจไม่ครบ ลอง AI");
+    const got = [parsed.name && "ชื่อ", parsed.phone && "เบอร์", hasAddr && "ที่อยู่"].filter(Boolean).join(" · ");
+    const tail = !hasAddr ? "" : parsed.addrConfidence === "high" ? " · ✓ ตรงรหัสไปรษณีย์" : " · ที่อยู่อาจไม่ครบ ลอง AI";
+    setPasteNote({ summary: "คัดแยกแล้ว: " + (got || "—") + tail, leftover: parsed.leftover || "", original: pasteText });
   };
 
   const applyPasteAI = async () => {
@@ -1674,8 +1674,11 @@ function MSell({ ctx }) {
         addr1: j.addr1 || s.addr1,
         addr2: j.addr2 || s.addr2,
       }));
-      setPasteText(""); setPasteOpen(false);
-      ctx.pushToast("AI คัดแยกข้อมูลแล้ว");
+      const got = [j.name && "ชื่อ", j.phone && "เบอร์", (j.addr1 || j.addr2) && "ที่อยู่"].filter(Boolean).join(" · ");
+      const aiLeftover = (typeof computeRecipientLeftover === "function")
+        ? computeRecipientLeftover(pasteText, { name: j.name, phone: j.phone, addr1: j.addr1, addr2: j.addr2, tambon: "", amphoe: "", province: "", zip: "" })
+        : "";
+      setPasteNote({ summary: "AI คัดแยกข้อมูลแล้ว: " + (got || "—"), leftover: aiLeftover, original: pasteText });
     } catch (e) {
       ctx.pushToast("AI คัดแยกไม่สำเร็จ: " + e.message);
     } finally {
@@ -2007,6 +2010,18 @@ function MSell({ ctx }) {
                       <Icons.Spark size={13}/> {aiLoading ? "กำลังคัดแยก..." : "ด้วย AI"}
                     </button>
                   </div>
+                  {pasteNote && typeof RecipientParseNote === "function" && (() => {
+                    const sc = (typeof scoreRecipientParse === "function")
+                      ? scoreRecipientParse({ name: ship.name, phone: ship.phone, addr1: ship.addr1, addr2: ship.addr2, tambon: ship.tambon, amphoe: ship.amphoe, province: ship.province, zip: ship.postal }, pasteNote.leftover, pasteNote.original)
+                      : { percent: null, missing: [] };
+                    return <RecipientParseNote
+                      summary={pasteNote.summary} percent={sc.percent} missing={sc.missing} leftover={pasteNote.leftover}
+                      onAppend={lo => { setShipState(s => ({ ...s, addr2: (s.addr2 ? s.addr2 + " " : "") + lo })); setPasteNote(n => n && ({ ...n, leftover: "" })); }}
+                      onSkip={() => setPasteNote(n => n && ({ ...n, leftover: "" }))}
+                      onDismiss={() => { setPasteNote(null); setPasteText(""); setPasteOpen(false); }}
+                      mobile={true}
+                    />;
+                  })()}
                 </>
               )}
             </div>
@@ -2836,11 +2851,18 @@ function MLabels({ ctx }) {
     return () => window.removeEventListener("ims-labels-change", refresh);
   }, []);
 
-  const store = (() => {
+  const [store, setStore] = useStateM(() => {
     if (window._DB_STORE) return { ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...window._DB_STORE };
     try { return { ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...JSON.parse(localStorage.getItem("ims_store") || "{}") }; }
     catch (e) { return typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}; }
-  })();
+  });
+  useEffectM(() => {
+    const h = () => {
+      if (window._DB_STORE) setStore({ ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...window._DB_STORE });
+    };
+    window.addEventListener("ims-store-change", h);
+    return () => window.removeEventListener("ims-store-change", h);
+  }, []);
 
   const selectedIds = Object.keys(selected).filter(k => selected[k]);
   const selectedCount = selectedIds.length;
@@ -2848,7 +2870,7 @@ function MLabels({ ctx }) {
   const clearSelect = () => { setSelected({}); setSelecting(false); };
 
   const createLabel = () => {
-    const fresh = (typeof blankLabel === "function") ? blankLabel() : { id: "L" + Date.now(), soId: "", recipient: { name: "", addr1: "", addr2: "", phone: "" }, items: [], weight: "", carrier: "", box: "" };
+    const fresh = (typeof blankLabel === "function") ? blankLabel() : { id: "L" + Date.now(), soId: "", recipient: { name: "", addr1: "", addr2: "", phone: "" }, sender: {}, items: [], cod: 0, tracking: "", weight: "", carrier: "", box: "" };
     const next = [...labels, fresh];
     if (typeof saveLabels === "function") saveLabels(next); else setLabels(next);
     ctx.push("label-edit", fresh);
@@ -2860,7 +2882,7 @@ function MLabels({ ctx }) {
     if (typeof labelsToPDF !== "function") { ctx.pushToast("ฟังก์ชัน PDF ยังไม่พร้อม"); return; }
     setBatchLoading(true);
     setBatchLabels(sel);
-    await new Promise(r => setTimeout(r, 450));
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 80))));
     const container = batchContainerRef.current;
     const els = container ? [...container.querySelectorAll(".label-paper")] : [];
     if (els.length) {
@@ -2971,11 +2993,18 @@ function MLabelView({ ctx }) {
   const param = ctx.route.params;
   const all = useMemoM(() => typeof loadLabels === "function" ? loadLabels() : SAMPLE_LABELS, [tick]);
   const l = all.find(x => x.id === param.id) || param;
-  const store = (() => {
-    if (window._DB_STORE) return { ...DEFAULT_STORE, ...window._DB_STORE };
-    try { return { ...DEFAULT_STORE, ...JSON.parse(localStorage.getItem("ims_store") || "{}") }; }
-    catch { return DEFAULT_STORE; }
-  })();
+  const [store, setStoreV] = useStateM(() => {
+    if (window._DB_STORE) return { ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...window._DB_STORE };
+    try { return { ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...JSON.parse(localStorage.getItem("ims_store") || "{}") }; }
+    catch (e) { return typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}; }
+  });
+  useEffectM(() => {
+    const h = () => {
+      if (window._DB_STORE) setStoreV({ ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...window._DB_STORE });
+    };
+    window.addEventListener("ims-store-change", h);
+    return () => window.removeEventListener("ims-store-change", h);
+  }, []);
   const size = LABEL_SIZES[0]; // 100x150
 
   // Exact-size PDF (SVG→jsPDF) so the label fills a real 100×150mm page with
@@ -3047,16 +3076,56 @@ function MLabelEdit({ ctx }) {
   const [pasteText, setPasteText] = useStateM("");
   const [pasteOpen, setPasteOpen] = useStateM(false);
   const [aiLoading, setAiLoading] = useStateM(false);
+  const [pasteNote, setPasteNote] = useStateM(null);
+  const [skuPickerOpen, setSkuPickerOpen] = useStateM(false);
+  const [skuPickerQ, setSkuPickerQ] = useStateM("");
+  const skuPickerInputRef = useRefM(null);
+
+  useEffectM(() => {
+    if (skuPickerOpen) setTimeout(() => skuPickerInputRef.current && skuPickerInputRef.current.focus(), 80);
+    else setSkuPickerQ("");
+  }, [skuPickerOpen]);
 
   const setRecip = (k, v) => setLabel(l => ({ ...l, recipient: { ...l.recipient, [k]: v } }));
   const setField = (k, v) => setLabel(l => ({ ...l, [k]: v }));
   const setSender = (k, v) => setLabel(l => ({ ...l, sender: { ...(l.sender || {}), [k]: v } }));
 
+  const addLabelItem = (sku) => {
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (!p) return;
+    setLabel(l => {
+      const items = l.items || [];
+      const idx = items.findIndex(it => it.sku === sku);
+      if (idx > -1) {
+        const next = [...items];
+        next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
+        return { ...l, items: next };
+      }
+      return { ...l, items: [...items, { sku: p.sku, name: p.name, qty: 1 }] };
+    });
+    setSkuPickerOpen(false);
+  };
+
+  const removeLabelItem = (idx) => setLabel(l => ({ ...l, items: (l.items || []).filter((_, i) => i !== idx) }));
+  const stepLabelItemQty = (idx, delta) => setLabel(l => {
+    const items = (l.items || []).slice();
+    const next = Math.max(1, (items[idx].qty || 1) + delta);
+    items[idx] = { ...items[idx], qty: next };
+    return { ...l, items };
+  });
+
+  const skuPickerFiltered = PRODUCTS.filter(p =>
+    !skuPickerQ ||
+    p.sku.toLowerCase().includes(skuPickerQ.toLowerCase()) ||
+    p.name.toLowerCase().includes(skuPickerQ.toLowerCase()) ||
+    (p.cat || "").toLowerCase().includes(skuPickerQ.toLowerCase())
+  );
+
   /* paste auto-split — local gazetteer parser (same parser as desktop) */
   const applyParse = async () => {
     if (typeof ensureThaiAddrIndex === "function") { try { await ensureThaiAddrIndex(); } catch (e) {} }
     const parsed = (typeof parseRecipientBlob === "function") ? parseRecipientBlob(pasteText) : {};
-    if (!parsed.name && !parsed.phone && !parsed.addr1) { ctx.pushToast("ไม่พบข้อมูลที่จะคัดแยก"); return; }
+    if (!parsed || (!parsed.name && !parsed.phone && !parsed.addr1)) { ctx.pushToast("ไม่พบข้อมูลที่จะคัดแยก"); return; }
     setLabel(l => ({ ...l, recipient: {
       ...l.recipient,
       name:    parsed.name    || l.recipient.name,
@@ -3068,11 +3137,10 @@ function MLabelEdit({ ctx }) {
       province: parsed.province || l.recipient.province || "",
       postal:   parsed.zip      || l.recipient.postal   || "",
     }}));
-    setPasteText(""); setPasteOpen(false);
     const hasAddr = parsed.addr1 || parsed.addr2;
-    ctx.pushToast(!hasAddr ? "คัดแยกข้อมูลแล้ว"
-      : parsed.addrConfidence === "high" ? "คัดแยกแล้ว · ✓ ตรงรหัสไปรษณีย์"
-      : "คัดแยกแล้ว · ที่อยู่อาจไม่ครบ ลอง AI");
+    const got = [parsed.name && "ชื่อ", parsed.phone && "เบอร์", hasAddr && "ที่อยู่"].filter(Boolean).join(" · ");
+    const tail = !hasAddr ? "" : parsed.addrConfidence === "high" ? " · ✓ ตรงรหัสไปรษณีย์" : " · ที่อยู่อาจไม่ครบ ลอง AI";
+    setPasteNote({ summary: "คัดแยกแล้ว: " + (got || "—") + tail, leftover: parsed.leftover || "", original: pasteText });
   };
 
   /* paste auto-split — AI (Edge Function, same as desktop) */
@@ -3107,8 +3175,11 @@ function MLabelEdit({ ctx }) {
         province: aiProvince || l.recipient.province || "",
         postal:   aiPostal   || l.recipient.postal   || "",
       }}));
-      setPasteText(""); setPasteOpen(false);
-      ctx.pushToast("AI คัดแยกแล้ว" + (aiTambon ? " · ✓ ตรงรหัสไปรษณีย์" : ""));
+      const got = [j.name && "ชื่อ", j.phone && "เบอร์", (j.addr1 || j.addr2) && "ที่อยู่", aiTambon && "✓ ตรงรหัสไปรษณีย์"].filter(Boolean).join(" · ");
+      const aiLeftover = (typeof computeRecipientLeftover === "function")
+        ? computeRecipientLeftover(pasteText, { name: j.name, phone: j.phone, addr1: j.addr1, addr2: j.addr2, tambon: aiTambon, amphoe: aiAmphoe, province: aiProvince, zip: aiPostal })
+        : "";
+      setPasteNote({ summary: "AI คัดแยกแล้ว: " + (got || "—"), leftover: aiLeftover, original: pasteText });
     } catch (e) {
       ctx.pushToast("AI คัดแยกไม่สำเร็จ: " + e.message);
     } finally {
@@ -3177,6 +3248,18 @@ function MLabelEdit({ ctx }) {
                   <Icons.Spark size={13}/> {aiLoading ? "กำลังคัดแยก..." : "ด้วย AI"}
                 </button>
               </div>
+              {pasteNote && typeof RecipientParseNote === "function" && (() => {
+                const sc = (typeof scoreRecipientParse === "function")
+                  ? scoreRecipientParse({ name: label.recipient.name, phone: label.recipient.phone, addr1: label.recipient.addr1, addr2: label.recipient.addr2, tambon: label.recipient.tambon, amphoe: label.recipient.amphoe, province: label.recipient.province, zip: label.recipient.postal }, pasteNote.leftover, pasteNote.original)
+                  : { percent: null, missing: [] };
+                return <RecipientParseNote
+                  summary={pasteNote.summary} percent={sc.percent} missing={sc.missing} leftover={pasteNote.leftover}
+                  onAppend={lo => { setRecip("addr2", (label.recipient.addr2 ? label.recipient.addr2 + " " : "") + lo); setPasteNote(n => n && ({ ...n, leftover: "" })); }}
+                  onSkip={() => setPasteNote(n => n && ({ ...n, leftover: "" }))}
+                  onDismiss={() => { setPasteNote(null); setPasteText(""); setPasteOpen(false); }}
+                  mobile={true}
+                />;
+              })()}
             </>
           )}
         </div>
@@ -3204,6 +3287,106 @@ function MLabelEdit({ ctx }) {
         <input className="m-input" value={(label.sender || {}).addr2 || ""} onChange={e => setSender("addr2", e.target.value)} placeholder="ที่อยู่ผู้ส่ง (บรรทัด 2)" style={{ marginBottom: 8 }}/>
         <input className="m-input mono" value={(label.sender || {}).phone || ""} onChange={e => setSender("phone", e.target.value)} placeholder="โทรศัพท์ผู้ส่ง" style={{ marginBottom: 12 }}/>
 
+        {/* line items */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 4px 6px" }}>
+          <div className="m-section-label" style={{ padding: 0 }}>รายการสินค้า</div>
+          <button
+            onClick={() => setSkuPickerOpen(true)}
+            style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 600, color: "var(--accent)", background: "none", border: "none", cursor: "pointer", padding: "2px 0", fontFamily: "inherit" }}
+          >
+            <Icons.Plus size={13}/> เพิ่มสินค้า
+          </button>
+        </div>
+        <div className="m-list" style={{ marginBottom: 12 }}>
+          {(label.items || []).length === 0 && (
+            <div style={{ padding: "18px 12px", textAlign: "center", fontSize: 12, color: "var(--muted)", border: "1.5px dashed var(--border)", borderRadius: 10 }}>
+              ยังไม่มีรายการ — แตะเพิ่มสินค้า
+            </div>
+          )}
+          {(label.items || []).map((it, i) => (
+            <div key={i} style={{ padding: "10px 12px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--border)", marginBottom: 6 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 6 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
+                  <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{it.sku}</div>
+                </div>
+                <button
+                  onClick={() => removeLabelItem(i)}
+                  style={{ flexShrink: 0, width: 28, height: 28, display: "grid", placeItems: "center", background: "var(--danger-soft)", color: "var(--danger)", border: "none", borderRadius: 8, cursor: "pointer" }}
+                >
+                  <Icons.Trash size={13}/>
+                </button>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>จำนวน</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 0, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                  <button
+                    onClick={() => stepLabelItemQty(i, -1)}
+                    style={{ width: 32, height: 32, fontSize: 16, background: "var(--surface)", border: "none", cursor: "pointer", color: "var(--fg)", display: "grid", placeItems: "center" }}
+                  >−</button>
+                  <span className="tnum" style={{ width: 32, textAlign: "center", fontSize: 14, fontWeight: 600, userSelect: "none" }}>{it.qty}</span>
+                  <button
+                    onClick={() => stepLabelItemQty(i, 1)}
+                    style={{ width: 32, height: 32, fontSize: 16, background: "var(--surface)", border: "none", cursor: "pointer", color: "var(--accent)", display: "grid", placeItems: "center", fontWeight: 700 }}
+                  >+</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* SKU picker sheet */}
+        {skuPickerOpen && (
+          <>
+            <div className="m-sheet-backdrop" onClick={() => setSkuPickerOpen(false)}/>
+            <div className="m-sheet" style={{ maxHeight: "85%" }}>
+              <div className="m-sheet-grabber"/>
+              <div className="m-sheet-head">
+                <h3>เลือกสินค้า</h3>
+                <button className="m-action" onClick={() => setSkuPickerOpen(false)}><Icons.X size={14}/></button>
+              </div>
+              <div style={{ padding: "12px 16px 8px", flexShrink: 0 }}>
+                <div className="m-search" style={{ marginBottom: 0 }}>
+                  <Icons.Search size={14}/>
+                  <input
+                    ref={skuPickerInputRef}
+                    value={skuPickerQ}
+                    onChange={e => setSkuPickerQ(e.target.value)}
+                    placeholder="พิมพ์ SKU, ชื่อ, หรือหมวด"
+                  />
+                  {skuPickerQ && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setSkuPickerQ("")}/>}
+                </div>
+              </div>
+              <div style={{ flex: 1, overflowY: "auto", padding: "0 12px 12px" }}>
+                <div className="m-list" style={{ marginBottom: 8 }}>
+                  {skuPickerFiltered.map(p => (
+                    <button
+                      key={p.sku}
+                      className="m-row"
+                      onClick={() => addLabelItem(p.sku)}
+                    >
+                      <div className="m-row-thumb" style={{ fontSize: 10, fontWeight: 600 }}>{p.sku.slice(-3)}</div>
+                      <div className="m-row-main">
+                        <div className="m-row-title" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                        <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{p.sku}</div>
+                      </div>
+                    </button>
+                  ))}
+                  {skuPickerFiltered.length === 0 && (
+                    <div style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                      <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>
+                      <div>ไม่พบสินค้าที่ตรงกับ "{skuPickerQ}"</div>
+                    </div>
+                  )}
+                </div>
+                <div style={{ textAlign: "center", fontSize: 11, color: "var(--muted)", padding: "4px 0 8px" }}>
+                  {skuPickerFiltered.length} จาก {PRODUCTS.length} รายการ
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
         {/* weight + box */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
           <div>
@@ -3213,6 +3396,18 @@ function MLabelEdit({ ctx }) {
           <div>
             <div className="m-section-label" style={{ padding: "0 2px 6px" }}>กล่อง</div>
             <input className="m-input" value={label.box || ""} onChange={e => setField("box", e.target.value)} placeholder="กล่อง A"/>
+          </div>
+        </div>
+
+        {/* tracking + COD */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          <div>
+            <div className="m-section-label" style={{ padding: "0 2px 6px" }}>เลขพัสดุ</div>
+            <input className="m-input mono" value={label.tracking || ""} onChange={e => setField("tracking", e.target.value)} placeholder="TH123456789"/>
+          </div>
+          <div>
+            <div className="m-section-label" style={{ padding: "0 2px 6px" }}>COD (บาท)</div>
+            <input className="m-input" type="number" inputMode="numeric" value={label.cod || ""} onChange={e => setField("cod", parseInt(e.target.value, 10) || 0)} placeholder="0"/>
           </div>
         </div>
 
