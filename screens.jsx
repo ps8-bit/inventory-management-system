@@ -1520,6 +1520,9 @@ function orderToLabel(o) {
     tracking: (o.tracking && o.tracking !== "—") ? o.tracking : "",
     cod: o.codAmount || 0,
     weight: "0.5 kg",
+    // Carry the order's date onto the label so it groups under the right day in
+    // the label queue's date filter (otherwise it falls into "ไม่ระบุวันที่").
+    created_at: o.created_at || (o.dateIso ? new Date(o.dateIso + "T00:00:00").toISOString() : new Date().toISOString()),
     items: lineItems.map(it => ({ sku: it.sku, name: it.name, qty: it.qty }))
   };
 }

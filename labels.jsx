@@ -745,6 +745,69 @@ function saveLabels(labels) {
   if (window.dbUpsertLabels) dbUpsertLabels(labels).catch(() => {});
 }
 
+/* ── Date filter for the label queue ───────────────────────────────────────
+   Group labels by their created_at day so a whole day's labels can be picked
+   (and printed / PDF'd / deleted) in one go. Shared by desktop Labels + mobile
+   MLabels so both filter identically. Labels with no/blank created_at fall into
+   an "ไม่ระบุวันที่" bucket; when every label shares one day the filter hides. */
+const THAI_MON_ABBR = ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+// Day key for grouping. "none" (not "") for undated labels, so the queue's
+// "all dates" sentinel ("") stays distinct from the undated bucket — otherwise
+// the "ไม่ระบุวันที่" chip would duplicate "ทั้งหมด" and both light up at once.
+function labelDateKey(l) {
+  const iso = l && l.created_at;
+  if (!iso) return "none";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "none";
+  const pad = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+}
+function labelDateChipLabel(key) {
+  if (!key || key === "none") return "ไม่ระบุวันที่";
+  const [y, m, d] = key.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diff = Math.round((today.getTime() - dt.getTime()) / 86400000);
+  if (diff === 0) return "วันนี้";
+  if (diff === 1) return "เมื่อวาน";
+  return d + " " + THAI_MON_ABBR[m - 1] + " " + (y + 543);
+}
+/* Distinct date groups (key + count), newest first, unknown-date last. */
+function labelDateGroups(labels) {
+  const m = new Map();
+  (labels || []).forEach(l => { const k = labelDateKey(l); m.set(k, (m.get(k) || 0) + 1); });
+  return [...m.keys()]
+    .sort((a, b) => { if (a === "none") return 1; if (b === "none") return -1; return a < b ? 1 : a > b ? -1 : 0; })
+    .map(k => ({ key: k, count: m.get(k) }));
+}
+function LabelDateFilter({ labels, value, onChange, mobile }) {
+  const groups = useMemoLB(() => labelDateGroups(labels), [labels]);
+  if (groups.length <= 1) return null;   // a single day (or all undated) → no filter needed
+  const Chip = ({ active, label, count, onClick }) => (
+    <button
+      type="button"
+      onClick={onClick}
+      className={mobile ? "m-chip" : ("btn btn-sm" + (active ? " btn-primary" : ""))}
+      style={{
+        flexShrink: 0, gap: 5, whiteSpace: "nowrap",
+        ...(mobile && active ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : {}),
+      }}
+    >
+      <span>{label}</span>
+      <span style={{ opacity: 0.65, fontSize: mobile ? 11 : 10, fontWeight: 600 }}>{count}</span>
+    </button>
+  );
+  return (
+    <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: mobile ? "2px 0 6px" : "0 0 4px", flexWrap: mobile ? "nowrap" : "wrap", WebkitOverflowScrolling: "touch" }}>
+      <Chip active={!value} label="ทั้งหมด" count={(labels || []).length} onClick={() => onChange("")}/>
+      {groups.map(g => (
+        <Chip key={g.key || "_none"} active={value === g.key} label={labelDateChipLabel(g.key)} count={g.count} onClick={() => onChange(g.key)}/>
+      ))}
+    </div>
+  );
+}
+
 function Labels({ pushToast, store }) {
   const [labels, setLabels] = useStateLB(loadLabels);
   const [activeId, setActiveId] = useStateLB(() => (labels[0] ? labels[0].id : null));
@@ -757,6 +820,7 @@ function Labels({ pushToast, store }) {
   const [showErrors, setShowErrors] = useStateLB(false);
   const [sizeId, setSizeId] = useStateLB("100x150");
   const [selected, setSelected] = useStateLB(() => Object.fromEntries(labels.map(l => [l.id, true])));
+  const [dateFilter, setDateFilter] = useStateLB(""); // "" = all dates; else a YYYY-MM-DD day key
   const [view, setView] = useStateLB("editor"); // editor | batch
   const [zoom, setZoom] = useStateLB(1);
   const [pdfLoading, setPdfLoading] = useStateLB(false);
@@ -768,6 +832,25 @@ function Labels({ pushToast, store }) {
   const size = LABEL_SIZES.find(s => s.id === sizeId);
   // Fallback to the first label so `active` is never undefined while the queue is non-empty
   const active = labels.find(l => l.id === activeId) || labels[0] || null;
+  // The queue shows only labels matching the active date filter ("" = all days).
+  const visibleLabels = useMemoLB(
+    () => (dateFilter ? labels.filter(l => labelDateKey(l) === dateFilter) : labels),
+    [labels, dateFilter]
+  );
+  // If the filtered day no longer has any labels (deleted / queue cleared /
+  // remote reload), fall back to "all" — otherwise the chip row hides once one
+  // day remains, leaving the queue stuck on an empty filtered view with no way
+  // to clear it.
+  useEffectLB(() => {
+    if (dateFilter && !labels.some(l => labelDateKey(l) === dateFilter)) setDateFilter("");
+  }, [labels, dateFilter]);
+  // On switching day filters, if the active label is hidden by the filter, jump
+  // to the first visible one so the highlighted row matches the editor/preview.
+  useEffectLB(() => {
+    if (dateFilter && active && visibleLabels.length && !visibleLabels.some(l => l.id === active.id)) {
+      setActiveId(visibleLabels[0].id);
+    }
+  }, [dateFilter]);
 
   // Persist the queue on every change so edits + created labels are never lost
   useEffectLB(() => { saveLabels(labels); }, [labels]);
@@ -1198,13 +1281,17 @@ function Labels({ pushToast, store }) {
             <div className="card-head">
               <div className="row" style={{ gap: 8, alignItems: "center" }}>
                 <span
-                  className={"check" + (labels.length > 0 && labels.every(l => selected[l.id]) ? " on" : "")}
+                  className={"check" + (visibleLabels.length > 0 && visibleLabels.every(l => selected[l.id]) ? " on" : "")}
                   onClick={() => {
-                    const allSel = labels.length > 0 && labels.every(l => selected[l.id]);
-                    if (allSel) setSelected({});
-                    else setSelected(Object.fromEntries(labels.map(l => [l.id, true])));
+                    const allSel = visibleLabels.length > 0 && visibleLabels.every(l => selected[l.id]);
+                    setSelected(s => {
+                      const n = { ...s };
+                      if (allSel) visibleLabels.forEach(l => { delete n[l.id]; });
+                      else visibleLabels.forEach(l => { n[l.id] = true; });
+                      return n;
+                    });
                   }}
-                  title="เลือก/ยกเลิกทั้งหมด"
+                  title={dateFilter ? "เลือก/ยกเลิกทั้งหมดในวันที่เลือก" : "เลือก/ยกเลิกทั้งหมด"}
                   style={{ flexShrink: 0 }}
                 />
                 <div>
@@ -1245,8 +1332,18 @@ function Labels({ pushToast, store }) {
                 }}><Icons.Plus size={13}/></button>
               </div>
             </div>
+            {typeof LabelDateFilter === "function" && (
+              <div style={{ padding: "8px 12px 0" }}>
+                <LabelDateFilter labels={labels} value={dateFilter} onChange={setDateFilter}/>
+              </div>
+            )}
             <div className="stack" style={{ gap: 0, padding: "6px 0" }}>
-              {labels.map(l => {
+              {dateFilter && visibleLabels.length === 0 && labels.length > 0 && (
+                <div style={{ padding: "20px 16px", textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
+                  ไม่มีฉลากในวันที่เลือก
+                </div>
+              )}
+              {visibleLabels.map(l => {
                 const isActive = l.id === activeId;
                 return (
                   <div
@@ -1838,4 +1935,4 @@ function BatchView({ labels, selected, setSelected, size, zoom, store, onExportP
   );
 }
 
-Object.assign(window, { Labels, LabelPaper, loadLabels, saveLabels, parseRecipientBlob, computeRecipientLeftover, scoreRecipientParse, RecipientParseNote, blankLabel: makeBlankLabel, createSaleLabel, exportLabelPDF, printLabels, labelsToPDF, rasterizeLabel, SenderPicker, loadSenders, saveSenders, storeSenderTemplate });
+Object.assign(window, { Labels, LabelPaper, loadLabels, saveLabels, parseRecipientBlob, computeRecipientLeftover, scoreRecipientParse, RecipientParseNote, blankLabel: makeBlankLabel, createSaleLabel, exportLabelPDF, printLabels, labelsToPDF, rasterizeLabel, SenderPicker, loadSenders, saveSenders, storeSenderTemplate, LabelDateFilter, labelDateKey, labelDateChipLabel, labelDateGroups });

@@ -2841,6 +2841,7 @@ function MLabels({ ctx }) {
   const [labels, setLabels] = useStateM(() => typeof loadLabels === "function" ? loadLabels() : SAMPLE_LABELS);
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
+  const [dateFilter, setDateFilter] = useStateM(""); // "" = all days; else a YYYY-MM-DD key
   const [batchLabels, setBatchLabels] = useStateM([]);
   const [batchLoading, setBatchLoading] = useStateM(false);
   const batchContainerRef = useRefM(null);
@@ -2864,9 +2865,25 @@ function MLabels({ ctx }) {
     return () => window.removeEventListener("ims-store-change", h);
   }, []);
 
+  // The list shows only labels for the active date filter ("" = every day).
+  const lblDateKey = (l) => (typeof labelDateKey === "function" ? labelDateKey(l) : "none");
+  const visibleLabels = dateFilter ? labels.filter(l => lblDateKey(l) === dateFilter) : labels;
+  // Reset a stale day filter once that day has no labels left (delete / reload)
+  // so the list can't get stuck on an empty filtered view after the chip is gone.
+  useEffectM(() => {
+    if (dateFilter && !labels.some(l => lblDateKey(l) === dateFilter)) setDateFilter("");
+  }, [labels, dateFilter]);
+
   const selectedIds = Object.keys(selected).filter(k => selected[k]);
   const selectedCount = selectedIds.length;
+  const allSelected = visibleLabels.length > 0 && visibleLabels.every(l => selected[l.id]);
   const toggle = (id) => setSelected(s => { const n = { ...s }; if (n[id]) delete n[id]; else n[id] = true; return n; });
+  const toggleAll = () => setSelected(s => {
+    const n = { ...s };
+    if (allSelected) visibleLabels.forEach(l => { delete n[l.id]; });
+    else visibleLabels.forEach(l => { n[l.id] = true; });
+    return n;
+  });
   const clearSelect = () => { setSelected({}); setSelecting(false); };
 
   const createLabel = () => {
@@ -2876,22 +2893,49 @@ function MLabels({ ctx }) {
     ctx.push("label-edit", fresh);
   };
 
-  const printSelected = async () => {
+  // Render the selected labels into the hidden batch container, then hand the
+  // live .label-paper nodes to `fn` (PDF export or native print) — shared so the
+  // bulk bar offers the same actions (พิมพ์ + PDF) as the single-label view.
+  const withBatchEls = async (fn) => {
     const sel = labels.filter(l => selected[l.id]);
     if (!sel.length) { ctx.pushToast("ไม่ได้เลือกฉลาก"); return; }
-    if (typeof labelsToPDF !== "function") { ctx.pushToast("ฟังก์ชัน PDF ยังไม่พร้อม"); return; }
     setBatchLoading(true);
     setBatchLabels(sel);
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 80))));
     const container = batchContainerRef.current;
     const els = container ? [...container.querySelectorAll(".label-paper")] : [];
     if (els.length) {
-      await labelsToPDF(els, LABEL_SIZES[0], sel.length > 1 ? "batch" : (sel[0].soId || sel[0].id), ctx.pushToast);
+      try { await fn(els, sel); }
+      catch (e) { console.error("batch label action failed:", e); ctx.pushToast("ทำรายการไม่สำเร็จ — ลองอีกครั้ง"); }
     } else {
-      ctx.pushToast("สร้าง PDF ไม่สำเร็จ — ลองอีกครั้ง");
+      ctx.pushToast("สร้างไม่สำเร็จ — ลองอีกครั้ง");
     }
     setBatchLabels([]);
     setBatchLoading(false);
+    clearSelect();
+  };
+
+  // Save the selection as a multi-page PDF (one label per page).
+  const printSelected = () => withBatchEls(async (els, sel) => {
+    if (typeof labelsToPDF !== "function") { ctx.pushToast("ฟังก์ชัน PDF ยังไม่พร้อม"); return; }
+    await labelsToPDF(els, LABEL_SIZES[0], sel.length > 1 ? "batch" : (sel[0].soId || sel[0].id), ctx.pushToast);
+  });
+
+  // Send the selection straight to the browser's print sheet (no file).
+  const printSelectedNative = () => withBatchEls(async (els) => {
+    if (typeof printLabels !== "function") { ctx.pushToast("ฟังก์ชันพิมพ์ยังไม่พร้อม"); return; }
+    printLabels(els, LABEL_SIZES[0], ctx.pushToast);
+  });
+
+  // Delete the selected labels. saveLabels handles the cloud delete + snapshots
+  // any label that still has a tracking number into ติดตามพัสดุ first.
+  const deleteSelected = () => {
+    const sel = labels.filter(l => selected[l.id]);
+    if (!sel.length) { ctx.pushToast("ไม่ได้เลือกฉลาก"); return; }
+    if (!confirm(`ลบฉลาก ${sel.length} ใบที่เลือก?`)) return;
+    const remaining = labels.filter(l => !selected[l.id]);
+    if (typeof saveLabels === "function") saveLabels(remaining); else setLabels(remaining);
+    ctx.pushToast(`ลบฉลาก ${sel.length} ใบแล้ว`);
     clearSelect();
   };
 
@@ -2918,9 +2962,33 @@ function MLabels({ ctx }) {
           )}
         </div>
 
-        <div className="m-section-label" style={{ padding: "8px 4px" }}>รายการฉลาก{selecting && <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}> · แตะเพื่อเลือก</span>}</div>
+        <div className="m-section-label" style={{ padding: "8px 4px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <span>รายการฉลาก{selecting && <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}> · {selectedCount > 0 ? `เลือกแล้ว ${selectedCount}` : "แตะเพื่อเลือก"}</span>}</span>
+          {selecting ? (
+            visibleLabels.length > 0 && (
+              <button onClick={toggleAll}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: "2px 2px", cursor: "pointer", color: "var(--accent)", fontSize: 12, fontWeight: 600, textTransform: "none", letterSpacing: 0 }}>
+                <span className={"check" + (allSelected ? " on" : "")} style={{ flexShrink: 0 }}/>
+                {allSelected ? "ล้างทั้งหมด" : "เลือกทั้งหมด"}
+              </button>
+            )
+          ) : (
+            labels.length > 1 && (
+              <button onClick={() => setSelecting(true)}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: "2px 2px", cursor: "pointer", color: "var(--accent)", fontSize: 12, fontWeight: 600, textTransform: "none", letterSpacing: 0 }}>
+                <Icons.Check size={13}/> เลือกหลายใบ
+              </button>
+            )
+          )}
+        </div>
+        {typeof LabelDateFilter === "function" && (
+          <LabelDateFilter labels={labels} value={dateFilter} onChange={setDateFilter} mobile/>
+        )}
         <div className="m-list">
-          {labels.map(l => {
+          {dateFilter && visibleLabels.length === 0 && labels.length > 0 && (
+            <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่มีฉลากในวันที่เลือก</div>
+          )}
+          {visibleLabels.map(l => {
             const isSelected = !!selected[l.id];
             return (
               <button key={l.id} className={"m-row" + (isSelected ? " selected" : "")} onClick={() => selecting ? toggle(l.id) : ctx.push("label-view", l)}>
@@ -2961,9 +3029,13 @@ function MLabels({ ctx }) {
 
       {selecting && selectedCount > 0 && (
         <div className="m-bulk-bar">
-          <span style={{ width: 26, height: 26, borderRadius: 999, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600 }} className="tnum">{selectedCount}</span>
-          <span style={{ fontSize: 12, flex: 1 }}>เลือก {selectedCount} ฉลาก</span>
-          <button className="m-action" style={{ background: "var(--accent)", color: "white", width: "auto", padding: "0 14px", borderRadius: 10, fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }} onClick={printSelected} disabled={batchLoading}>
+          <span style={{ width: 26, height: 26, borderRadius: 999, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600, flexShrink: 0 }} className="tnum">{selectedCount}</span>
+          <span style={{ fontSize: 12, flex: 1, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>เลือก {selectedCount} ฉลาก</span>
+          <button className="m-action" style={{ background: "rgba(255,90,90,0.3)", color: "white", width: 36, height: 36, flexShrink: 0 }} onClick={deleteSelected} disabled={batchLoading} title="ลบฉลากที่เลือก"><Icons.Trash size={14}/></button>
+          <button className="m-action" style={{ background: "rgba(255,255,255,0.16)", color: "#fff", width: "auto", padding: "0 12px", borderRadius: 10, fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }} onClick={printSelectedNative} disabled={batchLoading}>
+            <Icons.Print size={14}/> พิมพ์
+          </button>
+          <button className="m-action" style={{ background: "var(--accent)", color: "white", width: "auto", padding: "0 14px", borderRadius: 10, fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }} onClick={printSelected} disabled={batchLoading}>
             <Icons.Print size={14}/> {batchLoading ? "กำลังสร้าง…" : "PDF"}
           </button>
         </div>
