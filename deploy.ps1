@@ -47,6 +47,12 @@ if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: store-info deploy failed" 
 # manage-users - admin user management (invite/role/suspend/delete), verifies admin inside -> keep default verify_jwt
 npx supabase functions deploy manage-users --project-ref $SupabaseRef
 if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: manage-users deploy failed" -ForegroundColor Yellow } else { Write-Host "      manage-users deployed OK" -ForegroundColor Green }
+# line-bot - LINE webhook (X-Line-Signature verified inside) -> --no-verify-jwt or LINE's webhook 401s at the gateway
+npx supabase functions deploy line-bot --no-verify-jwt --project-ref $SupabaseRef
+if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: line-bot deploy failed" -ForegroundColor Yellow } else { Write-Host "      line-bot deployed OK" -ForegroundColor Green }
+# line-alert - daily low-stock push, invoked by cron via x-cron-secret (no JWT) -> --no-verify-jwt
+npx supabase functions deploy line-alert --no-verify-jwt --project-ref $SupabaseRef
+if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: line-alert deploy failed" -ForegroundColor Yellow } else { Write-Host "      line-alert deployed OK" -ForegroundColor Green }
 
 # Step 3 - deploy frontend to Vercel
 Write-Host ""

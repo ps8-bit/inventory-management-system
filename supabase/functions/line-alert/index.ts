@@ -69,11 +69,70 @@ function buildMessage(products: any[]): string | null {
   return msg.length > 4900 ? msg.slice(0, 4900) + "\n…(ตัดทอน)" : msg;
 }
 
-async function lineBroadcast(token: string, text: string) {
+// ── Flex card kit (mirrors line-bot's low-stock card; PS TACTICAL brand) ──
+const APP_URL = "https://psstock.vercel.app";
+const BRAND_GRAD = { type: "linearGradient", angle: "135deg", startColor: "#FF7A1A", endColor: "#2A2A2A" };
+const numA = (v: any) => Number(v) || 0;
+function flexHeader(title: string, subtitle?: string) {
+  const contents: any[] = [{ type: "text", text: title, color: "#FFFFFF", weight: "bold", size: "lg", wrap: true }];
+  if (subtitle) contents.push({ type: "text", text: subtitle, color: "#FFFFFFCC", size: "xs", margin: "sm", wrap: true });
+  return { type: "box", layout: "vertical", paddingAll: "16px", background: BRAND_GRAD, contents };
+}
+function flexPill(text: string, color: string, bg: string) {
+  return { type: "box", layout: "horizontal", margin: "md", contents: [
+    { type: "box", layout: "vertical", flex: 0, backgroundColor: bg, cornerRadius: "6px",
+      paddingTop: "2px", paddingBottom: "2px", paddingStart: "8px", paddingEnd: "8px",
+      contents: [{ type: "text", text, size: "xs", color, weight: "bold" }] },
+    { type: "filler" },
+  ] };
+}
+function itemRow(name: string, sub: string, right: string, rightColor: string) {
+  return { type: "box", layout: "horizontal", spacing: "sm", contents: [
+    { type: "text", size: "sm", flex: 5, wrap: true, contents: [
+      { type: "span", text: name, color: "#1A1A1A" },
+      ...(sub ? [{ type: "span", text: "  " + sub, color: "#9CA3AF", size: "xs" }] : []),
+    ] },
+    { type: "text", text: right, size: "sm", color: rightColor, weight: "bold", flex: 2, align: "end", gravity: "center" },
+  ] };
+}
+
+// Build the digest as a Flex bubble. Returns null when nothing is low.
+function buildFlex(products: any[]): any {
+  const low: any[] = [], out: any[] = [];
+  for (const p of products) {
+    const qty = numA(p.qty), reorder = numA(p.reorder);
+    if (qty <= 0) out.push(p); else if (qty <= reorder) low.push(p);
+  }
+  if (!low.length && !out.length) return null;
+  const body: any[] = [];
+  const push = (arr: any[], label: string, color: string, bg: string) => {
+    if (!arr.length) return;
+    body.push(flexPill(`${label} ${arr.length}`, color, bg));
+    arr.slice(0, 12).forEach((p) => body.push(itemRow(p.name || p.sku, p.sku, `${numA(p.qty)} / ${numA(p.reorder)}`, color)));
+    if (arr.length > 12) body.push({ type: "text", text: `…และอีก ${arr.length - 12} รายการ`, size: "xs", color: "#9CA3AF", margin: "sm" });
+  };
+  push(out, "🔴 หมดสต็อก", "#A32D2D", "#FCEBEB");
+  push(low, "🟡 ต่ำกว่าจุดสั่งซื้อ", "#854F0B", "#FAEEDA");
+  return {
+    type: "bubble",
+    header: flexHeader("📦 แจ้งเตือนสต็อกต่ำ", `คลังพร้อมส่ง · ${thaiDate(new Date())}`),
+    body: { type: "box", layout: "vertical", spacing: "sm", paddingAll: "16px", contents: body },
+    footer: { type: "box", layout: "vertical", spacing: "sm", paddingAll: "12px", contents: [
+      { type: "text", text: `รวม ${out.length + low.length} SKU ที่ต้องสั่งซื้อเพิ่ม`, size: "xs", color: "#6B7280", align: "center", wrap: true },
+      { type: "button", style: "link", height: "sm", action: { type: "uri", label: "เปิดในแอป", uri: APP_URL } },
+    ] },
+  };
+}
+
+// Broadcast a text or (preferred) Flex message to every OA friend.
+async function lineBroadcast(token: string, altText: string, flex?: any) {
+  const messages = flex
+    ? [{ type: "flex", altText: altText.replace(/\s+/g, " ").trim().slice(0, 380), contents: flex }]
+    : [{ type: "text", text: altText }];
   const res = await fetch("https://api.line.me/v2/bot/message/broadcast", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
-    body: JSON.stringify({ messages: [{ type: "text", text }] }),
+    body: JSON.stringify({ messages }),
   });
   const body = await res.text();
   return { ok: res.ok, status: res.status, body };
@@ -96,6 +155,10 @@ Deno.serve(async (req) => {
 
   let payload: any = {};
   try { payload = await req.json(); } catch { /* empty body = scheduled digest */ }
+
+  // Build/health ping (no auth) — verify a deploy from outside.
+  if (payload?.mode === "ping") return json({ ok: true, build: "alert-flex-2" });
+
   const mode = payload?.mode === "test" ? "test" : "digest";
 
   // ---- Authorize: cron-secret header (scheduled) OR admin JWT (manual test) ----
@@ -128,7 +191,9 @@ Deno.serve(async (req) => {
   const text = buildMessage(products || []);
   if (!text) return json({ sent: false, reason: "no low stock today" });
 
-  const r = await lineBroadcast(LINE_TOKEN, text);
+  const flex = buildFlex(products || []);
+  let r = await lineBroadcast(LINE_TOKEN, text, flex);
+  if (!r.ok && flex) r = await lineBroadcast(LINE_TOKEN, text);   // fallback to text
   if (!r.ok) return json({ error: "LINE broadcast failed", status: r.status, detail: r.body }, 502);
   return json({ sent: true, mode: "digest", lowCount: (products || []).filter((p: any) => (Number(p.qty)||0) <= (Number(p.reorder)||0)).length });
 });
