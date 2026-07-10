@@ -59,7 +59,8 @@ Deno.serve(async (req) => {
   if (!authHeader) return json({ success: false, error: "Unauthorized" }, 401);
   const { data: { user }, error: authErr } = await admin.auth.getUser(authHeader.replace("Bearer ", ""));
   if (authErr || !user) return json({ success: false, error: "Unauthorized" }, 401);
-  const role = (user.app_metadata as any)?.role || (user.user_metadata as any)?.role;
+  // Authorize on the tamper-proof claim ONLY — user_metadata is self-writable.
+  const role = (user.app_metadata as any)?.role;
   if (!WRITE_ROLES.includes(role))
     return json({ success: false, error: "Forbidden — insufficient permission" }, 403);
 

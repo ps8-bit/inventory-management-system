@@ -1482,7 +1482,7 @@ function Inbound({ goTo, pushToast }) {
           received.forEach(r => {
             const p = PRODUCTS.find(x => x.sku === r.sku);
             if (!p) return;
-            updateProductInStore(r.sku, { qty: p.qty + r.qty });
+            adjustProductQty(r.sku, r.qty); // atomic +delta (concurrent-safe)
           });
           if (typeof recordChange === "function") {
             recordChange({
@@ -1593,7 +1593,7 @@ function Outbound({ goTo, pushToast }) {
     const primary = data.deductions[0];
     const channelLabel = data.deductions.length === 1 ? primary.name : `${data.deductions.length} ช่องทาง`;
     const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
-    const dateIso = (typeof TODAY_ISO !== "undefined") ? TODAY_ISO : new Date().toISOString().slice(0, 10);
+    const dateIso = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
 
     if (data.mode === "bundle") {
       const { bundle } = data;
@@ -1681,8 +1681,9 @@ function Outbound({ goTo, pushToast }) {
       action: "ลบออร์เดอร์",
       danger: true,
       onConfirm: async () => {
+        let res = null;
         if (typeof deleteOrdersFromDb === "function") {
-          const res = await deleteOrdersFromDb(pickedIds);
+          res = await deleteOrdersFromDb(pickedIds);
           if (res && res.blocked) { pushToast("ลบไม่ได้ — เฉพาะแอดมิน/ผู้จัดการเท่านั้น"); setObBulkConfirm(null); return; }
         }
         if (typeof setOrderField === "function") pickedIds.forEach(id => setOrderField(id, { deleted: true }));
@@ -1692,7 +1693,9 @@ function Outbound({ goTo, pushToast }) {
           count: pickedCount,
           note: `ออร์เดอร์: ${pickedIds.join(", ")}`
         });
-        pushToast(`ลบ ${pickedCount} ออร์เดอร์แล้ว`);
+        pushToast((res && res.ok === false && res.failedIds && res.failedIds.length)
+          ? `ลบแล้ว — ${res.failedIds.length} รายการจะลบให้เสร็จเมื่อกลับมาออนไลน์`
+          : `ลบ ${pickedCount} ออร์เดอร์แล้ว`);
         setObBulkConfirm(null);
         clearPicked();
       }
@@ -2917,6 +2920,20 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
               </datalist>
             </div>
           </div>
+
+          {(() => {
+            const locTrim = (f.loc || "").trim();
+            return (
+              <div className="field">
+                <label>ภาพตำแหน่ง{locTrim ? <span style={{ fontWeight: 400, color: "var(--muted)" }}> · {locTrim}</span> : null}</label>
+                {locTrim && typeof LocationImageUpload === "function"
+                  ? <LocationImageUpload code={locTrim} compact/>
+                  : <div style={{ fontSize: 12, color: "var(--muted)", padding: "10px 12px", background: "var(--surface-2)", border: "1px dashed var(--border)", borderRadius: 10 }}>
+                      เลือกหรือพิมพ์ตำแหน่งด้านบนก่อน เพื่อเพิ่มรูปของตำแหน่งนั้น
+                    </div>}
+              </div>
+            );
+          })()}
         </div>
         <div className="modal-foot">
           <button className="btn" onClick={onClose}>ยกเลิก</button>
@@ -3113,9 +3130,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
           product={PRODUCTS.find(p => p.sku === product.sku) || product}
           onClose={() => setAdjOpen(false)}
           onApply={(delta, reason) => {
-            const cur = PRODUCTS.find(p => p.sku === product.sku);
-            const newQty = Math.max(0, (cur?.qty ?? product.qty) + delta);
-            updateProductInStore(product.sku, { qty: newQty });
+            adjustProductQty(product.sku, delta); // atomic ±delta, no overlay pollution
             try {
               const a = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
               delete a[product.sku];
@@ -3332,6 +3347,7 @@ function Locations() {
   const floorCount = buildings.reduce((s, b) => s + (b.floors || []).length, 0);
   const posCount = buildings.reduce((s, b) => s + (b.floors || []).reduce((t, f) => t + (f.positions || []).length, 0), 0);
   const allowDelete = typeof canDeleteData === "function" ? canDeleteData() : true;
+  const locImages = useLocationImages();
 
   const askBuilding = () => { const n = prompt("ชื่ออาคาร / โซน (เช่น สภ.)"); if (n && n.trim()) addBuilding(n.trim()); };
   const askFloor    = (b) => { const n = prompt(`เพิ่มชั้นในอาคาร "${b}" (เช่น ชั้น 3)`); if (n && n.trim()) addFloor(b, n.trim()); };
@@ -3390,11 +3406,13 @@ function Locations() {
                 {(f.positions || []).map(p => {
                   const code = locCode(b.name, f.name, p);
                   const n = skusInLocation(code);
+                  const hasPhoto = typeof getLocationImage === "function" && getLocationImage(code, locImages);
                   return (
                     <div key={p} onClick={() => setSelected({ building: b.name, floor: f.name, pos: p, code })}
                       style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
                       <span className="mono" style={{ fontWeight: 600, fontSize: 13 }}>{p}</span>
                       <span className="badge badge-neutral" style={{ fontSize: 10 }}>{n} SKU</span>
+                      {hasPhoto && typeof LocationImageThumb === "function" && <LocationImageThumb code={code} size={20} radius={6}/>}
                     </div>
                   );
                 })}
@@ -3473,6 +3491,11 @@ function LocationDrawer({ loc, onClose, onDelete }) {
               </div>
             ))}
           </div>
+
+          <div style={{ marginTop: 22, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>ภาพตำแหน่ง</div>
+          {typeof LocationImageUpload === "function"
+            ? <LocationImageUpload code={loc.code}/>
+            : null}
 
           <div style={{ marginTop: 22, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>QR ตำแหน่ง</div>
           <div className="row" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 14, gap: 14 }}>
@@ -3738,7 +3761,7 @@ function SellProductModal({ onClose, onSellComplete }) {
       carrier: ship.carrier,
       tracking: "",
       ts,
-      dateIso: (typeof TODAY_ISO !== "undefined") ? TODAY_ISO : new Date().toISOString().slice(0, 10),
+      dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
       deductions: [{ id: "direct", name: "ขายตรง", color: "#8B5CF6", qty: cartTotal }],
       isSellOrder: true,
       isBundle: hasBundle,

@@ -31,6 +31,33 @@ async function getAccessToken(): Promise<string> {
   return j.access_token as string;
 }
 
+// Best-effort LINE broadcast so a silent nightly failure (revoked refresh token,
+// Drive quota, missing secret) actually reaches the owner instead of the Drive
+// folder just quietly stopping. Never throws — alerting must not fail the backup.
+async function alertOwner(text: string) {
+  const token = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN");
+  if (!token) return;
+  try {
+    await fetch("https://api.line.me/v2/bot/message/broadcast", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{ type: "text", text: text.slice(0, 4900) }] }),
+    });
+  } catch (_) { /* best-effort */ }
+}
+
+// Record the outcome of each run in app_state (key "last_backup") so the app's
+// Settings can show the last-successful-backup age. No new table needed.
+async function recordRun(admin: any, status: string, extra: Record<string, unknown>) {
+  try {
+    await admin.from("app_state").upsert({
+      key: "last_backup",
+      value: { status, at: new Date().toISOString(), ...extra },
+      updated_at: new Date().toISOString(),
+    });
+  } catch (_) { /* best-effort */ }
+}
+
 Deno.serve(async (req) => {
   const json = (b: unknown, s = 200) =>
     new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } });
@@ -55,32 +82,47 @@ Deno.serve(async (req) => {
     if (role !== "admin") return json({ success: false, error: "Forbidden — admin only" }, 403);
   }
 
+  const cfgFail = async (msg: string) => {
+    await recordRun(admin, "error", { error: msg });
+    await alertOwner("⚠️ สำรองข้อมูลไม่สำเร็จ (ตั้งค่าไม่ครบ): " + msg);
+    return json({ success: false, error: msg }, 500);
+  };
   const folderId = Deno.env.get("GDRIVE_FOLDER_ID");
-  if (!folderId) return json({ success: false, error: "GDRIVE_FOLDER_ID not configured" }, 500);
+  if (!folderId) return await cfgFail("GDRIVE_FOLDER_ID not configured");
   for (const k of ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"]) {
-    if (!Deno.env.get(k)) return json({ success: false, error: `${k} not configured` }, 500);
+    if (!Deno.env.get(k)) return await cfgFail(`${k} not configured`);
   }
 
-  // 1) Snapshot every table.
+  // 1) Snapshot every table. Capture per-table read errors instead of silently
+  //    swallowing them to [] — a hollow "successful" backup that overwrites good
+  //    ones (via retention) is worse than a flagged partial.
   const tables: Record<string, unknown> = {};
   const counts: Record<string, number> = {};
+  const errors: Record<string, string> = {};
   for (const t of TABLES) {
     const { data, error } = await admin.from(t).select("*");
-    tables[t] = error ? [] : (data || []);
+    if (error) { tables[t] = []; errors[t] = error.message; }
+    else tables[t] = data || [];
     counts[t] = Array.isArray(tables[t]) ? (tables[t] as unknown[]).length : 0;
   }
+  const partial = Object.keys(errors).length > 0;
   const snapshot = {
     app: "PS TACTICAL — คลังพร้อมส่ง (IMS)",
     kind: "ims-backup", version: 1,
     generatedAt: new Date().toISOString(),
-    counts, tables,
+    counts, partial, errors, tables,
   };
   const content = JSON.stringify(snapshot);
 
   // 2) Google OAuth access token.
   let token: string;
   try { token = await getAccessToken(); }
-  catch (e) { return json({ success: false, error: String(e).slice(0, 300) }, 502); }
+  catch (e) {
+    const msg = String(e).slice(0, 300);
+    await recordRun(admin, "error", { error: msg });
+    await alertOwner("⚠️ สำรองข้อมูลไม่สำเร็จ: ต่อ Google Drive ไม่ได้ (โทเคนอาจหมดอายุ) — " + msg);
+    return json({ success: false, error: msg }, 502);
+  }
 
   // 3) Upload as a multipart file into the target folder.
   const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");
@@ -99,8 +141,12 @@ Deno.serve(async (req) => {
     },
   );
   const upJson = await up.json();
-  if (!up.ok || !upJson.id)
-    return json({ success: false, error: "Drive upload failed: " + JSON.stringify(upJson).slice(0, 300) }, 502);
+  if (!up.ok || !upJson.id) {
+    const msg = "Drive upload failed: " + JSON.stringify(upJson).slice(0, 300);
+    await recordRun(admin, "error", { error: msg });
+    await alertOwner("⚠️ สำรองข้อมูลไม่สำเร็จ: อัปโหลดขึ้น Drive ไม่ได้ — " + msg);
+    return json({ success: false, error: msg }, 502);
+  }
 
   // 4) Retention — keep the newest N backups, delete the rest (best-effort).
   const keep = parseInt(Deno.env.get("BACKUP_RETENTION") || "30", 10) || 30;
@@ -122,5 +168,10 @@ Deno.serve(async (req) => {
     }
   } catch (_) { /* retention is best-effort — never fail the backup over it */ }
 
-  return json({ success: true, file: upJson.name, id: upJson.id, counts, pruned });
+  // Record the run + alert on a partial snapshot (some table read failed but we
+  // still uploaded, clearly flagged) so a slowly-degrading backup gets noticed.
+  await recordRun(admin, partial ? "partial" : "ok", { file: upJson.name, counts, partial, errors, pruned });
+  if (partial) await alertOwner("⚠️ สำรองข้อมูลบางส่วน: อ่านตารางไม่สำเร็จ — " + Object.keys(errors).join(", "));
+
+  return json({ success: true, file: upJson.name, id: upJson.id, counts, partial, errors, pruned });
 });

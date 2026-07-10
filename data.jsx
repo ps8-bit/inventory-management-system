@@ -1,5 +1,15 @@
 /* Product catalog — populated from Supabase on login, falls back to localStorage */
 
+/* Capture the initial URL (hash + query) the instant this first app script runs —
+   BEFORE supabase.jsx (loaded next) calls createClient, which asynchronously
+   consumes a recovery/invite token and STRIPS it from the URL. In-browser Babel
+   makes the later scripts (incl. app.jsx) mount React long AFTER that strip, so
+   reading window.location at mount can miss "type=recovery" and wrongly drop the
+   user into the app instead of the set-new-password screen. */
+if (typeof window !== "undefined" && !window.__IMS_INIT) {
+  window.__IMS_INIT = { hash: window.location.hash || "", search: window.location.search || "" };
+}
+
 const PRODUCTS = [];
 
 const stockStatus = (p) => {
@@ -26,44 +36,138 @@ const stockStatus = (p) => {
   } catch (e) {}
 })();
 
+// Shared handler for a product write result (scoped or full). On an RLS block we
+// can't persist the edit, so reload canonical server state so the UI stops showing
+// a change that didn't save; other errors just toast (the local copy is retained).
+function _onProductWriteResult(res) {
+  if (!res || !res.error) return;
+  const perm = res.error === 'PERMISSION_OR_MISSING';
+  window.dispatchEvent(new CustomEvent('ims-toast', {
+    detail: perm ? 'บันทึกไม่สำเร็จ: บัญชีนี้ไม่มีสิทธิ์แก้ไขสินค้า'
+                 : 'บันทึกสินค้าไม่สำเร็จ: ' + res.error
+  }));
+  if (perm && window.dbLoadProducts) {
+    dbLoadProducts().then(fresh => {
+      if (!fresh) return;
+      PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p));
+      _persistProductsLocal();
+    }).catch(() => {});
+  }
+}
+// FULL-catalog upsert. Kept ONLY as a legacy fallback (when the scoped/atomic DB
+// helpers below aren't loaded) and for CSV import. Every normal edit path now
+// writes just the rows/columns it changed, so one device's edit can't clobber
+// another device's stock on unrelated skus. Do NOT reintroduce into per-edit paths.
 function saveProductStore() {
-  try { localStorage.setItem("ims_products", JSON.stringify(PRODUCTS)); } catch (e) {}
-  window.dispatchEvent(new CustomEvent("ims-products-change"));
+  _persistProductsLocal();
   if (!window.dbUpsertProducts) return;
-  dbUpsertProducts([...PRODUCTS]).then(res => {
-    if (!res || !res.error) return;
-    const perm = res.error === 'PERMISSION_OR_MISSING';
-    // Don't fail silently: surface via the global toast bridge (app.jsx listens).
-    window.dispatchEvent(new CustomEvent('ims-toast', {
-      detail: perm ? 'บันทึกไม่สำเร็จ: บัญชีนี้ไม่มีสิทธิ์แก้ไขสินค้า'
-                   : 'บันทึกสินค้าไม่สำเร็จ: ' + res.error
-    }));
-    // A permission block can never persist this edit → reload canonical server
-    // state so the UI stops showing a change that didn't save. (Network errors
-    // are left alone — the local copy retries on the next save.)
-    if (perm && window.dbLoadProducts) {
-      dbLoadProducts().then(fresh => {
-        if (!fresh) return;
-        PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p));
-        try { localStorage.setItem("ims_products", JSON.stringify(PRODUCTS)); } catch (e) {}
-        window.dispatchEvent(new CustomEvent("ims-products-change"));
-      }).catch(() => {});
-    }
-  }).catch(() => {});
+  dbUpsertProducts([...PRODUCTS]).then(_onProductWriteResult).catch(() => {});
+}
+// Persist a SUBSET of product rows (absolute values) — used where SETTING qty is
+// the intent: a new product, a stock-take count. Never touches unrelated skus.
+function _syncProductRows(skus) {
+  _persistProductsLocal();
+  if (!window.dbUpsertProducts) return;
+  const set = new Set(Array.isArray(skus) ? skus : [skus]);
+  const rows = PRODUCTS.filter(p => set.has(p.sku));
+  if (!rows.length) return;
+  dbUpsertProducts(rows).then(_onProductWriteResult).catch(() => {});
+}
+// Persist ONLY the changed non-qty columns of one product (a field edit) — never
+// rewrites qty, so a concurrent sale of the SAME sku isn't clobbered.
+function _syncProductFields(sku, fields) {
+  if (typeof dbUpdateProduct !== "function") { saveProductStore(); return; } // legacy fallback
+  dbUpdateProduct(sku, fields).then(res => {
+    // 0 rows can mean a real RLS block OR a row not inserted yet (a field edit
+    // racing a brand-new product's insert — an UPDATE matches nothing). Retry as a
+    // full-row upsert: it inserts-or-updates (resolving the race) and still surfaces
+    // a genuine permission block via its own result.
+    if (res && res.error === "PERMISSION_OR_MISSING") { _syncProductRows([sku]); return; }
+    _onProductWriteResult(res);
+  }).catch(() => _productWriteToast()); // network throw — don't fail silently (offline field edits aren't queued yet; see #09)
+}
+function _productWriteToast() {
+  window.dispatchEvent(new CustomEvent('ims-toast', { detail: 'บันทึกไม่สำเร็จ — ตรวจสอบการเชื่อมต่อแล้วลองใหม่' }));
+}
+// Persist ONE field (same value) across many skus — category rename, location
+// re-point. Scoped column UPDATE, never qty, never the whole catalog.
+function _syncManyFields(skus, fields) {
+  const arr = Array.isArray(skus) ? skus : [...skus];
+  if (!arr.length) return;
+  _persistProductsLocal();
+  if (typeof dbUpdateProducts === "function") dbUpdateProducts(arr, fields).then(_onProductWriteResult).catch(() => _productWriteToast());
+  else saveProductStore();
+}
+// Persist a qty CHANGE as an atomic server-side delta (concurrent-safe). Falls
+// back to a scoped absolute row write if adjust_stock isn't deployed, and to the
+// offline queue on network failure.
+async function _syncQtyDelta(sku, delta) {
+  if (!delta) return;
+  if (typeof dbAdjustStock !== "function") { _syncProductRows([sku]); return; }
+  if (!navigator.onLine) {
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }]);
+    return;
+  }
+  try {
+    const res = await dbAdjustStock([{ sku, delta }]);
+    if (res && res.ok) { _applyServerQty(res.rows); return; }
+    if (res && res.error === "RPC_MISSING") { _syncProductRows([sku]); return; }
+    if (res && res.error === "PERMISSION_OR_MISSING") { _applyServerQty(res.rows); _onProductWriteResult(res); return; }
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }]);
+  } catch (e) {
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }]);
+  }
 }
 function addProductToStore(p) {
-  PRODUCTS.unshift({ reserved: 0, ...p });
-  saveProductStore();
+  const np = { reserved: 0, ...p };
+  PRODUCTS.unshift(np);
+  _syncProductRows([np.sku]); // single-row upsert (insert) — not the whole catalog
 }
+// Field edit. A qty here is an ABSOLUTE set (edit modals normally omit qty and
+// change stock via adjustProductQty). A pure field edit updates only its columns
+// (never qty), so it can't clobber a concurrent sale of the same sku; an edit that
+// does carry qty falls back to one scoped whole-row write (never a delta, never
+// the whole catalog).
 function updateProductInStore(sku, changes) {
   const p = PRODUCTS.find(x => x.sku === sku);
-  if (p) Object.assign(p, changes);
-  saveProductStore();
+  if (!p) return;
+  Object.assign(p, changes);
+  _persistProductsLocal();
+  if ('qty' in changes) _syncProductRows([sku]);
+  else _syncProductFields(sku, changes);
+}
+// Apply a RELATIVE stock change (inbound receive, manual adjust) as an atomic
+// server-side delta. Callers pass the RAW delta — no absolute round-trip for the
+// client to reverse-engineer, so a pending display overlay (ims_stock_adj) or a
+// stale local qty can't corrupt the amount applied to the server.
+function adjustProductQty(sku, delta) {
+  const d = Number(delta) || 0;
+  if (!d) return;
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return;
+  p.qty = Math.max(0, (Number(p.qty) || 0) + d);
+  _persistProductsLocal();
+  _syncQtyDelta(sku, d);
+}
+// Overwrite a product with ABSOLUTE values (import of an existing sku) — scoped
+// single-row write, correct "these values ARE the truth" semantic. Distinct from
+// adjustProductQty (relative) and from a whole-catalog upsert.
+function setProductAbsolute(sku, changes) {
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return;
+  Object.assign(p, changes);
+  _syncProductRows([sku]);
 }
 function updateManyProducts(skus, changes) {
   const set = new Set(skus);
-  PRODUCTS.forEach(p => { if (set.has(p.sku)) Object.assign(p, changes); });
-  saveProductStore();
+  const affected = [];
+  PRODUCTS.forEach(p => { if (set.has(p.sku)) { Object.assign(p, changes); affected.push(p.sku); } });
+  if (!affected.length) return;
+  _persistProductsLocal();
+  const { qty, ...fields } = changes;
+  if (Object.keys(fields).length) _syncManyFields(affected, fields);
+  // A bulk qty set (rare) is absolute → scoped row writes, not a per-sku delta.
+  if ('qty' in changes) _syncProductRows(affected);
 }
 async function removeProductsFromStore(skus) {
   const set = new Set(Array.isArray(skus) ? skus : [skus]);
@@ -133,17 +237,19 @@ function renameCategory(oldName, newName) {
   if (!newName.trim() || oldName === newName.trim()) return false;
   const cats = loadCategories().map(c => c === oldName ? newName.trim() : c);
   saveCategories(cats);
-  // Update all products that use the old category name
-  PRODUCTS.forEach(p => { if (p.cat === oldName) p.cat = newName.trim(); });
-  saveProductStore();
+  // Re-point all products that used the old category name — scoped to their cat
+  // column only, so the rename can't clobber concurrent stock changes.
+  const affected = [];
+  PRODUCTS.forEach(p => { if (p.cat === oldName) { p.cat = newName.trim(); affected.push(p.sku); } });
+  _syncManyFields(affected, { cat: newName.trim() });
   return true;
 }
 function deleteCategory(name, fallback = "ทั่วไป") {
   const cats = loadCategories().filter(c => c !== name);
-  // Reassign products in the deleted category to the fallback
-  let changed = false;
-  PRODUCTS.forEach(p => { if (p.cat === name) { p.cat = fallback; changed = true; } });
-  if (changed) saveProductStore();
+  // Reassign products in the deleted category to the fallback (scoped column write)
+  const affected = [];
+  PRODUCTS.forEach(p => { if (p.cat === name) { p.cat = fallback; affected.push(p.sku); } });
+  _syncManyFields(affected, { cat: fallback });
   if (!cats.includes(fallback)) cats.unshift(fallback);
   saveCategories(cats);
   return true;
@@ -266,6 +372,9 @@ function saveOrders(orders) {
    each other's orders. Failed writes go to the offline queue. */
 async function appendOrder(order) {
   if (!order || !order.id) return { ok: false };
+  // If this id was previously deleted, drop the stale tombstone so the new order
+  // isn't hidden by it (clearOrderOverride is a no-op for a fresh, never-used id).
+  if (typeof clearOrderOverride === "function") clearOrderOverride(order.id);
   const next = [order, ...loadOrders().filter(o => o.id !== order.id)];
   try { localStorage.setItem("ims_orders", JSON.stringify(next)); } catch (e) {}
   window._DB_ORDERS = next;
@@ -357,9 +466,18 @@ function _locDenyToast() {
 }
 // When a building/floor/position is renamed, re-point any products that used the old code.
 function _renameLocPointer(oldCode, newCode) {
-  let changed = false;
-  PRODUCTS.forEach(p => { if ((p.loc || "") === oldCode) { p.loc = newCode; changed = true; } });
-  if (changed && typeof saveProductStore === "function") saveProductStore();
+  const affected = [];
+  PRODUCTS.forEach(p => { if ((p.loc || "") === oldCode) { p.loc = newCode; affected.push(p.sku); } });
+  if (affected.length) _syncManyFields(affected, { loc: newCode });
+  // Location photo lives in a later-loaded file (product-images.jsx) — call
+  // defensively. Single choke point: covers renameBuilding / renameFloor / renamePosition.
+  if (typeof moveLocationImage === "function") moveLocationImage(oldCode, newCode);
+}
+
+// Clear location photos for a set of codes (e.g. after a floor/building removal
+// wipes out every position under it). Guarded — product-images.jsx loads later.
+function _clearLocImages(codes) {
+  if (typeof setLocationImage === "function") codes.forEach(c => setLocationImage(c, null));
 }
 
 // Flat list of every position with its building/floor — for dropdowns, the map, counts.
@@ -387,7 +505,12 @@ function renameBuilding(oldName, newName) {
 }
 function removeBuilding(name) {
   if (!canDeleteData()) { _locDenyToast(); return false; }
-  const t = loadLocTree(); t.buildings = t.buildings.filter(b => b.name !== name); saveLocTree(t); return true;
+  const t = loadLocTree();
+  const b = t.buildings.find(x => x.name === name);
+  const codes = b ? (b.floors || []).flatMap(f => (f.positions || []).map(p => locCode(name, f.name, p))) : [];
+  t.buildings = t.buildings.filter(x => x.name !== name); saveLocTree(t);
+  if (codes.length) _clearLocImages(codes);
+  return true;
 }
 function addFloor(building, name) {
   const n = String(name || "").trim(); if (!n) return false;
@@ -406,7 +529,11 @@ function renameFloor(building, oldName, newName) {
 function removeFloor(building, name) {
   if (!canDeleteData()) { _locDenyToast(); return false; }
   const t = loadLocTree(); const b = t.buildings.find(x => x.name === building); if (!b) return false;
-  b.floors = (b.floors || []).filter(f => f.name !== name); saveLocTree(t); return true;
+  const f = (b.floors || []).find(x => x.name === name);
+  const codes = f ? (f.positions || []).map(p => locCode(building, name, p)) : [];
+  b.floors = (b.floors || []).filter(x => x.name !== name); saveLocTree(t);
+  if (codes.length) _clearLocImages(codes);
+  return true;
 }
 function addPosition(building, floor, name) {
   const n = String(name || "").trim(); if (!n) return false;
@@ -428,7 +555,9 @@ function removePosition(building, floor, name) {
   if (!canDeleteData()) { _locDenyToast(); return false; }
   const t = loadLocTree(); const b = t.buildings.find(x => x.name === building); if (!b) return false;
   const f = (b.floors || []).find(x => x.name === floor); if (!f) return false;
-  f.positions = (f.positions || []).filter(p => p !== name); saveLocTree(t); return true;
+  f.positions = (f.positions || []).filter(p => p !== name); saveLocTree(t);
+  _clearLocImages([locCode(building, floor, name)]);
+  return true;
 }
 
 // Live SKU count for a position code = products whose loc matches.
@@ -449,11 +578,11 @@ function skusInLocation(code) {
   try { if (localStorage.getItem("ims_loc_cleared_v2") === "1") return; } catch (e) { return; }
   const clearOnce = () => {
     if (!Array.isArray(PRODUCTS) || !PRODUCTS.length) return;   // wait for products
-    let changed = false;
-    PRODUCTS.forEach(p => { if (p.loc) { p.loc = ""; changed = true; } });
+    const affected = [];
+    PRODUCTS.forEach(p => { if (p.loc) { p.loc = ""; affected.push(p.sku); } });
     try { localStorage.setItem("ims_loc_cleared_v2", "1"); } catch (e) {}
     window.removeEventListener("ims-products-change", clearOnce);
-    if (changed && typeof saveProductStore === "function") saveProductStore();
+    if (affected.length && typeof _syncManyFields === "function") _syncManyFields(affected, { loc: "" });
   };
   window.addEventListener("ims-products-change", clearOnce);
   clearOnce();
@@ -566,6 +695,19 @@ function bangkokDateStr(nowMs) {
   } catch (e) {
     return d.toISOString().slice(0, 10);
   }
+}
+// LIVE Bangkok "today" — call this instead of the frozen TODAY_ISO const for
+// anything that must roll over at midnight (order dateIso stamps, "today" filters).
+// TODAY_ISO is evaluated once at page load, so an always-on PWA/tablet left open
+// past midnight would otherwise stamp orders and filter with yesterday's date.
+function todayIso() { return bangkokDateStr(); }
+// Convert a stored UTC ISO timestamp (e.g. label.created_at) to its Asia/Bangkok
+// calendar date. A raw .slice(0,10) on the UTC string gives the WRONG day for
+// anything created 00:00–06:59 Bangkok. Guards an unparseable input.
+function bangkokDateOf(isoStr) {
+  const t = Date.parse(isoStr || "");
+  if (!Number.isFinite(t)) return (isoStr || "").slice(0, 10);
+  return bangkokDateStr(t);
 }
 
 // The raw exception date stored for a user (or null).
@@ -751,7 +893,9 @@ function applyStockCounts(counts) {
     changes.push({ sku, name: p.name, from: p.qty, to, delta: to - p.qty });
     p.qty = to;
   });
-  if (changes.length) saveProductStore();
+  // Physical count = truth → write the counted skus' absolute qty (scoped rows),
+  // not the whole catalog.
+  if (changes.length) _syncProductRows(changes.map(c => c.sku));
   return changes;
 }
 
@@ -1156,37 +1300,101 @@ function enqueueOfflineWrite(type, payload) {
   q.push({ id: "q" + Date.now(), type, payload, ts: new Date().toISOString() });
   _saveQueue(q);
 }
+// Remove ONE item from the stored queue by id. Re-reads first so items enqueued
+// during a flush aren't clobbered.
+function _removeQueueItem(id) {
+  _saveQueue(loadOfflineQueue().filter(it => it.id !== id));
+}
+let __queueFlushing = false;                 // same-tab reentrancy guard
+const IMS_QUEUE_LOCK_KEY = "ims_queue_lock"; // best-effort cross-tab lease
+const QUEUE_LOCK_MS = 30000;
+const QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // give up on an item after 7 days
 async function flushOfflineQueue() {
-  if (!navigator.onLine) return;
+  if (!navigator.onLine || __queueFlushing) return;
+  // Cross-tab lease: if another tab/window claimed the queue within QUEUE_LOCK_MS,
+  // skip so a PWA window + a browser tab don't both replay the same items.
+  try { const lk = Number(localStorage.getItem(IMS_QUEUE_LOCK_KEY) || 0); if (lk && Date.now() - lk < QUEUE_LOCK_MS) return; } catch (e) {}
   const q = loadOfflineQueue();
   if (!q.length) return;
-  const failed = [];
-  for (const item of q) {
-    let ok = false;
-    try {
-      if (item.type === "orders" && typeof dbUpsertOrders === "function") {
-        const r = await dbUpsertOrders(item.payload);
-        ok = !!(r && r.ok);
-      } else if (item.type === "labels" && typeof dbUpsertLabels === "function") {
-        const r = await dbUpsertLabels(item.payload);
-        ok = !!(r && r.ok);
-      } else if (item.type === "deduct" && typeof dbDeductStock === "function") {
-        const r = await dbDeductStock(item.payload);
-        if (r && r.ok) { _applyServerQty(r.rows); ok = true; }
-        // A permission block won't fix itself by retrying — consume the item
-        // (canonical state was already reloaded by the caller's error path).
-        else if (r && r.error === "PERMISSION_OR_MISSING") ok = true;
-      } else {
-        ok = true;
+  __queueFlushing = true;
+  try { localStorage.setItem(IMS_QUEUE_LOCK_KEY, String(Date.now())); } catch (e) {}
+  let done = 0;
+  try {
+    for (const item of q) {
+      let ok = false;
+      try {
+        if (item.type === "orders" && typeof dbUpsertOrders === "function") {
+          const r = await dbUpsertOrders(item.payload);
+          ok = !!(r && r.ok);
+        } else if (item.type === "labels" && typeof dbUpsertLabels === "function") {
+          const r = await dbUpsertLabels(item.payload);
+          ok = !!(r && r.ok);
+        } else if (item.type === "deduct" && typeof dbDeductStock === "function") {
+          const r = await dbDeductStock(item.payload);
+          if (r && r.ok) { _applyServerQty(r.rows); ok = true; }
+          // A permission block won't fix itself by retrying — consume the item
+          // (canonical state was already reloaded by the caller's error path).
+          else if (r && r.error === "PERMISSION_OR_MISSING") ok = true;
+        } else if (item.type === "adjust" && typeof dbAdjustStock === "function") {
+          const r = await dbAdjustStock(item.payload);
+          if (r && r.ok) { _applyServerQty(r.rows); ok = true; }
+          else if (r && r.error === "PERMISSION_OR_MISSING") ok = true;
+          // NOTE: do NOT consume on RPC_MISSING — that would drop the delta forever
+          // (local-only, never reaches the DB). Leave it queued so it replays once
+          // adjust-stock.sql is deployed (mirrors the "deduct" branch).
+        } else if (item.type === "delete-order" && typeof dbDeleteOrder === "function") {
+          let allOk = true;
+          for (const id of (item.payload || [])) {
+            const r = await dbDeleteOrder(id).catch(e => ({ error: String(e) }));
+            if (r && r.error && r.error !== "PERMISSION_OR_MISSING") allOk = false; // 0-row = already gone
+          }
+          ok = allOk;
+        } else if (item.type === "delete-label" && typeof dbDeleteLabel === "function") {
+          let allOk = true;
+          for (const lid of (item.payload || [])) {
+            const r = await dbDeleteLabel(lid).catch(e => ({ error: String(e) }));
+            if (r && r.error && r.error !== "PERMISSION_OR_MISSING") allOk = false;
+          }
+          ok = allOk;
+        } else if (["orders", "labels", "deduct", "adjust", "delete-order", "delete-label"].includes(item.type)) {
+          // The DB helper isn't loaded yet — DON'T consume (avoids silently
+          // dropping a real write); leave it for the next flush.
+          ok = false;
+        } else {
+          ok = true; // unknown/legacy type — consume so it can't loop forever
+        }
+      } catch (e) {}
+      // Give up on an item that has been failing for too long (e.g. a sale a
+      // genuinely-unauthorized account made, or an off-hours RLS block that never
+      // clears) so it can't pin the pending-sync badge forever. Transient blocks
+      // resolve well before this via the online/focus/visibility/startup triggers.
+      let expired = false;
+      if (!ok && item.ts) {
+        const ageMs = Date.now() - Date.parse(item.ts);
+        if (Number.isFinite(ageMs) && ageMs > QUEUE_MAX_AGE_MS) {
+          expired = true;
+          window.dispatchEvent(new CustomEvent("ims-toast", { detail: "มีข้อมูลค้างซิงค์เกิน 7 วันและถูกยกเลิก — โปรดตรวจสอบสิทธิ์/การเชื่อมต่อ" }));
+        }
       }
-    } catch (e) {}
-    if (!ok) failed.push(item);
+      // Persist success IMMEDIATELY so a tab closed mid-flush can't replay an
+      // already-applied write (the old code saved survivors only once, at the end).
+      // An expired item is removed too, but NOT counted as a success (it was given
+      // up on, not synced — so the "N synced ✓" toast can't misreport it).
+      if (ok) { _removeQueueItem(item.id); done++; }
+      else if (expired) { _removeQueueItem(item.id); }
+    }
+  } finally {
+    __queueFlushing = false;
+    try { localStorage.removeItem(IMS_QUEUE_LOCK_KEY); } catch (e) {}
   }
-  _saveQueue(failed);
-  const n = q.length - failed.length;
-  if (n > 0) window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: "ซิงค์ข้อมูลค้าง " + n + " รายการสำเร็จ ✓" } }));
+  if (done > 0) window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: "ซิงค์ข้อมูลค้าง " + done + " รายการสำเร็จ ✓" } }));
 }
+// Retry triggers. The "online" event never fires on an already-online device, so
+// a session closed offline and relaunched on Wi-Fi would otherwise never flush —
+// hence the focus/visibility triggers and the post-dbInit flush (app.jsx).
 window.addEventListener("online", function() { if (typeof flushOfflineQueue === "function") flushOfflineQueue(); });
+window.addEventListener("focus", function() { if (typeof flushOfflineQueue === "function") flushOfflineQueue(); });
+document.addEventListener("visibilitychange", function() { if (document.visibilityState === "visible" && typeof flushOfflineQueue === "function") flushOfflineQueue(); });
 
 function printBarcodeLabels(items, pushToast) {
   const safe = (str) => String(str == null ? "" : str).replace(/[<>&]/g, "");
@@ -1237,8 +1445,8 @@ Object.assign(window, {
   loadStockTake, saveStockTake, applyStockCounts,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
-  USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, isoToThai,
-  saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, removeProductsFromStore, resetProductStore,
+  USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, todayIso, bangkokDateOf, isoToThai,
+  saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
   loadOrders, saveOrders, appendOrder,
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData,

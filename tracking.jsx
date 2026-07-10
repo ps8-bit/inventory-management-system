@@ -14,11 +14,44 @@ function loadOrderOverrides() {
 
 function setOrderField(id, changes) {
   const prev = loadOrderOverrides();
+  const entry = { ...prev[id], ...changes };
   // Fresh object reference so React state setters (setO/setOverrides) re-render.
-  const m = { ...prev, [id]: { ...prev[id], ...changes } };
+  const m = { ...prev, [id]: entry };
   window._DB_ORDER_OVERRIDES = m;
   try { localStorage.setItem(ORDERS_KEY, JSON.stringify(m)); } catch (e) {}
-  if (typeof dbSaveState === "function") dbSaveState("order_overrides", m).catch(() => {});
+  // Sync only THIS order's entry via a server-side merge, so a concurrent edit to
+  // a different order on another device isn't clobbered (the old whole-map upsert
+  // was last-write-wins). Falls back to the whole-map save if the merge RPC isn't
+  // deployed yet (see supabase/merge-app-state.sql).
+  if (typeof dbMergeState === "function") {
+    dbMergeState("order_overrides", { [id]: entry }).then(res => {
+      if (res === null && typeof dbSaveState === "function") dbSaveState("order_overrides", m).catch(() => {});
+    }).catch(() => {});
+  } else if (typeof dbSaveState === "function") {
+    dbSaveState("order_overrides", m).catch(() => {});
+  }
+  window.dispatchEvent(new CustomEvent("ims-orders-change"));
+}
+
+// Wipe the override entry for an order id when that id is (re)born — a new order
+// or a re-created label reusing a previously-DELETED SO number would otherwise
+// inherit the old {deleted:true} tombstone (+ stale status/carrier edits) and be
+// invisible in Outbound/Tracking/badges while still shown to the customer. Clears
+// to {} via merge (no whole-map race); no-op for a fresh id with no prior override.
+function clearOrderOverride(id) {
+  if (!id) return;
+  const prev = loadOrderOverrides();
+  if (!prev[id] || !Object.keys(prev[id]).length) return; // nothing stale to clear
+  const m = { ...prev, [id]: {} };
+  window._DB_ORDER_OVERRIDES = m;
+  try { localStorage.setItem(ORDERS_KEY, JSON.stringify(m)); } catch (e) {}
+  if (typeof dbMergeState === "function") {
+    dbMergeState("order_overrides", { [id]: {} }).then(res => {
+      if (res === null && typeof dbSaveState === "function") dbSaveState("order_overrides", m).catch(() => {});
+    }).catch(() => {});
+  } else if (typeof dbSaveState === "function") {
+    dbSaveState("order_overrides", m).catch(() => {});
+  }
   window.dispatchEvent(new CustomEvent("ims-orders-change"));
 }
 
@@ -107,11 +140,21 @@ async function deleteOrdersFromDb(ids) {
   const labels = (typeof loadLabels === "function") ? loadLabels() : [];
   const delLabelIds = new Set(labels.filter(l => idSet.has(orderIdForLabel(l))).map(l => l.id));
 
-  // 1. Hard-delete the underlying label(s) from the cloud (best-effort: a 0-row
-  //    result just means the row wasn't in the cloud — for admin/manager it can't
-  //    be an RLS block since we gated on role above).
+  // A real error (network throw / DB error) means the delete didn't persist and
+  // must be retried. A 0-row PERMISSION_OR_MISSING for admin/manager just means the
+  // row wasn't in the cloud (already gone) — NOT a failure.
+  const isFail = (r) => r && r.error && r.error !== "PERMISSION_OR_MISSING";
+  const failedLabelIds = [];
+  const failedOrderIds = [];
+
+  // 1. Hard-delete the underlying label(s) from the cloud. Capture failures so we
+  //    don't report success on a delete that silently didn't happen (offline / DB
+  //    error) — that would leave the shipment live on the customer page while hiding
+  //    it from staff via the tombstone.
   for (const lid of delLabelIds) {
-    if (typeof dbDeleteLabel === "function") await dbDeleteLabel(lid).catch(() => {});
+    if (typeof dbDeleteLabel !== "function") break;
+    const r = await dbDeleteLabel(lid).catch(e => ({ error: String(e) }));
+    if (isFail(r)) failedLabelIds.push(lid);
   }
   // Remove them locally too, bypassing saveLabels' preserve-snapshot path.
   if (delLabelIds.size) {
@@ -123,7 +166,9 @@ async function deleteOrdersFromDb(ids) {
   // 2. Remove any orders-table row the customer page reads — including rows a
   //    previous saveLabels preserve had pushed up for this shipment.
   for (const id of ids) {
-    if (typeof dbDeleteOrder === "function") await dbDeleteOrder(id).catch(() => {});
+    if (typeof dbDeleteOrder !== "function") break;
+    const r = await dbDeleteOrder(id).catch(e => ({ error: String(e) }));
+    if (isFail(r)) failedOrderIds.push(id);
   }
   // 3. Drop local preserved copies so they can't re-sync the order back up.
   try {
@@ -133,7 +178,14 @@ async function deleteOrdersFromDb(ids) {
     if (changed) localStorage.setItem(PRESERVED_KEY, JSON.stringify(m));
   } catch (e) {}
 
-  return { ok: true };
+  // Queue any real failures for automatic retry when back online, so the row can't
+  // stay live on the customer page while staff think it's gone.
+  if (typeof enqueueOfflineWrite === "function") {
+    if (failedLabelIds.length) enqueueOfflineWrite("delete-label", failedLabelIds);
+    if (failedOrderIds.length) enqueueOfflineWrite("delete-order", failedOrderIds);
+  }
+  const failedIds = [...new Set([...failedOrderIds, ...failedLabelIds])];
+  return { ok: failedIds.length === 0, failedIds };
 }
 
 // One-time recovery: any entry in ims_orders_overrides whose source label was
@@ -179,7 +231,9 @@ async function deleteOrdersFromDb(ids) {
 // shipments. Tracking/carrier saved by the slip scanner live on the label.
 function labelToOrder(l) {
   const id = orderIdForLabel(l);
-  const dateIso = (l.created_at || "").slice(0, 10);
+  // Bangkok calendar date, not a raw UTC slice (a label made 00:00–06:59 Bangkok
+  // would otherwise be filed under yesterday, disagreeing with the labels queue).
+  const dateIso = (typeof bangkokDateOf === "function") ? bangkokDateOf(l.created_at) : (l.created_at || "").slice(0, 10);
   return {
     id,
     channel: "ฉลาก",
@@ -462,7 +516,9 @@ function TrackingPage({ pushToast, store }) {
           count: selectedCount,
           note: `ออร์เดอร์: ${selectedIds.join(", ")}`
         });
-        pushToast(`ลบ ${selectedCount} ออร์เดอร์แล้ว`);
+        pushToast((res && res.ok === false && res.failedIds && res.failedIds.length)
+          ? `ลบแล้ว — ${res.failedIds.length} รายการจะลบให้เสร็จเมื่อกลับมาออนไลน์`
+          : `ลบ ${selectedCount} ออร์เดอร์แล้ว`);
         setBulkConfirm(null);
         clearSelection();
       }
@@ -1297,7 +1353,7 @@ function ShareLinkModal({ store, onClose, pushToast }) {
   const [copied, setCopied] = useStateTrk(false);
 
   const dateForUrl =
-    dateMode === "today" ? TODAY_ISO :
+    dateMode === "today" ? (typeof todayIso === "function" ? todayIso() : TODAY_ISO) :
     dateMode === "custom" ? customDate :
     null;
 
@@ -1354,7 +1410,7 @@ function ShareLinkModal({ store, onClose, pushToast }) {
   };
 
   const dateLabel =
-    dateMode === "today" ? `วันนี้ (${isoToThai(TODAY_ISO)})` :
+    dateMode === "today" ? `วันนี้ (${isoToThai(typeof todayIso === "function" ? todayIso() : TODAY_ISO)})` :
     dateMode === "custom" ? isoToThai(customDate) :
     "ทุกออร์เดอร์";
 
@@ -1375,7 +1431,7 @@ function ShareLinkModal({ store, onClose, pushToast }) {
           <div className="eyebrow" style={{ marginBottom: 10 }}>ขอบเขตของลิงก์</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 10 }}>
             <DateModeBtn icon={<Icons.Pkg size={14}/>}     label="ทุกออร์เดอร์" sub="ไม่จำกัดวัน" active={dateMode === "all"}    onClick={() => setDateMode("all")}/>
-            <DateModeBtn icon={<Icons.Dot size={14}/>}     label="วันนี้"       sub={isoToThai(TODAY_ISO)} active={dateMode === "today"}  onClick={() => setDateMode("today")}/>
+            <DateModeBtn icon={<Icons.Dot size={14}/>}     label="วันนี้"       sub={isoToThai(typeof todayIso === "function" ? todayIso() : TODAY_ISO)} active={dateMode === "today"}  onClick={() => setDateMode("today")}/>
             <DateModeBtn icon={<Icons.Calendar size={14}/>}label="ระบุวัน"     sub={dateMode === "custom" ? isoToThai(customDate) : "เลือกวันที่"} active={dateMode === "custom"} onClick={() => setDateMode("custom")}/>
           </div>
 
@@ -1395,7 +1451,7 @@ function ShareLinkModal({ store, onClose, pushToast }) {
               <div className="row" style={{ gap: 4, marginTop: 8, flexWrap: "wrap" }}>
                 <span style={{ fontSize: 11, color: "var(--muted)", marginRight: 4 }}>เลือกด่วน:</span>
                 {[
-                  { iso: TODAY_ISO, label: "วันนี้" },
+                  { iso: (typeof todayIso === "function" ? todayIso() : TODAY_ISO), label: "วันนี้" },
                   { iso: "2026-05-18", label: "เมื่อวาน" },
                   { iso: "2026-05-16", label: "16 พ.ค." }
                 ].map(d => (
@@ -1564,8 +1620,8 @@ function CustomerLookup() {
               carrier: row.carrier || "", tracking: row.tracking || "",
               items: row.item_count ?? 0, isBundle: row.is_bundle || false,
               bundleName: row.bundle_name || "", note: row.note || "",
-              dateIso: row.date_iso || row.created_at?.slice(0, 10) || "",
-              date: isoToThai(row.date_iso || row.created_at?.slice(0, 10) || ""),
+              dateIso: row.date_iso || (typeof bangkokDateOf === "function" ? bangkokDateOf(row.created_at) : row.created_at?.slice(0, 10)) || "",
+              date: isoToThai(row.date_iso || (typeof bangkokDateOf === "function" ? bangkokDateOf(row.created_at) : row.created_at?.slice(0, 10)) || ""),
               ts: row.created_at
                 ? new Date(row.created_at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })
                 : ""
@@ -1654,7 +1710,7 @@ function CustomerLookup() {
 
   if (selected) return <CustomerOrderDetail order={selected} store={store} onBack={() => setSelected(null)}/>;
 
-  const isToday = dateFilter === TODAY_ISO;
+  const isToday = dateFilter === (typeof todayIso === "function" ? todayIso() : TODAY_ISO);
 
   return (
     <div className="auth-page" style={{ alignItems: "flex-start", paddingTop: 60, paddingBottom: 40 }}>
@@ -1976,4 +2032,4 @@ function CustomerOrderDetail({ order, store, onBack }) {
   );
 }
 
-Object.assign(window, { TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });
+Object.assign(window, { TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });

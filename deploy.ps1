@@ -33,7 +33,10 @@ if ($whoami -match "Error|not logged|sign in|No existing") {
 # Step 2 - deploy Supabase Edge Functions
 Write-Host ""
 Write-Host "[2/4] Deploying Supabase Edge Functions..." -ForegroundColor Yellow
-npx supabase functions deploy extract-slip --project-ref $SupabaseRef
+# extract-slip - browser callers send a JWT; line-bot calls it internally with
+# only x-cron-secret (no JWT). It self-gates via CRON_SECRET / JWT+WRITE_ROLES,
+# so it MUST deploy --no-verify-jwt or the gateway 401s the LINE slip path.
+npx supabase functions deploy extract-slip --no-verify-jwt --project-ref $SupabaseRef
 if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: extract-slip deploy failed" -ForegroundColor Yellow } else { Write-Host "      extract-slip deployed OK" -ForegroundColor Green }
 # track-lookup is PUBLIC (customers, no login) -> --no-verify-jwt
 npx supabase functions deploy track-lookup --no-verify-jwt --project-ref $SupabaseRef

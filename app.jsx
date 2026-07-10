@@ -335,7 +335,10 @@ function Root() {
   // Detected synchronously from the URL so we never flash the app first.
   const [authFlow,  setAuthFlow]  = useStateApp(() => {
     if (typeof window === "undefined") return null;
-    const s = (window.location.hash || "") + " " + (window.location.search || "");
+    // Use the URL captured at first-script time (data.jsx) — by the time React
+    // mounts, supabase-js may have already stripped the recovery/invite token.
+    const init = window.__IMS_INIT || { hash: window.location.hash || "", search: window.location.search || "" };
+    const s = (init.hash || "") + " " + (init.search || "");
     if (/type=recovery/.test(s))         return "recovery";
     if (/type=(invite|signup)/.test(s))  return "invite";
     return null;
@@ -368,6 +371,50 @@ function Root() {
     return () => subscription.unsubscribe();
   }, []);
 
+  // Robustly handle landing from a password-reset / invite email link — the
+  // synchronous authFlow detection above only catches the implicit-hash flow,
+  // which silently strands the user on the login screen for the other cases:
+  //  • implicit #access_token=…&type=recovery and PKCE ?code=… are consumed by
+  //    supabase-js (detectSessionInUrl) → it fires PASSWORD_RECOVERY (handled
+  //    above). We deliberately DON'T touch those here — re-consuming a ?code
+  //    would fail "code already used".
+  //  • ?token_hash=…&type=recovery|invite (newer templates) is NOT auto-consumed
+  //    → verifyOtp to establish the temporary session, else the reset screen
+  //    shows but "save" fails with no session.
+  //  • An expired / already-used / rejected link returns error=… in the hash or
+  //    query with no session → surface WHY on the login screen instead of a
+  //    silent bounce.
+  useEffectApp(() => {
+    // Parse the URL captured at first-script time — supabase-js may have already
+    // stripped a ?token_hash / #error before this effect runs.
+    const init = window.__IMS_INIT || { hash: window.location.hash || "", search: window.location.search || "" };
+    const hp  = new URLSearchParams((init.hash || "").replace(/^#/, ""));
+    const qp  = new URLSearchParams(init.search || "");
+    const get = (k) => hp.get(k) || qp.get(k);
+    const cleanUrl = () => { try { history.replaceState(null, "", window.location.pathname); } catch (e) {} };
+    const showLinkError = (code, desc) => {
+      if (typeof recoveryLinkErrorMsg === "function") setLockoutMsg(recoveryLinkErrorMsg(code, desc));
+    };
+
+    const errCode = get("error_code") || get("error");
+    if (errCode) {
+      setAuthFlow(null);   // a stray sync type=recovery match must not keep the reset UI up
+      showLinkError(errCode, get("error_description"));
+      cleanUrl();
+      return;
+    }
+
+    const tokenHash = get("token_hash");
+    const type      = get("type");
+    if (tokenHash && type && window.authVerifyOtp) {
+      authVerifyOtp({ token_hash: tokenHash, type }).then(({ error }) => {
+        cleanUrl();
+        if (error) { setAuthFlow(null); showLinkError("verify_failed", error.message); }
+        else       { setAuthFlow(type === "recovery" ? "recovery" : "invite"); }
+      }).catch(() => {});
+    }
+  }, []);
+
   // Enforce two things on an already-open session, then unlock the gate:
   //  1. Account suspension — a Supabase ban blocks new logins + token refresh,
   //     but the access token the tab already holds stays valid until it expires
@@ -384,66 +431,109 @@ function Root() {
   useEffectApp(() => {
     if (!userId) { setGateReady(false); return; }
     let alive = true;
+    let checking = false;   // single-flight: focus + visibilitychange can fire together
     const forceOut = async (msg) => {
       setLockoutMsg(msg);
       intentionalLogoutRef.current = true;   // keep SIGNED_OUT from overwriting msg
-      try { await authSignOut(); } catch (e) {}
+      // scope:'local' clears the persisted session WITHOUT depending on a server
+      // round-trip, so a user forced out while OFFLINE still lands on a clean
+      // login screen and can sign in again the moment connectivity returns.
+      try { await authSignOut("local"); } catch (e) {}
       if (alive) setUser(null);
     };
+    // A transient network/gateway failure must NEVER end the session. supabase-js
+    // does NOT throw on a network failure — getUser()/refreshSession() RETURN
+    // { data:{user:null}, error } with error.name === "AuthRetryableFetchError"
+    // (status 0 for offline/DNS/CORS, 502/503/504 for a bad gateway). We also
+    // treat 408/429/5xx as transient. Everything else (401/403 and other 4xx
+    // AuthApiError, or a genuine AuthSessionMissingError) is a DEFINITIVE
+    // rejection. Classify on the error NAME + numeric STATUS only — never on the
+    // message text, which a real rejection could coincidentally contain.
+    const isRetryableAuthErr = (err) => {
+      if (!err) return false;
+      if (err.name === "AuthRetryableFetchError") return true;
+      const s = err.status || 0;
+      return s === 0 || s === 408 || s === 429 || s >= 500;
+    };
     const check = async () => {
-      if (!alive || document.hidden) return;
+      if (!alive || document.hidden || checking) return;
+      // While a password-set flow is active (in-app OTP "forgot", or an email-link
+      // "recovery"/"invite"), the session that verifyOtp / the link just created is
+      // a transient recovery session — suspension/work-hours enforcement must NOT
+      // run against it and force-sign-out before the new password is saved (it would
+      // surface a confusing "session missing" error on a correct code+password). The
+      // effect re-runs when authFlow clears (it's in the dep array), opening the gate.
+      if (authFlow) return;
+      checking = true;
+      try {
+        // (1) Working-hours window — only when the role is actually governed.
+        const store = window._DB_STORE ? { ...DEFAULT_STORE, ...window._DB_STORE } : DEFAULT_STORE;
+        const wh = store.workHours;
+        const governed = wh && wh.enabled && Array.isArray(wh.roles) && wh.roles.includes(userRole)
+                         && typeof workHoursStatus === "function";
+        if (governed) {
+          const nowMs = window.dbServerTimeMs ? await dbServerTimeMs() : Date.now();
+          if (!alive) return;
+          // Per-user resolver so a today-only "allow outside hours" pass lets the
+          // user in even when the shared window is closed.
+          const st = (typeof workHoursStatusForUser === "function")
+            ? workHoursStatusForUser(store, userRole, userId, nowMs)
+            : workHoursStatus(store, userRole, nowMs);
+          if (st.restricted && !st.allowed) { await forceOut(workHoursMessage(st)); return; }
+        }
 
-      // (1) Working-hours window — only when the role is actually governed.
-      const store = window._DB_STORE ? { ...DEFAULT_STORE, ...window._DB_STORE } : DEFAULT_STORE;
-      const wh = store.workHours;
-      const governed = wh && wh.enabled && Array.isArray(wh.roles) && wh.roles.includes(userRole)
-                       && typeof workHoursStatus === "function";
-      if (governed) {
-        const nowMs = window.dbServerTimeMs ? await dbServerTimeMs() : Date.now();
-        if (!alive) return;
-        // Per-user resolver so a today-only "allow outside hours" pass lets the
-        // user in even when the shared window is closed.
-        const st = (typeof workHoursStatusForUser === "function")
-          ? workHoursStatusForUser(store, userRole, userId, nowMs)
-          : workHoursStatus(store, userRole, nowMs);
-        if (st.restricted && !st.allowed) { await forceOut(workHoursMessage(st)); return; }
-      }
-
-      // (2) Suspension / token validity.
-      if (window.authGetUser) {
-        let res;
-        try { res = await authGetUser(); } catch (e) { res = null; }  // network blip → keep session
-        if (!alive) return;
-        if (res) {
-          const err = res.error;
-          const noUser = res.data && !res.data.user;
-          const status = err ? (err.status || 0) : 0;
-          const banned = status === 403 || /ban|suspend|disabled|not allowed/i.test((err && err.message) || "");
-          if (banned) {
-            // A real admin suspension → end the session immediately.
-            await forceOut("บัญชีของคุณถูกระงับการใช้งานโดยผู้ดูแลระบบ หากต้องการใช้งานต่อ กรุณาติดต่อผู้ดูแล");
-            return;
-          }
-          if (status === 401 || noUser) {
-            // 401 / no-user usually just means the access token expired (e.g. the
-            // tab was asleep/backgrounded). Try to refresh BEFORE signing out, so
-            // a still-valid session isn't needlessly bounced to the login screen.
-            let recovered = false;
-            if (window.authRefresh) {
-              try { const r = await authRefresh(); recovered = !!(r && r.data && r.data.session && !r.error); }
-              catch (e) { recovered = false; }
+        // (2) Suspension / token validity.
+        if (window.authGetUser) {
+          let res;
+          try { res = await authGetUser(); } catch (e) { res = null; }  // unexpected throw → keep session
+          if (!alive) return;
+          if (res) {
+            const err = res.error;
+            // Transient network/gateway failure → keep the session and retry next
+            // cycle. (Old bug: getUser() RETURNS user:null on a blip — that was
+            // mistaken for an expiry and force-signed-out a healthy user, who then
+            // couldn't re-login on the same dead network but recovered on F5.)
+            if (!isRetryableAuthErr(err)) {
+              const noUser = res.data && !res.data.user;
+              const status = err ? (err.status || 0) : 0;
+              const banned = status === 403 || /ban|suspend|disabled|not allowed/i.test((err && err.message) || "");
+              if (banned) {
+                // A real admin suspension → end the session immediately.
+                await forceOut("บัญชีของคุณถูกระงับการใช้งานโดยผู้ดูแลระบบ หากต้องการใช้งานต่อ กรุณาติดต่อผู้ดูแล");
+                return;
+              }
+              if (status === 401 || noUser) {
+                // 401 / no-user usually just means the access token expired (e.g. the
+                // tab was asleep/backgrounded). Try to refresh BEFORE signing out, so
+                // a still-valid session isn't needlessly bounced to the login screen.
+                let recovered = false, refreshRetryable = false;
+                if (window.authRefresh) {
+                  try {
+                    const r = await authRefresh();
+                    recovered = !!(r && r.data && r.data.session && !r.error);
+                    if (!recovered) refreshRetryable = isRetryableAuthErr(r && r.error);
+                  } catch (e) { refreshRetryable = true; }  // unexpected throw → keep session
+                }
+                if (!alive) return;
+                // Only end the session on a DEFINITIVE refresh failure — a network
+                // blip during refresh keeps the session for the next cycle.
+                if (!recovered && !refreshRetryable) {
+                  await forceOut("เซสชันหมดอายุหรือถูกยกเลิก กรุณาเข้าสู่ระบบใหม่");
+                  return;
+                }
+                // Refreshed (or transient failure) — keep the user signed in.
+              }
             }
-            if (!alive) return;
-            if (!recovered) { await forceOut("เซสชันหมดอายุหรือถูกยกเลิก กรุณาเข้าสู่ระบบใหม่"); return; }
-            // Refreshed successfully — keep the user signed in.
           }
         }
-      }
 
-      // Only open the gate once the store (schedule) is actually loaded, so the
-      // first authoritative work-hours decision uses the real config — not the
-      // default (feature-off) store that exists before dbInit finishes.
-      if (alive && dbReady) setGateReady(true);
+        // Only open the gate once the store (schedule) is actually loaded, so the
+        // first authoritative work-hours decision uses the real config — not the
+        // default (feature-off) store that exists before dbInit finishes.
+        if (alive && dbReady) setGateReady(true);
+      } finally {
+        checking = false;
+      }
     };
     const id = setInterval(check, 60000);
     const onFocus = () => check();
@@ -456,14 +546,18 @@ function Root() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
     };
-  }, [userId, userRole, dbReady]);
+  }, [userId, userRole, dbReady, authFlow]);
 
   // Load DB data only after a user is authenticated (userId declared above)
   useEffectApp(() => {
     if (!authReady || !userId) return;
     setDbReady(false);
     if (window.dbInit) {
-      window.dbInit().then(() => setDbReady(true)).catch(() => setDbReady(true));
+      window.dbInit().then(() => setDbReady(true)).catch(() => setDbReady(true))
+        // Flush any writes queued while offline in a previous session. The "online"
+        // event never fires on an already-online relaunch, so without this a queued
+        // sale/deduction could sit stranded until an unrelated connectivity blip.
+        .finally(() => { if (typeof flushOfflineQueue === "function") flushOfflineQueue(); });
     } else {
       setDbReady(true);
     }

@@ -101,6 +101,11 @@ function createSaleLabel({ orderId, name, phone, addr1, addr2, tambon, amphoe, p
     items: (items || []).map(it => ({ sku: it.sku, name: it.name, qty: it.qty })),
   };
   if (typeof saveLabels === "function") saveLabels([...existing, label]);
+  // A re-created label reusing a previously-deleted SO number must shed the old
+  // {deleted:true} tombstone, or the new shipment stays hidden from staff.
+  if (typeof clearOrderOverride === "function") {
+    clearOrderOverride((typeof orderIdForLabel === "function") ? orderIdForLabel(label) : label.soId);
+  }
   return label;
 }
 
@@ -987,8 +992,10 @@ function Labels({ pushToast, store }) {
   const validateLabel = (label) => {
     if (!label) return { ok: false, reason: "ไม่พบฉลาก" };
     if (!label.items.length) return { ok: false, reason: "ต้องมีรายการอย่างน้อย 1 รายการ" };
-    const missing = label.items.filter(it => !it.sku);
+    const missing = label.items.filter(it => !it.sku && !it.custom);
     if (missing.length) return { ok: false, reason: `มี ${missing.length} รายการที่ยังไม่ได้เลือกสินค้า` };
+    const blankCustom = label.items.filter(it => it.custom && !String(it.name || "").trim());
+    if (blankCustom.length) return { ok: false, reason: `มี ${blankCustom.length} รายการนอกคลังที่ยังไม่ได้กรอกชื่อ` };
     const badQty = label.items.filter(it => !it.qty || it.qty <= 0);
     if (badQty.length) return { ok: false, reason: `มี ${badQty.length} รายการจำนวนไม่ถูกต้อง` };
     if (!label.recipient.name.trim()) return { ok: false, reason: "ยังไม่ได้ระบุชื่อผู้รับ" };
@@ -1313,11 +1320,21 @@ function Labels({ pushToast, store }) {
                 {labels.length > 0 && (
                   <button
                     className="btn btn-ghost btn-sm"
-                    title="ล้างคิวทั้งหมด"
+                    title={selectedCount > 0 ? `ลบ ${selectedCount} ฉลากที่เลือก` : "ล้างคิวทั้งหมด"}
                     onClick={() => {
-                      if (!confirm(`ลบฉลากทั้งหมด ${labels.length} ใบออกจากคิว?`)) return;
-                      setLabels([]);
-                      pushToast(`ล้างคิว ${labels.length} ฉลากแล้ว`);
+                      if (selectedCount > 0) {
+                        if (!confirm(`ลบ ${selectedCount} ฉลากที่เลือกออกจากคิว?`)) return;
+                        const remaining = labels.filter(l => !selected[l.id]);
+                        setLabels(remaining);
+                        setSelected({});
+                        if (selected[activeId]) setActiveId(remaining[0] ? remaining[0].id : null);
+                        pushToast(`ลบ ${selectedCount} ฉลากแล้ว`);
+                      } else {
+                        if (!confirm(`ลบฉลากทั้งหมด ${labels.length} ใบออกจากคิว?`)) return;
+                        setLabels([]);
+                        setActiveId(null);
+                        pushToast(`ล้างคิว ${labels.length} ฉลากแล้ว`);
+                      }
                     }}
                     style={{ color: "var(--danger)" }}
                   >
@@ -1488,9 +1505,10 @@ function Labels({ pushToast, store }) {
 
               <div className="divider"/>
               <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
-                <div className="eyebrow">รายการสินค้า {showErrors && active.items.some(it => !it.sku) && <span style={{ color: "var(--danger)", marginLeft: 6 }}>· ต้องเลือกสินค้าทุกรายการ</span>}</div>
+                <div className="eyebrow">รายการสินค้า {showErrors && active.items.some(it => (!it.sku && !it.custom) || (it.custom && !String(it.name || "").trim())) && <span style={{ color: "var(--danger)", marginLeft: 6 }}>· ต้องเลือกสินค้าทุกรายการ</span>}</div>
                 <ItemAddPicker
                   onAddProduct={(p) => updateActive(l => ({ ...l, items: [...l.items, { sku: p.sku, name: p.name, qty: 1 }] }))}
+                  onAddCustom={(name) => updateActive(l => ({ ...l, items: [...l.items, { sku: "", name: name || "", qty: 1, custom: true }] }))}
                   onAddBundle={(b) => {
                     const expanded = b.items.map(it => {
                       const p = PRODUCTS.find(x => x.sku === it.sku);
@@ -1503,7 +1521,7 @@ function Labels({ pushToast, store }) {
               </div>
               <div className="stack" style={{ gap: 10 }}>
                 {active.items.map((it, i) => {
-                  const invalid = showErrors && (!it.sku || it.qty <= 0);
+                  const invalid = showErrors && ((!it.sku && !it.custom) || (it.custom && !String(it.name || "").trim()) || it.qty <= 0);
                   return (
                     <div key={i} style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8, border: "1px solid " + (invalid ? "var(--danger)" : "var(--border)") }}>
                       {it.fromBundle && (
@@ -1515,15 +1533,21 @@ function Labels({ pushToast, store }) {
                       )}
                       <div className="row" style={{ justifyContent: "space-between", marginBottom: 8, gap: 6 }}>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <SkuPicker
-                            value={it.sku || PRODUCTS[0].sku}
-                            onChange={(sku) => {
-                              const p = PRODUCTS.find(x => x.sku === sku);
-                              updateActive(l => ({ ...l, items: l.items.map((x, j) => j === i ? { ...x, sku, name: p ? p.name : x.name } : x) }));
-                            }}
-                            products={PRODUCTS}
-                          />
-                          {!it.sku && (
+                          {it.custom ? (
+                            <span className="badge" style={{ fontSize: 10, background: "var(--warning-soft,var(--surface-2))", color: "var(--warning,var(--fg))" }}>
+                              <Icons.Tag size={10}/> รายการนอกคลัง
+                            </span>
+                          ) : (
+                            <SkuPicker
+                              value={it.sku || PRODUCTS[0].sku}
+                              onChange={(sku) => {
+                                const p = PRODUCTS.find(x => x.sku === sku);
+                                updateActive(l => ({ ...l, items: l.items.map((x, j) => j === i ? { ...x, sku, name: p ? p.name : x.name } : x) }));
+                              }}
+                              products={PRODUCTS}
+                            />
+                          )}
+                          {!it.sku && !it.custom && (
                             <div style={{ fontSize: 11, color: showErrors ? "var(--danger)" : "var(--muted)", marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
                               <Icons.Warn size={11}/> ยังไม่ได้เลือกสินค้า
                             </div>
@@ -1536,7 +1560,7 @@ function Labels({ pushToast, store }) {
                         style={{ marginBottom: 6, fontSize: 12 }}
                         value={it.name}
                         onChange={e => updateActive(l => ({ ...l, items: l.items.map((x, j) => j === i ? { ...x, name: e.target.value } : x) }))}
-                        placeholder="คำอธิบายที่แสดงบนฉลาก (แก้ไขได้)"
+                        placeholder={it.custom ? "ชื่อรายการนอกคลัง (พิมพ์เอง)" : "คำอธิบายที่แสดงบนฉลาก (แก้ไขได้)"}
                       />
                       <div className="row" style={{ gap: 8 }}>
                         <span style={{ fontSize: 11, color: "var(--muted)" }}>จำนวน</span>
@@ -1592,7 +1616,7 @@ function Labels({ pushToast, store }) {
 }
 
 /* Unified picker — search & select single products OR product bundles for a label */
-function ItemAddPicker({ onAddProduct, onAddBundle }) {
+function ItemAddPicker({ onAddProduct, onAddBundle, onAddCustom }) {
   const [open, setOpen] = useStateLB(false);
   const [q, setQ] = useStateLB("");
   const wrapRef = React.useRef(null);
@@ -1677,6 +1701,14 @@ function ItemAddPicker({ onAddProduct, onAddBundle }) {
               <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>ไม่พบสินค้าหรือชุดที่ตรงกับ "{q}"</div>
             )}
           </div>
+          {typeof onAddCustom === "function" && (
+            <div style={{ padding: 8, borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+              <button className="btn btn-ghost btn-sm" style={{ width: "100%", justifyContent: "center" }}
+                onClick={() => { onAddCustom(q.trim()); setOpen(false); setQ(""); }}>
+                <Icons.Plus size={12}/> {q.trim() ? `เพิ่ม "${q.trim()}" เป็นรายการนอกคลัง` : "เพิ่มรายการนอกคลัง (พิมพ์เอง)"}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

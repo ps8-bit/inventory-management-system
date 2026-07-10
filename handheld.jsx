@@ -403,7 +403,7 @@ function MInbound({ ctx }) {
     received.forEach(r => {
       const p = PRODUCTS.find(x => x.sku === r.sku);
       if (!p) return;
-      updateProductInStore(r.sku, { qty: p.qty + r.qty });
+      adjustProductQty(r.sku, r.qty); // atomic +delta (concurrent-safe)
     });
     if (typeof recordChange === "function") {
       recordChange({
@@ -653,12 +653,15 @@ function MOutbound({ ctx }) {
   };
   const bulkDelete = async () => {
     if (!confirm(`ลบ ${selectedCount} ออร์เดอร์ที่เลือก?`)) return;
+    let res = null;
     if (typeof deleteOrdersFromDb === "function") {
-      const res = await deleteOrdersFromDb(selectedIds);
+      res = await deleteOrdersFromDb(selectedIds);
       if (res.blocked) { ctx.pushToast("ลบไม่ได้ — เฉพาะแอดมิน/ผู้จัดการเท่านั้น"); return; }
     }
     if (typeof setOrderField === "function") selectedIds.forEach(id => setOrderField(id, { deleted: true }));
-    ctx.pushToast(`ลบ ${selectedCount} ออร์เดอร์`);
+    ctx.pushToast((res && res.ok === false && res.failedIds && res.failedIds.length)
+      ? `ลบแล้ว — ${res.failedIds.length} รายการจะลบให้เสร็จเมื่อออนไลน์`
+      : `ลบ ${selectedCount} ออร์เดอร์`);
     clear();
   };
 
@@ -1036,13 +1039,18 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
     if (!editing && pickedImage && typeof setProductImage === "function") {
       try { setProductImage(skuTrim, pickedImage); } catch (e) {}
     }
-    onAdd({
+    const common = {
       sku: skuTrim, name: f.name.trim(), cat: catVal,
       brand: (f.brand || "").trim(),
       supplier: (f.supplier || "").trim(), cost, price,
-      qty: Math.round(qty), reorder: Math.round(reorder),
-      loc: f.loc.trim()
-    });
+      reorder: Math.round(reorder), loc: f.loc.trim()
+    };
+    // Edit mode: send qty as a CHANGE relative to what the sheet was opened
+    // showing (editing.qty), not an absolute value. So an untouched qty writes
+    // nothing, and a real edit becomes an atomic ±delta that can't clobber a sale
+    // another device made while the sheet was open. Add mode keeps absolute qty.
+    if (editing) onAdd({ ...common, _qtyDelta: Math.round(qty) - Number(editing.qty ?? 0) });
+    else onAdd({ ...common, qty: Math.round(qty) });
   };
 
   return (
@@ -1214,19 +1222,23 @@ function MProductDetail({ ctx }) {
   const cats = typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(x => x.cat))];
 
   const doEdit = (changes) => {
-    updateProductInStore(p.sku, changes);
+    const { _qtyDelta, ...fields } = changes;
+    updateProductInStore(p.sku, fields);                 // catalog fields — scoped, no qty
+    if (_qtyDelta) adjustProductQty(p.sku, _qtyDelta);   // qty edit → atomic delta, never an absolute clobber
     ctx.pushToast(`บันทึกการแก้ไข ${p.sku} แล้ว`);
     if (typeof recordChange === "function") {
+      const auditChanges = Object.entries(fields).map(([k, v]) => ({ label: k, to: String(v) }));
+      if (_qtyDelta) auditChanges.push({ label: "qty", to: `${_qtyDelta > 0 ? "+" : ""}${_qtyDelta} ชิ้น` });
       recordChange({
         entity: "product", entityId: p.sku, action: "update",
-        summary: `แก้ไขข้อมูลสินค้า ${changes.name || p.name} (${p.sku}) (มือถือ)`,
-        changes: Object.entries(changes).map(([k, v]) => ({ label: k, to: String(v) }))
+        summary: `แก้ไขข้อมูลสินค้า ${fields.name || p.name} (${p.sku}) (มือถือ)`,
+        changes: auditChanges
       });
     }
     setEditOpen(false);
   };
   const doAdjust = (delta, reason) => {
-    updateProductInStore(p.sku, { qty: Math.max(0, p.qty + delta) });
+    adjustProductQty(p.sku, delta); // atomic ±delta from raw value — no overlay pollution
     try {
       const a = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
       delete a[p.sku];
@@ -1479,7 +1491,7 @@ function MIssue({ ctx }) {
         carrier: "",
         tracking: "",
         items: lineItems.length,
-        dateIso: (typeof TODAY_ISO !== "undefined") ? TODAY_ISO : new Date().toISOString().slice(0, 10),
+        dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
         isBundle,
         bundleName: isBundle ? bundle.name : "",
         lineItems,
@@ -1834,7 +1846,7 @@ function MSell({ ctx }) {
         carrier: ship.carrier,
         tracking: "",
         items: cart.length,
-        dateIso: (typeof TODAY_ISO !== "undefined") ? TODAY_ISO : new Date().toISOString().slice(0, 10),
+        dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
         isSellOrder: true,
         isBundle: hasBundle,
         bundleName: hasBundle ? cart.filter(i => i.type === "bundle").map(i => i.name).join(", ") : "",
@@ -2690,6 +2702,7 @@ function MLocations({ ctx }) {
   const [selectedPos, setSelectedPos] = useStateM(null);
   const allowDelete = typeof canDeleteData === "function" ? canDeleteData() : true;
   const posCount = buildings.reduce((s, b) => s + (b.floors || []).reduce((t, f) => t + (f.positions || []).length, 0), 0);
+  const locImages = useLocationImages();
 
   const addBtn = { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--accent)", fontWeight: 600 };
   const delBtn = { display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--muted)" };
@@ -2766,11 +2779,13 @@ function MLocations({ ctx }) {
                   {(f.positions || []).map(p => {
                     const code = locCode(b.name, f.name, p);
                     const n = typeof skusInLocation === "function" ? skusInLocation(code) : 0;
+                    const hasPhoto = typeof getLocationImage === "function" && getLocationImage(code, locImages);
                     return (
                       <div key={p} onClick={() => tapPos(b.name, f.name, p)}
                         style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, fontSize: 12 }}>
                         <span className="mono" style={{ fontWeight: 600 }}>{p}</span>
                         <span style={{ fontSize: 10, color: "var(--muted)" }}>{n} SKU</span>
+                        {hasPhoto && typeof LocationImageThumb === "function" && <LocationImageThumb code={code} size={18} radius={6}/>}
                       </div>
                     );
                   })}
@@ -2814,6 +2829,9 @@ function MLocations({ ctx }) {
                     </div>
                   ))
                 }
+                <div style={{ marginTop: 16, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>ภาพตำแหน่ง</div>
+                {typeof LocationImageUpload === "function" ? <LocationImageUpload code={selectedPos.code}/> : null}
+
                 <button className="m-btn-big" style={{ marginTop: 16, background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={() => printPosQr(selectedPos)}><Icons.Print size={15}/> พิมพ์ป้าย QR</button>
               </div>
               <div className="m-sheet-foot" style={{ display: "flex", gap: 8 }}>
@@ -3178,7 +3196,18 @@ function MLabelEdit({ ctx }) {
     setSkuPickerOpen(false);
   };
 
+  const addCustomLabelItem = (name) => {
+    const nm = (name || "").trim();
+    setLabel(l => ({ ...l, items: [...(l.items || []), { sku: "", name: nm, qty: 1, custom: true }] }));
+    setSkuPickerOpen(false);
+  };
+
   const removeLabelItem = (idx) => setLabel(l => ({ ...l, items: (l.items || []).filter((_, i) => i !== idx) }));
+  const setLabelItemName = (idx, value) => setLabel(l => {
+    const items = (l.items || []).slice();
+    items[idx] = { ...items[idx], name: value };
+    return { ...l, items };
+  });
   const stepLabelItemQty = (idx, delta) => setLabel(l => {
     const items = (l.items || []).slice();
     const next = Math.max(1, (items[idx].qty || 1) + delta);
@@ -3379,8 +3408,25 @@ function MLabelEdit({ ctx }) {
             <div key={i} style={{ padding: "10px 12px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--border)", marginBottom: 6 }}>
               <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 6 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
-                  <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{it.sku}</div>
+                  {it.custom ? (
+                    <>
+                      <input
+                        className="m-input"
+                        value={it.name}
+                        onChange={e => setLabelItemName(i, e.target.value)}
+                        placeholder="ชื่อรายการนอกคลัง (พิมพ์เอง)"
+                        style={{ fontSize: 13, marginBottom: 4 }}
+                      />
+                      <span className="m-badge" style={{ fontSize: 10, background: "var(--warning-soft,var(--surface))", color: "var(--warning,var(--muted))", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <Icons.Tag size={10}/> รายการนอกคลัง
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name}</div>
+                      <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{it.sku}</div>
+                    </>
+                  )}
                 </div>
                 <button
                   onClick={() => removeLabelItem(i)}
@@ -3431,6 +3477,18 @@ function MLabelEdit({ ctx }) {
               </div>
               <div style={{ flex: 1, overflowY: "auto", padding: "0 12px 12px" }}>
                 <div className="m-list" style={{ marginBottom: 8 }}>
+                  <button
+                    className="m-row"
+                    onClick={() => addCustomLabelItem(skuPickerQ)}
+                  >
+                    <div className="m-row-thumb" style={{ background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center" }}><Icons.Plus size={15}/></div>
+                    <div className="m-row-main">
+                      <div className="m-row-title" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {skuPickerQ.trim() ? `เพิ่ม "${skuPickerQ.trim()}" เป็นรายการนอกคลัง` : "เพิ่มรายการนอกคลัง (พิมพ์เอง)"}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>ไม่มีในคลัง · กรอกชื่อเอง</div>
+                    </div>
+                  </button>
                   {skuPickerFiltered.map(p => (
                     <button
                       key={p.sku}
@@ -3579,7 +3637,7 @@ function MImport({ ctx }) {
     let added = 0, updated = 0;
     preview.rows.forEach(r => {
       const { _existing, ...product } = r;
-      if (_existing) { updateProductInStore(product.sku, product); updated++; }
+      if (_existing) { setProductAbsolute(product.sku, product); updated++; } // spreadsheet qty is the truth (absolute), not a delta
       else { addProductToStore({ ...product, reserved: 0 }); added++; }
     });
     if (typeof recordChange === "function") {
@@ -5009,7 +5067,7 @@ function MTracking({ ctx }) {
 
   const bulkStatus = (status) => { selIds.forEach(id => setOrderField(id, { status })); ctx.pushToast(`อัปเดต ${selCount} ออร์เดอร์`); clear(); };
   const bulkCarrier = (carrier) => { selIds.forEach(id => setOrderField(id, { carrier })); ctx.pushToast(`เปลี่ยนขนส่ง ${selCount} ออร์เดอร์`); clear(); };
-  const bulkDelete = async () => { if (!confirm(`ลบ ${selCount} ออร์เดอร์ที่เลือก?`)) return; if (typeof deleteOrdersFromDb === "function") { const res = await deleteOrdersFromDb(selIds); if (res.blocked) { ctx.pushToast("ลบไม่ได้ — เฉพาะแอดมิน/ผู้จัดการเท่านั้น"); return; } } selIds.forEach(id => setOrderField(id, { deleted: true })); ctx.pushToast(`ลบ ${selCount} ออร์เดอร์`); clear(); };
+  const bulkDelete = async () => { if (!confirm(`ลบ ${selCount} ออร์เดอร์ที่เลือก?`)) return; let res = null; if (typeof deleteOrdersFromDb === "function") { res = await deleteOrdersFromDb(selIds); if (res.blocked) { ctx.pushToast("ลบไม่ได้ — เฉพาะแอดมิน/ผู้จัดการเท่านั้น"); return; } } selIds.forEach(id => setOrderField(id, { deleted: true })); ctx.pushToast((res && res.ok === false && res.failedIds && res.failedIds.length) ? `ลบแล้ว — ${res.failedIds.length} รายการจะลบให้เสร็จเมื่อออนไลน์` : `ลบ ${selCount} ออร์เดอร์`); clear(); };
 
   return (
     <>
@@ -5224,7 +5282,7 @@ function MShareSheet({ onClose, ctx }) {
   const [customDate, setCustomDate] = useStateM(TODAY_ISO);
   const [copied, setCopied] = useStateM(false);
 
-  const dateForUrl = dateMode === "today" ? TODAY_ISO : dateMode === "custom" ? customDate : null;
+  const dateForUrl = dateMode === "today" ? (typeof todayIso === "function" ? todayIso() : TODAY_ISO) : dateMode === "custom" ? customDate : null;
   const url = window.location.origin + window.location.pathname + "#track" + (dateForUrl ? "/" + dateForUrl : "");
 
   const copy = async () => {

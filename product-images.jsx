@@ -86,6 +86,55 @@ function resolveProductImage(sku, images) {
   return url || "";
 }
 
+/* ============ Location photos (per-position bin/shelf photo) ============
+   One photo per storage position, keyed by its full code string (locCode()),
+   e.g. "สภ. › ชั้น 1 › A1". Mirrors the product-image sync model: cloud copy
+   (app_state "locimg:<code>" rows) wins, localStorage is the offline seed. */
+
+const LI_KEY = "ims_location_images";
+
+function loadLocationImages() {
+  if (window._DB_LOCATION_IMAGES && typeof window._DB_LOCATION_IMAGES === "object") return window._DB_LOCATION_IMAGES;
+  try { return JSON.parse(localStorage.getItem(LI_KEY) || "{}"); }
+  catch { return {}; }
+}
+
+function setLocationImage(code, dataUrl) {
+  const m = { ...loadLocationImages() };
+  if (dataUrl === null || dataUrl === undefined) delete m[code];
+  else m[code] = dataUrl;
+  window._DB_LOCATION_IMAGES = m;
+  try { localStorage.setItem(LI_KEY, JSON.stringify(m)); }
+  catch (e) { console.warn("Loc image storage failed", e); } // quota — cloud still has it
+  if (typeof dbSaveState === "function") {
+    dbSaveState("locimg:" + code, (dataUrl === undefined ? null : dataUrl)).catch(() => {});
+  }
+  window.dispatchEvent(new CustomEvent("ims-location-images-change"));
+}
+
+// Move a photo when a position/floor/building is renamed (its code changes) so
+// the photo isn't orphaned under the old code. No-op if there's nothing to move.
+function moveLocationImage(oldCode, newCode) {
+  if (!oldCode || !newCode || oldCode === newCode) return;
+  const m = loadLocationImages();
+  const url = m[oldCode];
+  if (url == null) return;
+  setLocationImage(newCode, url);
+  setLocationImage(oldCode, null);
+}
+
+function getLocationImage(code, map) { return (map || loadLocationImages())[code] || ""; }
+
+function useLocationImages() {
+  const [images, setImages] = useStateImg(() => loadLocationImages());
+  useEffectImg(() => {
+    const on = () => setImages(loadLocationImages());
+    window.addEventListener("ims-location-images-change", on);
+    return () => window.removeEventListener("ims-location-images-change", on);
+  }, []);
+  return images;
+}
+
 /* ============ WebP conversion via Canvas ============ */
 
 async function fileToWebp(file, { maxSize = 800, quality = 0.85 } = {}) {
@@ -284,6 +333,181 @@ function ProductImageUpload({ sku, productName, pushToast, size = "lg" }) {
   );
 }
 
+/* ============ Location photo thumbnail ============ */
+
+function LocationImageThumb({ code, size = 40, radius = 8 }) {
+  const images = useLocationImages();
+  const url = getLocationImage(code, images);
+  if (url) {
+    return (
+      <div style={{
+        width: size, height: size,
+        borderRadius: radius,
+        overflow: "hidden",
+        background: "white",
+        border: "1px solid var(--border)",
+        flexShrink: 0,
+        display: "grid", placeItems: "center"
+      }}>
+        <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+      </div>
+    );
+  }
+  return (
+    <div style={{
+      width: size, height: size,
+      borderRadius: radius,
+      background: "var(--surface-2)",
+      color: "var(--muted)",
+      border: "1px dashed var(--border)",
+      display: "grid", placeItems: "center",
+      flexShrink: 0
+    }}>
+      <Icons.Camera size={Math.round(size * 0.4)}/>
+    </div>
+  );
+}
+
+/* ============ Location photo upload UI (camera or gallery) ============ */
+
+function LocationImageUpload({ code, pushToast, size = "lg", compact }) {
+  const images = useLocationImages();
+  const current = images[code];
+  const toast = pushToast || ((m) => window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })));
+  const cameraRef = useRefImg(null);
+  const galleryRef = useRefImg(null);
+  const [busy, setBusy] = useStateImg(false);
+
+  const upload = async (file) => {
+    if (!file) return;
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await fileToWebp(file, { maxSize: 1000, quality: 0.85 });
+      setLocationImage(code, result.dataUrl);
+      toast("บันทึกรูปตำแหน่งแล้ว");
+    } catch (err) {
+      toast(err.message || "อัปโหลดไม่สำเร็จ");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = () => {
+    setLocationImage(code, null);
+    toast("ลบรูปแล้ว");
+  };
+
+  const big = size === "lg";
+
+  if (compact) {
+    return (
+      <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
+        <div style={{
+          position: "relative",
+          width: 84, height: 84,
+          flexShrink: 0,
+          background: current ? "white" : "var(--surface-2)",
+          border: "1.5px dashed var(--border-strong)",
+          borderRadius: 12,
+          overflow: "hidden"
+        }}>
+          {current ? (
+            <img src={current} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", background: "white" }}/>
+          ) : (
+            <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center" }}>
+              <Icons.Camera size={22} style={{ color: "var(--muted)" }}/>
+            </div>
+          )}
+          {busy && (
+            <div style={{ position: "absolute", inset: 0, background: "oklch(0.99 0.005 250 / 0.85)", display: "grid", placeItems: "center" }}>
+              <div style={{ width: 22, height: 22, border: "2.5px solid var(--surface-3)", borderTopColor: "var(--accent)", borderRadius: 999, animation: "spin 0.8s linear infinite" }}/>
+            </div>
+          )}
+          <input ref={cameraRef} type="file" accept="image/*" capture="environment" onChange={(e) => upload(e.target.files?.[0])} style={{ display: "none" }}/>
+          <input ref={galleryRef} type="file" accept="image/*" onChange={(e) => upload(e.target.files?.[0])} style={{ display: "none" }}/>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, justifyContent: "center" }}>
+          {current ? (
+            <>
+              <button className="btn btn-sm" disabled={busy} onClick={() => cameraRef.current?.click()}><Icons.Camera size={12}/> ถ่ายใหม่</button>
+              <button className="btn btn-sm" disabled={busy} onClick={() => galleryRef.current?.click()}><Icons.Refresh size={12}/> เปลี่ยนรูป</button>
+              <button className="btn btn-sm btn-danger" disabled={busy} onClick={remove}><Icons.Trash size={12}/> ลบ</button>
+            </>
+          ) : (
+            <>
+              <button className="btn btn-sm" disabled={busy} onClick={() => cameraRef.current?.click()}><Icons.Camera size={12}/> ถ่ายรูป</button>
+              <button className="btn btn-sm" disabled={busy} onClick={() => galleryRef.current?.click()}><Icons.Plus size={12}/> เลือกรูป</button>
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>ถ่ายรูปชั้นวางหรือเลือกจากคลังภาพ</span>
+            </>
+          )}
+        </div>
+
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div
+        style={{
+          position: "relative",
+          width: "100%",
+          aspectRatio: big ? "4 / 3" : "1 / 1",
+          background: current ? "white" : "var(--surface-2)",
+          border: "1.5px dashed var(--border-strong)",
+          borderRadius: 14,
+          display: "grid", placeItems: "center",
+          overflow: "hidden"
+        }}
+      >
+        {current ? (
+          <img src={current} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", background: "white" }}/>
+        ) : (
+          <div style={{ textAlign: "center", padding: 20 }}>
+            <div style={{ width: 48, height: 48, borderRadius: 14, background: "var(--surface)", border: "1px solid var(--border)", display: "grid", placeItems: "center", color: "var(--muted)", margin: "0 auto 10px" }}>
+              <Icons.Camera size={20}/>
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 500 }}>เพิ่มรูปตำแหน่ง</div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>ถ่ายรูปชั้นวางหรือเลือกจากคลังภาพ</div>
+          </div>
+        )}
+        {busy && (
+          <div style={{ position: "absolute", inset: 0, background: "oklch(0.99 0.005 250 / 0.85)", display: "grid", placeItems: "center" }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ width: 36, height: 36, border: "3px solid var(--surface-3)", borderTopColor: "var(--accent)", borderRadius: 999, animation: "spin 0.8s linear infinite", margin: "0 auto 8px" }}/>
+              <div style={{ fontSize: 12, color: "var(--fg-2)", fontWeight: 500 }}>กำลังแปลงเป็น .webp…</div>
+            </div>
+          </div>
+        )}
+        <input ref={cameraRef} type="file" accept="image/*" capture="environment" onChange={(e) => upload(e.target.files?.[0])} style={{ display: "none" }}/>
+        <input ref={galleryRef} type="file" accept="image/*" onChange={(e) => upload(e.target.files?.[0])} style={{ display: "none" }}/>
+      </div>
+
+      <div className="row" style={{ marginTop: 10, gap: 6 }}>
+        {current ? (
+          <>
+            <button className="btn btn-sm" disabled={busy} onClick={() => cameraRef.current?.click()}><Icons.Camera size={12}/> ถ่ายใหม่</button>
+            <button className="btn btn-sm" disabled={busy} onClick={() => galleryRef.current?.click()}><Icons.Refresh size={12}/> เปลี่ยนรูป</button>
+            <button className="btn btn-sm btn-danger" disabled={busy} onClick={remove}><Icons.Trash size={12}/> ลบ</button>
+            <div className="spacer"/>
+            <span className="badge badge-success" style={{ fontSize: 10 }}><span className="dot"/>.webp</span>
+          </>
+        ) : (
+          <>
+            <button className="btn btn-sm" disabled={busy} onClick={() => cameraRef.current?.click()}><Icons.Camera size={12}/> ถ่ายรูป</button>
+            <button className="btn btn-sm" disabled={busy} onClick={() => galleryRef.current?.click()}><Icons.Plus size={12}/> เลือกรูป</button>
+          </>
+        )}
+      </div>
+
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+}
+
 Object.assign(window, {
   fileToWebp,
   setProductImage,
@@ -292,5 +516,12 @@ Object.assign(window, {
   resolveProductImage,
   useProductImages,
   ProductImageUpload,
-  ProductImageThumb
+  ProductImageThumb,
+  setLocationImage,
+  loadLocationImages,
+  moveLocationImage,
+  getLocationImage,
+  useLocationImages,
+  LocationImageUpload,
+  LocationImageThumb
 });

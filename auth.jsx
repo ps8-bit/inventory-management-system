@@ -14,8 +14,23 @@ function authErrorToThai(message) {
   if (/email not confirmed/i.test(m))             return "อีเมลนี้ยังไม่ได้ยืนยัน กรุณาตรวจสอบกล่องจดหมาย";
   if (/rate|too many|429/i.test(m))               return "พยายามบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่";
   if (/token.*expired|expired.*token|invalid.*token/i.test(m)) return "ลิงก์ตั้งรหัสผ่านหมดอายุ กรุณาขอลิงก์ใหม่";
+  if (/session.*missing|auth session|missing.*session/i.test(m)) return "เซสชันสำหรับตั้งรหัสผ่านหมดอายุหรือไม่ถูกต้อง กรุณากด “ลืมรหัสผ่าน?” เพื่อขอลิงก์ใหม่";
   if (/network|fetch|failed to fetch/i.test(m))   return "เชื่อมต่อไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่";
   return "เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง";
+}
+
+/* Friendly Thai message for an auth email-link failure carried back in the URL.
+   When a recovery / invite link is expired, already-used, or rejected, Supabase
+   redirects with ?error=… / #error=… (error_code + description) and NO session —
+   without this the app would silently strand the user on the login screen with
+   no idea why and no way to set a password. Surfaced via the login notice. */
+function recoveryLinkErrorMsg(code, description) {
+  const s = (String(code || "") + " " + String(description || "")).toLowerCase();
+  if (/otp_expired|expired|verify_failed/.test(s))
+    return "ลิงก์ตั้งรหัสผ่านหมดอายุหรือถูกใช้ไปแล้ว — กรุณากด “ลืมรหัสผ่าน?” เพื่อขอลิงก์ใหม่ (ลิงก์ใช้ได้ครั้งเดียวและมีอายุจำกัด)";
+  if (/access_denied|otp_disabled|unauthorized|forbidden/.test(s))
+    return "ลิงก์ตั้งรหัสผ่านใช้งานไม่ได้ — กรุณากด “ลืมรหัสผ่าน?” เพื่อขอลิงก์ใหม่อีกครั้ง";
+  return "ไม่สามารถเปิดลิงก์ตั้งรหัสผ่านได้ — กรุณากด “ลืมรหัสผ่าน?” เพื่อขอลิงก์ใหม่อีกครั้ง";
 }
 
 function LoginScreen({ notice = "", onDismissNotice } = {}) {
@@ -51,6 +66,8 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
     const { error: err } = await authResetPassword(email);
     setLoading(false);
     if (err) { setError(authErrorToThai(err.message)); return; }
+    // Email a reset LINK; the user clicks it and lands on ResetPasswordScreen to
+    // set a new password (Root's recovery-link detection in app.jsx handles it).
     setForgotSent(true);
   };
 
@@ -75,7 +92,7 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
           <div className="stack" style={{ gap: 14 }}>
             <div style={{ padding: "14px 16px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 10, fontSize: 13, textAlign: "center", lineHeight: 1.6 }}>
               ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่<br/><strong>{email}</strong> แล้ว<br/>
-              <span style={{ fontSize: 11, opacity: 0.8 }}>ตรวจสอบกล่องจดหมาย (และโฟลเดอร์ spam)</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>กดลิงก์ในอีเมลเพื่อตั้งรหัสผ่านใหม่ (ตรวจสอบโฟลเดอร์ spam ด้วย)</span>
             </div>
             <button type="button" className="btn" style={{ justifyContent: "center" }}
               onClick={() => { setForgotSent(false); setError(""); }}>
@@ -83,7 +100,7 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
             </button>
           </div>
         ) : (
-          <form onSubmit={submit} className="stack" style={{ gap: 14 }}>
+        <form onSubmit={submit} className="stack" style={{ gap: 14 }}>
             <div className="field">
               <label htmlFor="login-email">อีเมล</label>
               <input
@@ -145,7 +162,7 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
             >
               {loading ? "กำลังเข้าสู่ระบบ…" : <>ลงชื่อเข้าใช้ <Icons.ArrowRight size={14}/></>}
             </button>
-          </form>
+        </form>
         )}
 
         <div style={{ marginTop: 22, fontSize: 11, color: "var(--muted)", textAlign: "center", lineHeight: 1.5 }}>
@@ -273,6 +290,215 @@ function ResetPasswordScreen({ onDone, onCancel, mode = "recovery" }) {
               style={{ padding: "13px 16px", fontSize: 15, justifyContent: "center", marginTop: 6,
                        opacity: (!valid) ? 0.5 : 1 }}
             >
+              {loading ? "กำลังบันทึก…" : <>บันทึกรหัสผ่านใหม่ <Icons.Check size={14}/></>}
+            </button>
+
+            {onCancel && (
+              <a className="lnk" style={{ fontSize: 11, textAlign: "center" }} href="#"
+                onClick={(e) => { e.preventDefault(); if (!loading) onCancel(); }}>
+                ยกเลิก กลับไปหน้าเข้าสู่ระบบ
+              </a>
+            )}
+          </form>
+        )}
+
+        <div style={{ marginTop: 22, fontSize: 11, color: "var(--muted)", textAlign: "center", lineHeight: 1.5 }}>
+          ระบบนี้เข้ารหัสด้วย TLS 1.3 · ปฏิบัติตาม PDPA
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Map a verifyOtp (recovery-code) failure to friendly Thai. Supabase returns
+   "Token has expired or is invalid" for BOTH a wrong code and an expired one,
+   so the combined case gets a message that covers both. */
+function otpErrorToThai(message) {
+  const m = String(message || "");
+  if (/expired.*invalid|invalid.*expired|token has expired or is invalid/i.test(m))
+    return "รหัสไม่ถูกต้องหรือหมดอายุ — ตรวจสอบรหัส OTP ในอีเมล หรือกด “ส่งรหัสอีกครั้ง”";
+  if (/expired/i.test(m))                       return "รหัสหมดอายุแล้ว กรุณากด “ส่งรหัสอีกครั้ง” เพื่อขอรหัสใหม่";
+  if (/rate|too many|429/i.test(m))             return "ขอรหัสบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่";
+  if (/invalid|incorrect|not found|otp|token/i.test(m)) return "รหัสไม่ถูกต้อง ตรวจสอบรหัส OTP ในอีเมลแล้วลองใหม่";
+  if (/network|fetch|failed to fetch/i.test(m)) return "เชื่อมต่อไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่";
+  return "ยืนยันรหัสไม่สำเร็จ กรุณาตรวจสอบรหัสแล้วลองใหม่อีกครั้ง";
+}
+
+/* ============ FORGOT-PASSWORD (OTP CODE) SCREEN ============
+   The robust, link-free reset path. The user lands here from the login screen's
+   "ลืมรหัสผ่าน?" (which already sent the email). They read the 6-digit code from
+   the email and, in one form, enter code + new password: we verifyOtp (type
+   "recovery") to establish a session, then updateUser to set the password — no
+   email link needed, so nothing breaks if the link expires or is pre-consumed.
+   Rendered by Root ABOVE the user/app gate so the session that verifyOtp creates
+   can't yank the user into the app before the new password is actually saved. */
+function ForgotPasswordScreen({ initialEmail = "", onDone, onCancel }) {
+  const email = String(initialEmail || "").trim();
+  const [code,     setCode]     = useStateAuth("");
+  const [password, setPassword] = useStateAuth("");
+  const [confirm,  setConfirm]  = useStateAuth("");
+  const [showPw,   setShowPw]   = useStateAuth(false);
+  const [loading,  setLoading]  = useStateAuth(false);
+  const [error,    setError]    = useStateAuth("");
+  const [info,     setInfo]     = useStateAuth("");
+  const [done,     setDone]     = useStateAuth(false);
+  const [cooldown, setCooldown] = useStateAuth(60);   // a code was just sent on the way in
+  const verifiedRef = useRefAuth(false);              // OTP already consumed → don't re-verify on a password-only retry
+
+  // Supabase OTP length is a project setting (6–10 digits) — this project emits
+  // 8. Don't hardcode 6: accept the configured length so we never truncate the
+  // user's real code (the original bug: an 8-digit code was sliced to 6 → wrong).
+  const codeClean = code.replace(/\D/g, "").slice(0, 10);
+  const tooShort  = password.length > 0 && password.length < 8;
+  const mismatch  = confirm.length > 0 && confirm !== password;
+  const valid     = codeClean.length >= 6 && password.length >= 8 && confirm === password;
+
+  // Resend cooldown ticker (Supabase rate-limits recovery emails to 1 / 60s).
+  useEffectAuth(() => {
+    if (cooldown <= 0) return;
+    const id = setTimeout(() => setCooldown(c => c - 1), 1000);
+    return () => clearTimeout(id);
+  }, [cooldown]);
+
+  const resend = async () => {
+    if (loading || cooldown > 0) return;
+    setError(""); setInfo("");
+    const { error: err } = await authResetPassword(email);
+    if (err) { setError(authErrorToThai(err.message)); return; }
+    verifiedRef.current = false;     // a new code invalidates any prior verify
+    setInfo("ส่งรหัสใหม่ไปที่อีเมลแล้ว");
+    setCooldown(60);
+  };
+
+  const submit = async (e) => {
+    e?.preventDefault();
+    if (loading) return;
+    if (codeClean.length < 6) { setError("กรอกรหัส OTP จากอีเมลให้ครบ"); return; }
+    if (password.length < 8)    { setError("รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร"); return; }
+    if (password !== confirm)   { setError("รหัสผ่านทั้งสองช่องไม่ตรงกัน"); return; }
+    setLoading(true);
+    setError("");
+    setInfo("");
+    // try/finally so loading is cleared exactly once even on an UNEXPECTED throw
+    // (supabase-js normally returns {error}, but a transport-layer exception must
+    // not leave the button stuck on "กำลังบันทึก…" with the typed code lost).
+    try {
+      // (1) Verify the code → establishes the recovery session. Skipped if a prior
+      //     attempt already verified, so a password-policy retry doesn't re-send a
+      //     single-use, now-consumed code to verifyOtp (which would fail).
+      if (!verifiedRef.current) {
+        const { error: vErr } = await authVerifyOtp({ email, token: codeClean, type: "recovery" });
+        if (vErr) { setError(otpErrorToThai(vErr.message)); return; }
+        verifiedRef.current = true;
+      }
+      // (2) Set the new password on the now-authenticated session.
+      const { error: uErr } = await authUpdatePassword(password);
+      if (uErr) { setError(authErrorToThai(uErr.message)); return; }
+      setDone(true);
+    } catch (err) {
+      setError(authErrorToThai(err && err.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-logo">ค</div>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>ตั้งรหัสผ่านใหม่</h1>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>
+            {done ? "เรียบร้อยแล้ว" : <>กรอกรหัส OTP ที่ส่งไปที่ <strong>{email}</strong> แล้วตั้งรหัสผ่านใหม่</>}
+          </div>
+        </div>
+
+        {done ? (
+          <div className="stack" style={{ gap: 14 }}>
+            <div style={{ padding: "14px 16px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 10, fontSize: 13, textAlign: "center", lineHeight: 1.6 }}>
+              เปลี่ยนรหัสผ่านเรียบร้อยแล้ว ✓<br/>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>รหัสผ่านใหม่พร้อมใช้งานแล้ว — กดปุ่มด้านล่างเพื่อเข้าใช้งานต่อ</span>
+            </div>
+            <button type="button" className="btn btn-accent" style={{ justifyContent: "center" }}
+              onClick={() => onDone && onDone()}>
+              เข้าสู่ระบบ <Icons.ArrowRight size={14}/>
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={submit} className="stack" style={{ gap: 14 }}>
+            <div className="field">
+              <label htmlFor="otp-code">รหัส OTP จากอีเมล</label>
+              <input
+                id="otp-code"
+                className="input input-lg"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={code}
+                onChange={e => { setCode(e.target.value.replace(/\D/g, "").slice(0, 10)); setError(""); setInfo(""); }}
+                placeholder="••••••"
+                autoFocus
+                maxLength={10}
+                style={{ letterSpacing: "0.4em", fontSize: 20, textAlign: "center", fontFamily: "var(--font-mono, monospace)" }}
+              />
+              <div className="row" style={{ justifyContent: "space-between", marginTop: 2 }}>
+                <span className="hint" style={{ color: info ? "var(--success)" : "var(--muted)" }}>
+                  {info || "ดูรหัสได้ในอีเมล (และโฟลเดอร์ spam)"}
+                </span>
+                <a className="lnk"
+                   style={{ fontSize: 11, pointerEvents: (cooldown > 0 || loading) ? "none" : "auto", opacity: (cooldown > 0 || loading) ? 0.5 : 1 }}
+                   href="#" onClick={(e) => { e.preventDefault(); resend(); }}>
+                  {cooldown > 0 ? `ส่งรหัสอีกครั้ง (${cooldown})` : "ส่งรหัสอีกครั้ง"}
+                </a>
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="otp-password">รหัสผ่านใหม่</label>
+              <div style={{ position: "relative" }}>
+                <input
+                  id="otp-password"
+                  className="input input-lg"
+                  type={showPw ? "text" : "password"}
+                  value={password}
+                  onChange={e => { setPassword(e.target.value); setError(""); }}
+                  placeholder="อย่างน้อย 8 ตัวอักษร"
+                  autoComplete="new-password"
+                  style={{ paddingRight: 44 }}
+                />
+                <button type="button" onClick={() => setShowPw(s => !s)}
+                  aria-label={showPw ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน"} title={showPw ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน"} tabIndex={-1}
+                  style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", padding: 8, color: "var(--muted)", display: "grid", placeItems: "center", lineHeight: 0 }}>
+                  {showPw
+                    ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c6.5 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19M6.61 6.61A18.5 18.5 0 0 0 2 12s3.5 8 10 8a9.12 9.12 0 0 0 5.39-1.61"/><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="m2 2 20 20"/></svg>
+                    : <Icons.Eye size={16}/>}
+                </button>
+              </div>
+              {tooShort && <span className="hint" style={{ color: "var(--danger)" }}>ต้องมีอย่างน้อย 8 ตัวอักษร</span>}
+            </div>
+
+            <div className="field">
+              <label htmlFor="otp-confirm">ยืนยันรหัสผ่านใหม่</label>
+              <input
+                id="otp-confirm"
+                className="input input-lg"
+                type={showPw ? "text" : "password"}
+                value={confirm}
+                onChange={e => { setConfirm(e.target.value); setError(""); }}
+                placeholder="พิมพ์รหัสผ่านอีกครั้ง"
+                autoComplete="new-password"
+              />
+              {mismatch && <span className="hint" style={{ color: "var(--danger)" }}>รหัสผ่านทั้งสองช่องไม่ตรงกัน</span>}
+            </div>
+
+            {error && (
+              <div style={{ padding: "10px 12px", background: "var(--danger-soft)", color: "var(--danger)", borderRadius: 8, fontSize: 12 }}>
+                {error}
+              </div>
+            )}
+
+            <button type="submit" className="btn btn-accent" disabled={loading || !valid}
+              style={{ padding: "13px 16px", fontSize: 15, justifyContent: "center", marginTop: 6, opacity: (!valid) ? 0.5 : 1 }}>
               {loading ? "กำลังบันทึก…" : <>บันทึกรหัสผ่านใหม่ <Icons.Check size={14}/></>}
             </button>
 
@@ -841,4 +1067,4 @@ const NAV_GROUP_LABELS = {
   system: "ระบบ"
 };
 
-Object.assign(window, { LoginScreen, ResetPasswordScreen, UserManagement, LayoutCustomize, NAV_GROUP_LABELS });
+Object.assign(window, { LoginScreen, ResetPasswordScreen, ForgotPasswordScreen, UserManagement, LayoutCustomize, NAV_GROUP_LABELS, recoveryLinkErrorMsg });

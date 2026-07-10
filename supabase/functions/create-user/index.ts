@@ -33,12 +33,15 @@ Deno.serve(async (req) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
-  // Verify caller is a real logged-in admin
+  // Verify caller is a real logged-in admin (role from tamper-proof app_metadata).
+  // NOTE: never gate on user_metadata — it is self-writable by any user via
+  // sb.auth.updateUser({ data: { role: 'admin' } }), so trusting it here would let
+  // any logged-in account forge an admin claim and mint a real admin account.
   const { data: { user }, error: authErr } = await admin.auth.getUser(
     authHeader.replace("Bearer ", "")
   );
   if (authErr || !user) return new Response("Unauthorized", { status: 401, headers: cors });
-  if (user.user_metadata?.role !== "admin")
+  if (user.app_metadata?.role !== "admin")
     return new Response(JSON.stringify({ error: "Forbidden — admin only" }), { status: 403, headers: { ...cors, "Content-Type": "application/json" } });
 
   const { name, email, password, role, avatar } = await req.json();

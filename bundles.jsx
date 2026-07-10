@@ -402,22 +402,54 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
     .map(c => ({ ...c, qty: channels[c.id].qty }));
 
   const confirmSell = () => {
+    // Capture before-qtys BEFORE deducting so the audit shows the true from→to
+    // (the old code read qty AFTER deduction, which is wrong when a deduct clamps at 0).
+    const before = Object.fromEntries(bundle.items.map(it => [it.sku, getEffectiveQty(it.sku)]));
     deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })));
+
+    // A bundle sale is a stock-out → it MUST become an order, or it vanishes from
+    // จัดส่ง (Outbound) / ติดตามพัสดุ (Tracking) / Analytics and the customer
+    // track-lookup. Mirrors the desktop Outbound bundle path (screens.jsx
+    // submitIssue): appendOrder is the convergence-safe single-row writer.
+    const id = (typeof genOrderId === "function") ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000);
+    const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+    const dateIso = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+    const deductions = selectedChannels.length
+      ? selectedChannels.map(c => ({ id: c.id, name: c.name, color: c.color, qty: c.qty }))
+      : [{ id: "manual", name: "ตัดสต็อก", qty: sellQty }];
+    const channelLabel = selectedChannels.length === 0 ? "ตัดสต็อก"
+      : selectedChannels.length === 1 ? selectedChannels[0].name
+      : `${selectedChannels.length} ช่องทาง`;
+    if (typeof appendOrder === "function") {
+      appendOrder({
+        id, channel: channelLabel, customer: "ลูกค้าใหม่",
+        items: bundle.items.length, status: "picking", carrier: "", tracking: "",
+        ts, dateIso, deductions, isBundle: true, bundleName: bundle.name,
+        lineItems: bundle.items.map(it => (typeof snapLineItem === "function"
+          ? snapLineItem(it.sku, null, it.qty * sellQty)
+          : { sku: it.sku, name: it.sku, qty: it.qty * sellQty, price: 0, cost: 0 }))
+      });
+    }
+
     if (typeof recordChange === "function") {
       recordChange({
         entity: "bundle",
         entityId: bundle.id,
         action: "update",
         summary: `ขาย "${bundle.name}" ${sellQty} ชุด`,
-        diffs: bundle.items.map(item => ({
-          field: item.sku,
-          before: getEffectiveQty(item.sku) + item.qty * sellQty,
-          after: getEffectiveQty(item.sku)
-        }))
+        count: bundle.items.length,
+        // audit.jsx renders e.changes with {label, from, to} — the old `diffs` key
+        // never rendered.
+        changes: bundle.items.map(item => ({
+          label: item.sku,
+          from: `${before[item.sku]} ชิ้น`,
+          to: `${getEffectiveQty(item.sku)} ชิ้น`
+        })),
+        note: `ออร์เดอร์ ${id}`
       });
     }
     setShowConfirm(false);
-    pushToast(`ตัดสต็อกชุด "${bundle.name}" ${sellQty} ชุดสำเร็จ`);
+    pushToast(`ขายชุด "${bundle.name}" ${sellQty} ชุดสำเร็จ`);
     setStockKey(k => k + 1);
     setQty(1);
     setChannels(Object.fromEntries(CHANNEL_LIST.map(c => [c.id, { on: c.id === "shopee", qty: c.id === "shopee" ? 1 : 0 }])));

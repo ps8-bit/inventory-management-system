@@ -38,12 +38,20 @@ function maskPhone(p: string) {
   return d.slice(0, 3) + "xxxx" + d.slice(-3);
 }
 
+// UTC ISO timestamp → Asia/Bangkok calendar date. A raw .slice(0,10) on the UTC
+// string files anything created 00:00–06:59 Bangkok under the previous day. Thailand
+// has no DST, so a fixed +7h offset is exact. Mirrors bangkokDateOf() in the frontend.
+function bkkDate(iso: string): string {
+  const t = Date.parse(iso || "");
+  return Number.isFinite(t) ? new Date(t + 7 * 3600 * 1000).toISOString().slice(0, 10) : (iso || "").slice(0, 10);
+}
+
 // Turn a stored label object into a public, tracking-safe shipment row.
 function labelToPublic(l: any) {
   if (!l || typeof l !== "object") return null;
   const r = l.recipient || {};
   const id = (l.soId && !/^ฉลากใหม่/.test(l.soId)) ? l.soId : l.id;
-  const dateIso = (l.created_at || "").slice(0, 10);
+  const dateIso = bkkDate(l.created_at);
   return {
     id,
     channel: "ฉลาก",
@@ -57,6 +65,25 @@ function labelToPublic(l: any) {
   };
 }
 
+// Best-effort in-memory throttle per client IP. Instances are reused (Fluid
+// Compute), so this meaningfully slows a single-source scraper — but it is NOT a
+// hard limit: a distributed attacker across instances can get more through.
+// TODO(security): back this with a shared Postgres counter for a durable cap.
+const RL_WINDOW_MS = 60_000;
+const RL_MAX = 40;
+const rlHits = new Map<string, number[]>();
+function rateLimited(ip: string): boolean {
+  if (!ip) return false;
+  const now = Date.now();
+  const arr = (rlHits.get(ip) || []).filter((t) => now - t < RL_WINDOW_MS);
+  arr.push(now);
+  rlHits.set(ip, arr);
+  if (rlHits.size > 5000) { // crude memory cap — evict stale buckets
+    for (const [k, v] of rlHits) if (!v.length || now - v[v.length - 1] > RL_WINDOW_MS) rlHits.delete(k);
+  }
+  return arr.length > RL_MAX;
+}
+
 Deno.serve(async (req) => {
   const cors = corsFor(req);
   const json = (b: unknown, s = 200) =>
@@ -64,6 +91,10 @@ Deno.serve(async (req) => {
 
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405, headers: cors });
+
+  const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim()
+          || req.headers.get("cf-connecting-ip") || req.headers.get("x-real-ip") || "";
+  if (rateLimited(ip)) return json({ success: false, error: "คำขอถี่เกินไป กรุณาลองใหม่อีกครั้งในสักครู่", results: [] }, 429);
 
   let body: any;
   try { body = await req.json(); } catch { return json({ success: false, error: "Invalid JSON" }, 400); }
@@ -103,7 +134,7 @@ Deno.serve(async (req) => {
       id: row.id, channel: row.channel || "", customer: row.customer || "",
       phone: row.phone || "", status: row.status || "picking",
       carrier, tracking,
-      items: row.item_count ?? 0, dateIso: row.date_iso || (row.created_at || "").slice(0, 10),
+      items: row.item_count ?? 0, dateIso: row.date_iso || bkkDate(row.created_at),
     });
   });
 
@@ -119,9 +150,12 @@ Deno.serve(async (req) => {
       // Name: full substring OR every typed word present (any order / spacing / title).
       name.includes(q) ||
       (toks.length > 0 && toks.every((t) => name.includes(t))) ||
-      // Tracking / order id.
-      (q.length >= 4 && trk.includes(q)) ||
-      (q.length >= 4 && String(o.id).toLowerCase().includes(q));
+      // Tracking / order id: require a specific query. A short substring (e.g. any
+      // 4 digits) turns this public endpoint into a 10k-request enumeration of the
+      // whole shipment table — real tracking numbers / order ids are far longer,
+      // and customers paste them in full, so a length floor costs legit users nothing.
+      (q.length >= 8 && trk.includes(q)) ||
+      (q.length >= 6 && String(o.id).toLowerCase().includes(q));
     if (!hit) return false;
     const key = o.id + "|" + o.tracking;
     if (seen.has(key)) return false;

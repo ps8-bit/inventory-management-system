@@ -61,7 +61,8 @@ Deno.serve(async (req) => {
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const { data: { user }, error: authErr } = await admin.auth.getUser(authHeader.replace("Bearer ", ""));
   if (authErr || !user) return json({ success: false, error: "Unauthorized" }, 401);
-  const role = (user.app_metadata as any)?.role || (user.user_metadata as any)?.role;
+  // Authorize on the tamper-proof claim ONLY — user_metadata is self-writable.
+  const role = (user.app_metadata as any)?.role;
   if (!WRITE_ROLES.includes(role)) return json({ success: false, error: "Forbidden" }, 403);
 
   const apiKey = Deno.env.get("GEMINI_API_KEY");

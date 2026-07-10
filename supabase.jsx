@@ -88,6 +88,79 @@ async function dbDeductStock(deductions) {
   return { ok: true, rows };
 }
 
+/* Map only the product columns PRESENT in `changes` (coercing numerics the same
+   way dbUpsertProducts does). Used for scoped single-/multi-row updates so a
+   field edit never has to rewrite qty (or the whole catalog). */
+const _PRODUCT_COL_MAP = {
+  name:     v => v,
+  cat:      v => v,
+  cost:     v => Number(v) || 0,
+  price:    v => Number(v) || 0,
+  qty:      v => Number(v) || 0,
+  reserved: v => Number(v) || 0,
+  reorder:  v => Number(v) || 0,
+  loc:      v => v || '-',
+  supplier: v => v || 'ไม่ระบุ',
+  brand:    v => v || '',
+};
+function _mapProductPatch(changes) {
+  const patch = {};
+  for (const k in _PRODUCT_COL_MAP) if (k in changes) patch[k] = _PRODUCT_COL_MAP[k](changes[k]);
+  return patch;
+}
+/* Scoped update of ONE product's changed columns (never the whole catalog, and
+   caller decides whether qty is included). .select() detects an RLS-blocked
+   write (0 rows, no error), same as dbUpsertProducts. */
+async function dbUpdateProduct(sku, changes) {
+  const patch = _mapProductPatch(changes);
+  if (!Object.keys(patch).length) return { ok: true };
+  patch.updated_at = new Date().toISOString();
+  const { data, error } = await sb.from('products').update(patch).eq('sku', sku).select('sku');
+  if (error) { console.error('[DB] update product', sku, ':', error.message); return { error: error.message }; }
+  if (!data || !data.length) return { error: 'PERMISSION_OR_MISSING' };
+  return { ok: true };
+}
+/* Scoped update of the SAME columns across many skus (e.g. a category rename or
+   a location re-point) — one UPDATE, no qty, no whole-catalog rewrite. */
+async function dbUpdateProducts(skus, changes) {
+  const arr = Array.isArray(skus) ? skus : [...skus];
+  if (!arr.length) return { ok: true };
+  const patch = _mapProductPatch(changes);
+  if (!Object.keys(patch).length) return { ok: true };
+  patch.updated_at = new Date().toISOString();
+  const { data, error } = await sb.from('products').update(patch).in('sku', arr).select('sku');
+  if (error) { console.error('[DB] update products:', error.message); return { error: error.message }; }
+  if (!data || data.length < arr.length) {
+    console.error('[DB] update products blocked (RLS): updated', (data ? data.length : 0), 'of', arr.length);
+    return { error: 'PERMISSION_OR_MISSING' };
+  }
+  return { ok: true };
+}
+/* Atomic signed stock adjustment (adjust-stock.sql) — the inbound/adjust twin of
+   deduct_stock. One UPDATE per sku with qty = GREATEST(0, qty + delta), so two
+   devices receiving/adjusting the same sku serialize on the row lock instead of
+   clobbering via a stale absolute write. Same return contract as dbDeductStock. */
+async function dbAdjustStock(adjustments) {
+  const items = (adjustments || [])
+    .filter(a => a && a.sku && Number.isFinite(Number(a.delta)) && Number(a.delta) !== 0)
+    .map(a => ({ sku: a.sku, delta: Number(a.delta) }));
+  if (!items.length) return { ok: true, rows: [] };
+  const { data, error } = await sb.rpc('adjust_stock', { adjustments: items });
+  if (error) {
+    console.error('[DB] adjust_stock:', error.message);
+    const missing = (error.code === 'PGRST202') || /function|adjust_stock/i.test(error.message || '');
+    return { error: missing ? 'RPC_MISSING' : error.message };
+  }
+  const rows = Array.isArray(data) ? data : [];
+  const got = new Set(rows.map(r => r.sku));
+  const want = new Set(items.map(i => i.sku));
+  if (got.size < want.size) {
+    console.error('[DB] adjust_stock blocked/missing:', got.size, 'of', want.size, 'SKUs updated');
+    return { error: 'PERMISSION_OR_MISSING', rows };
+  }
+  return { ok: true, rows };
+}
+
 /* ═══════════════════════════════════════════
    ORDERS
    ═══════════════════════════════════════════ */
@@ -113,7 +186,7 @@ function _orderToRow(o) {
   };
 }
 function _rowToOrder(row) {
-  const dateIso = row.date_iso || row.created_at?.slice(0, 10) || '';
+  const dateIso = row.date_iso || ((typeof bangkokDateOf === "function") ? bangkokDateOf(row.created_at) : row.created_at?.slice(0, 10)) || '';
   const ts = row.created_at
     ? new Date(row.created_at).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', hour12: false })
     : (row.ts || '');
@@ -266,10 +339,37 @@ async function dbLoadState(key) {
   return data ? data.value : null;
 }
 async function dbSaveState(key, value) {
+  // Clearing a key: `value` is `jsonb NOT NULL`, so upserting null violates the
+  // constraint. Delete the row instead — this fires a realtime DELETE whose
+  // payload.old.key lets listeners (img:/locimg: handlers) treat the key as
+  // cleared, and returns null from dbLoadState on reload. DELETE RLS is
+  // admin/manager only (same as the app's canDeleteData gate).
+  if (value === null || value === undefined) {
+    const { error } = await sb.from('app_state').delete().eq('key', key);
+    if (error) { console.error('[DB] clear app_state', key, ':', error.message); return { error: error.message }; }
+    return { ok: true };
+  }
   const { data, error } = await sb.from('app_state')
     .upsert({ key, value, updated_at: new Date().toISOString() }).select('key');
   if (error) { console.error('[DB] save app_state', key, ':', error.message); return { error: error.message }; }
   if (!data || !data.length) return { error: 'PERMISSION_OR_MISSING' };
+  return { ok: true };
+}
+
+/* Server-side MERGE of a partial jsonb patch into an app_state map (see
+   supabase/merge-app-state.sql). Used for order_overrides so concurrent edits to
+   different orders don't clobber each other via a whole-map upsert. Returns null
+   when the merge_app_state function isn't deployed yet, so the caller can fall
+   back to the (racy) whole-map dbSaveState — mirrors the server_now/deduct_stock
+   RPC-with-fallback pattern. */
+async function dbMergeState(key, patch) {
+  const { data, error } = await sb.rpc('merge_app_state', { k: key, patch });
+  if (error) {
+    if (error.code === '42883' || error.code === 'PGRST202' || /merge_app_state|function .* does not exist/i.test(error.message || ''))
+      return null; // function not deployed → signal fallback
+    console.error('[DB] merge app_state', key, ':', error.message);
+    return { error: error.message };
+  }
   return { ok: true };
 }
 /* Authoritative server wall-clock (epoch ms), used by the working-hours access
@@ -304,6 +404,16 @@ async function dbLoadProductImages() {
   if (error) { console.error('[DB] load product images:', error.message); return null; }
   const m = {};
   (data || []).forEach(r => { if (r && r.value != null) m[r.key.slice(4)] = r.value; });
+  return m;
+}
+// Location (bin/shelf) photos live in app_state too — one row per position code,
+// key "locimg:<code>", value is the WebP data-URL string. Same shape as product
+// images above, just keyed by the position's full locCode() string.
+async function dbLoadLocationImages() {
+  const { data, error } = await sb.from('app_state').select('key, value').like('key', 'locimg:%');
+  if (error) { console.error('[DB] load location images:', error.message); return null; }
+  const m = {};
+  (data || []).forEach(r => { if (r && r.value != null) m[r.key.slice(7)] = r.value; });
   return m;
 }
 
@@ -400,6 +510,19 @@ function setupRealtimeSync() {
         if (v == null) delete next[sku]; else next[sku] = v;
         window._DB_PRODUCT_IMAGES = next;
         window.dispatchEvent(new CustomEvent('ims-images-change'));
+        return;
+      }
+      // Location (bin/shelf) photo rows (key "locimg:<code>") — refresh just that
+      // one photo and fire ims-location-images-change with a fresh object ref.
+      // ('locimg:' does not match the img: check above — it starts with 'l' — so
+      // ordering vs that branch doesn't matter.)
+      if (key && key.indexOf('locimg:') === 0) {
+        const code = key.slice(7);
+        const v = await dbLoadState(key);
+        const next = { ...(window._DB_LOCATION_IMAGES || {}) };
+        if (v == null) delete next[code]; else next[code] = v;
+        window._DB_LOCATION_IMAGES = next;
+        window.dispatchEvent(new CustomEvent('ims-location-images-change'));
         return;
       }
       // Shared KV state (categories / locations / stock_adj / order_overrides).
@@ -576,6 +699,23 @@ async function dbInit() {
       }
     }).catch(() => {});
 
+    /* Location (bin/shelf) photos — same background-load / seed pattern as
+       product images above, just keyed by locCode() instead of SKU. */
+    dbLoadLocationImages().then(imgs => {
+      if (!imgs) return;
+      if (Object.keys(imgs).length) {
+        window._DB_LOCATION_IMAGES = imgs;
+        window.dispatchEvent(new CustomEvent('ims-location-images-change'));
+      } else {
+        const raw = localStorage.getItem('ims_location_images');
+        const o = raw && JSON.parse(raw);
+        if (o && typeof o === 'object' && Object.keys(o).length) {
+          window._DB_LOCATION_IMAGES = o;
+          Object.entries(o).forEach(([code, url]) => { if (url) dbSaveState('locimg:' + code, url).catch(() => {}); });
+        }
+      }
+    }).catch(() => {});
+
     /* Labels: reconcile local ↔ cloud. This device may hold labels in
        localStorage that never reached the cloud (created before the table
        existed, or saved while another device owned the cloud copy). Merge by id,
@@ -703,19 +843,30 @@ Object.assign(window, {
   sb, readProductNameFromImage, resolveWebImages, buildBackupSnapshot, downloadBackup,
   dbInit, setupRealtimeSync,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
+  dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,
   dbLoadLabels,        dbUpsertLabels,       dbDeleteLabel,
   dbLoadStoreSettings, dbSaveStoreSettings,
-  dbLoadState,         dbSaveState,          dbLoadProductImages,
+  dbLoadState,         dbSaveState,          dbLoadProductImages,  dbLoadLocationImages,
   dbServerTimeMs,
   dbInsertAuditEntry,  dbLoadAuditLog,    dbDeleteAuditLog,
   manageUsers,         lineTest,           lineBotPreview,
   // Auth helpers — thin wrappers so auth.jsx / app.jsx never import sb directly
   authSignIn:        (email, password) => sb.auth.signInWithPassword({ email, password }),
-  authSignOut:       ()                => sb.auth.signOut(),
+  // scope:'local' clears only this device's persisted session (used by the
+  // mid-session force-out so an OFFLINE kick still lands on a clean login
+  // screen); no arg = default global scope (used by the deliberate logout
+  // button so it revokes the refresh token server-side on shared devices).
+  authSignOut:       (scope)           => sb.auth.signOut(scope ? { scope } : undefined),
   authResetPassword: (email)           => sb.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin }),
   authUpdatePassword:(password)        => sb.auth.updateUser({ password }),
+  // Consume a token_hash carried by a recovery/invite email link. Newer Supabase
+  // email templates send ?token_hash=…&type=recovery instead of the implicit
+  // #access_token hash, and supabase-js does NOT auto-consume token_hash — we
+  // must verifyOtp here to establish the temporary session BEFORE the user can
+  // set a new password (otherwise authUpdatePassword fails "Auth session missing").
+  authVerifyOtp:     (params)          => sb.auth.verifyOtp(params),
   authGetSession:    ()                => sb.auth.getSession(),
   // Re-validates the current access token against GoTrue. A suspended (banned)
   // user is rejected here (403) even while their cached JWT is still unexpired —
