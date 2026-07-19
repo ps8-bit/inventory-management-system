@@ -532,7 +532,20 @@ function CategoryManager({ pushToast }) {
 const BACKUP_LABELS = { products: "สินค้า", orders: "ออร์เดอร์", bundles: "ชุดสินค้า", bundle_items: "รายการในชุด", labels: "ฉลาก", store_settings: "ตั้งค่าร้าน", app_state: "ข้อมูลระบบ", audit_log: "ประวัติการแก้ไข" };
 function BackupPanel({ pushToast }) {
   const [busy, setBusy] = useStateSet(false);
+  const [cloudBusy, setCloudBusy] = useStateSet(false);
   const [last, setLast] = useStateSet(null);
+  const [lastRun, setLastRun] = useStateSet(null); // app_state "last_backup" — written by the Edge Function
+  useEffectSet(() => {
+    let alive = true;
+    (async () => {
+      try {
+        if (typeof dbLoadState !== "function") return;
+        const v = await dbLoadState("last_backup");
+        if (alive && v) setLastRun(v);
+      } catch (_) {}
+    })();
+    return () => { alive = false; };
+  }, []);
   const run = async () => {
     if (busy) return;
     setBusy(true);
@@ -546,6 +559,21 @@ function BackupPanel({ pushToast }) {
       if (pushToast) pushToast("สำรองข้อมูลไม่สำเร็จ: " + ((e && e.message) || e));
     } finally { setBusy(false); }
   };
+  const runCloud = async () => {
+    if (cloudBusy) return;
+    setCloudBusy(true);
+    try {
+      if (typeof runCloudBackup !== "function") throw new Error("ฟีเจอร์ยังไม่พร้อม");
+      const r = await runCloudBackup();
+      if (r.error) throw new Error(r.error);
+      const d = r.data || {};
+      if (pushToast) pushToast(`สำรองเข้า Drive แล้ว: ${d.file || ""}${d.stockFile ? " + " + d.stockFile : ""}`);
+      if (d.stockError && pushToast) pushToast("แต่รายงานสต็อก Excel ไม่สำเร็จ: " + d.stockError);
+      setLastRun({ status: d.stockError ? "partial" : "ok", at: new Date().toISOString(), file: d.file, stockFile: d.stockFile });
+    } catch (e) {
+      if (pushToast) pushToast("สำรองเข้า Drive ไม่สำเร็จ: " + ((e && e.message) || e));
+    } finally { setCloudBusy(false); }
+  };
   return (
     <div className="card">
       <div style={{ marginBottom: 14 }}>
@@ -556,8 +584,16 @@ function BackupPanel({ pushToast }) {
         <button className="btn btn-accent" onClick={run} disabled={busy}>
           <Icons.Down size={14}/> {busy ? "กำลังสำรอง…" : "ดาวน์โหลดไฟล์สำรอง"}
         </button>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>ได้ไฟล์: <span className="mono">ims-backup-วันที่.json</span></span>
+        <button className="btn" onClick={runCloud} disabled={cloudBusy} title="อัปโหลด JSON + รายงานสต็อก Excel เข้า Google Drive ทันที (เฉพาะแอดมิน)">
+          <Icons.Refresh size={14}/> {cloudBusy ? "กำลังสำรองเข้า Drive…" : "สำรองเข้า Drive ตอนนี้"}
+        </button>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>ได้ไฟล์: <span className="mono">ims-backup-วันที่.json</span> + <span className="mono">stock-report-วันที่.xlsx</span></span>
       </div>
+      {lastRun && lastRun.at && (
+        <div style={{ marginTop: 10, fontSize: 12, color: lastRun.status === "ok" ? "var(--muted)" : "var(--danger)" }}>
+          สำรองเข้า Drive ล่าสุด: {new Date(lastRun.at).toLocaleString("th-TH")} · {lastRun.status === "ok" ? "สำเร็จ" : lastRun.status === "partial" ? "สำเร็จบางส่วน" : "ไม่สำเร็จ"}{lastRun.file ? " · " + lastRun.file : ""}
+        </div>
+      )}
       {last && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginTop: 14 }}>
           {Object.entries(last).map(([k, n]) => (

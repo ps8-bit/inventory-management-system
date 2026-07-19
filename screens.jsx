@@ -2323,6 +2323,7 @@ function Inventory({ pushToast, density, goTo }) {
   const [selected, setSelected] = useState({}); // { sku: true }
   const [bulkOpen, setBulkOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [adjOpen, setAdjOpen] = useState(false);
   const [stockKey, setStockKey] = useState(0);
 
   // Re-render whenever the shared stock-adjustment layer OR the product catalog changes
@@ -2453,6 +2454,9 @@ function Inventory({ pushToast, density, goTo }) {
         </div>
         <div className="row">
           <button className="btn" onClick={() => {
+            if (typeof downloadStockReport === "function") downloadStockReport(liveProducts);
+          }}><Icons.Pkg size={14}/> รายงานสต็อก Excel</button>
+          <button className="btn" onClick={() => {
             exportInventoryCsv(filtered, `สินค้าคงคลัง_${new Date().toISOString().slice(0,10)}.csv`);
             pushToast(`ส่งออก ${filtered.length} รายการเป็น CSV แล้ว`);
           }}><Icons.Pkg size={14}/> Export CSV</button>
@@ -2463,6 +2467,7 @@ function Inventory({ pushToast, density, goTo }) {
             w.document.close();
           }}><Icons.Print/> พิมพ์รายงาน</button>
           <button className="btn" onClick={() => goTo && goTo("import")}><Icons.Pkg size={14}/> นำเข้า SKU จาก Excel</button>
+          {canAdjustStock() && <button className="btn" onClick={() => setAdjOpen(true)}><Icons.Refresh size={14}/> ปรับสต็อก</button>}
           <button className="btn btn-accent" onClick={() => setAddOpen(true)}><Icons.Plus/> เพิ่ม SKU</button>
         </div>
       </div>
@@ -2589,6 +2594,7 @@ function Inventory({ pushToast, density, goTo }) {
       {(() => { const op = open ? liveProducts.find(p => p.sku === open) : null; return op ? <ProductDrawer product={op} onClose={() => setOpen(null)} pushToast={pushToast}/> : null; })()}
       {bulkOpen && <BulkEditModal count={selectedCount} products={products} categories={cats.filter(c => c !== "ทั้งหมด")} onClose={() => setBulkOpen(false)} onApply={applyBulkEdit}/>}
       {addOpen && <AddSkuModal products={products} categories={cats.filter(c => c !== "ทั้งหมด")} onClose={() => setAddOpen(false)} onAdd={addProduct}/>}
+      {adjOpen && <StockAdjustModal product={null} onClose={() => setAdjOpen(false)} pushToast={pushToast}/>}
     </div>
   );
 }
@@ -2974,14 +2980,19 @@ function ProductDrawer({ product, onClose, pushToast }) {
       </body></html>`);
     w.document.close();
   };
-  // fake movement history
-  const moves = [
-    { t: "วันนี้ 09:24", type: "in",  qty: +80, ref: "GR-26051901", who: "สมชาย" },
-    { t: "เมื่อวาน 16:12", type: "out", qty: -2, ref: "SO-26051820", who: "ภาณุพงศ์" },
-    { t: "เมื่อวาน 14:55", type: "out", qty: -1, ref: "SO-26051815", who: "ระบบ" },
-    { t: "2 วันก่อน 10:14", type: "in", qty: +60, ref: "GR-26051704", who: "สมชาย" },
-    { t: "3 วันก่อน 11:32", type: "out", qty: -4, ref: "SO-26051611", who: "วรรณา" }
-  ];
+  // Real adjustment history from stock_adjustments (replaces the old hardcoded
+  // demo rows). null = loading; [] = loaded, none yet. Re-fetched per sku.
+  const [moves, setMoves] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    setMoves(null);
+    if (typeof dbLoadStockAdjustments === "function") {
+      dbLoadStockAdjustments(product.sku, 5)
+        .then(rows => { if (!dead) setMoves(Array.isArray(rows) ? rows : []); })
+        .catch(() => { if (!dead) setMoves([]); });
+    } else setMoves([]);
+    return () => { dead = true; };
+  }, [product.sku]);
 
   return (
     <>
@@ -3084,17 +3095,25 @@ function ProductDrawer({ product, onClose, pushToast }) {
           </div>
 
           <div style={{ marginTop: 22 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>การเคลื่อนไหวล่าสุด</div>
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>ประวัติปรับสต็อกล่าสุด</div>
             <div className="stack" style={{ gap: 8 }}>
-              {moves.map((m, i) => (
-                <div key={i} className="row" style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8, gap: 12 }}>
-                  <ActivityDot type={m.type}/>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13 }}>{m.ref}</div>
-                    <div style={{ fontSize: 11, color: "var(--muted)" }}>{m.t} · {m.who}</div>
+              {moves === null && (
+                <div style={{ fontSize: 12, color: "var(--muted)", padding: 10 }}>กำลังโหลด…</div>
+              )}
+              {moves && moves.length === 0 && (
+                <div style={{ fontSize: 12, color: "var(--muted)", padding: 10, background: "var(--surface-2)", borderRadius: 8 }}>ยังไม่มีการปรับสต็อก</div>
+              )}
+              {(moves || []).map(m => (
+                <div key={m.id} className="row" style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8, gap: 12 }}>
+                  <ActivityDot type={m.delta > 0 ? "in" : "out"}/>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.reason || "ปรับสต็อก"}</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                      {new Date(m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} · {m.created_by || "ระบบ"}
+                    </div>
                   </div>
-                  <div className="tnum" style={{ fontSize: 14, fontWeight: 500, color: m.qty > 0 ? "var(--success)" : "var(--danger)" }}>
-                    {m.qty > 0 ? "+" : ""}{m.qty}
+                  <div className="tnum" style={{ fontSize: 14, fontWeight: 500, color: m.delta > 0 ? "var(--success)" : "var(--danger)" }}>
+                    {m.delta > 0 ? "+" : ""}{m.delta}
                   </div>
                 </div>
               ))}
@@ -3102,7 +3121,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
           </div>
         </div>
         <div className="drawer-foot">
-          <button className="btn" onClick={() => setAdjOpen(true)}><Icons.Refresh size={14}/> ปรับสต็อก</button>
+          {canAdjustStock() && <button className="btn" onClick={() => setAdjOpen(true)}><Icons.Refresh size={14}/> ปรับสต็อก</button>}
           <button className="btn btn-primary" onClick={() => setEditOpen(true)}><Icons.Edit size={14}/> แก้ไขข้อมูล</button>
         </div>
       </div>
@@ -3129,25 +3148,8 @@ function ProductDrawer({ product, onClose, pushToast }) {
         <StockAdjustModal
           product={PRODUCTS.find(p => p.sku === product.sku) || product}
           onClose={() => setAdjOpen(false)}
-          onApply={(delta, reason) => {
-            adjustProductQty(product.sku, delta); // atomic ±delta, no overlay pollution
-            try {
-              const a = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
-              delete a[product.sku];
-              localStorage.setItem("ims_stock_adj", JSON.stringify(a));
-            } catch (e) {}
-            pushToast(`ปรับสต็อก ${product.sku} ${delta > 0 ? "+" : ""}${delta} ชิ้น`);
-            if (typeof recordChange === "function") {
-              recordChange({
-                entity: "product", entityId: product.sku, action: "update",
-                summary: `ปรับสต็อก ${product.name} (${product.sku}) ${delta > 0 ? "+" : ""}${delta} ชิ้น`,
-                changes: [{ label: "ปรับจำนวน", to: `${delta > 0 ? "+" : ""}${delta} ชิ้น` }],
-                note: reason || ""
-              });
-            }
-            setAdjOpen(false);
-            onClose();
-          }}
+          pushToast={pushToast}
+          onApply={() => { setAdjOpen(false); onClose(); }}
         />
       )}
     </>
@@ -3258,61 +3260,146 @@ function ProductEditModal({ product, onClose, onSave }) {
   );
 }
 
-/* Quick stock adjustment — applies a delta through the shared stock-adjustment layer */
-function StockAdjustModal({ product, onClose, onApply }) {
-  const [mode, setMode] = useState("add"); // add | remove | set
+/* Reason-driven stock adjustment (นับผิด / เสียหาย / ขายนอกระบบ) — applies via
+   the shared applyStockAdjustment choke point (data.jsx), which also writes the
+   audit trail + stock_adjustments history. Opened WITH a product (ProductDrawer)
+   it adjusts that product then calls onApply; opened WITHOUT one (Inventory
+   header) it shows a scan/pick stage first and resets back to it after each
+   apply, so logging a batch of external-platform sales is one loop per item. */
+function StockAdjustModal({ product, onClose, onApply, pushToast }) {
+  const [sel, setSel] = useState(product || null);
+  const [mode, setMode] = useState("remove"); // add | remove | set
   const [amount, setAmount] = useState("");
-  const [reason, setReason] = useState("");
-  const effQty = (typeof getEffectiveQty === "function") ? getEffectiveQty(product.sku) : product.qty;
+  const [reasonId, setReasonId] = useState("");
+  const [note, setNote] = useState("");
+  const [scan, setScan] = useState("");
+  const scanRef = useRef(null);
+  const toast = pushToast || (() => {});
+  const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
+
+  // Scan/typed-SKU selection — same exact-match funnel as StockTake.submitScan
+  // (product SELECTION only; not a third barcode-resolution path).
+  const submitScan = (code) => {
+    const q = String(code ?? scan).trim();
+    if (!q) return;
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === q.toLowerCase());
+    if (!p) {
+      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      toast("ไม่พบ SKU: " + q);
+      return;
+    }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setScan("");
+    setSel(p);
+  };
+
+  const effQty = sel ? ((typeof getEffectiveQty === "function") ? getEffectiveQty(sel.sku) : sel.qty) : 0;
   const n = parseInt(amount);
   const valid = Number.isFinite(n) && n >= 0;
   let delta = 0;
-  if (valid) {
+  if (valid && sel) {
     if (mode === "add") delta = n;
     else if (mode === "remove") delta = -Math.min(n, effQty);
     else delta = n - effQty;
   }
   const resultQty = effQty + delta;
+  const canConfirm = !!sel && valid && delta !== 0 && !!reason && (!reason.requireNote || note.trim());
+
+  const resetForNext = () => {
+    setSel(null); setMode("remove"); setAmount(""); setReasonId(""); setNote(""); setScan("");
+    setTimeout(() => scanRef.current?.focus(), 60);
+  };
+
+  const confirm = () => {
+    if (!canConfirm) return;
+    const res = applyStockAdjustment({ sku: sel.sku, delta, reason, note });
+    if (!res.ok) { toast("ปรับสต็อกไม่สำเร็จ"); return; }
+    if (res.eff) toast(`ปรับสต็อก ${sel.sku} ${res.eff > 0 ? "+" : ""}${res.eff} ชิ้น — ${reason.label}`);
+    else toast(`${sel.sku} ไม่มีการเปลี่ยนแปลง (คงเหลือ 0 อยู่แล้ว)`);
+    if (product) onApply?.();
+    else resetForNext(); // batch loop: back to the scan stage for the next item
+  };
 
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 300 }}/>
-      <div className="modal" style={{ maxWidth: 440, zIndex: 301 }}>
+      <div className="modal" style={{ maxWidth: 480, zIndex: 301 }}>
         <div className="modal-head">
           <div>
             <h3>ปรับสต็อก</h3>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{product.name} · คงเหลือ {effQty} ชิ้น</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+              {sel ? `${sel.name} · คงเหลือ ${effQty} ชิ้น` : "สำหรับนับสต็อกผิด สินค้าเสียหาย หรือขายนอกระบบ (Shopee / Lazada / หน้าร้าน)"}
+            </div>
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
         <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div className="seg" style={{ width: "100%" }}>
-            <button className={mode === "add" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("add")}>เพิ่มเข้า</button>
-            <button className={mode === "remove" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("remove")}>หักออก</button>
-            <button className={mode === "set" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("set")}>ตั้งค่าเป็น</button>
-          </div>
-          <div className="field">
-            <label>{mode === "set" ? "จำนวนคงเหลือใหม่" : "จำนวน (ชิ้น)"}</label>
-            <input className="input" type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" style={{ textAlign: "right" }} autoFocus/>
-          </div>
-          <div className="field">
-            <label>เหตุผล <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span></label>
-            <input className="input" value={reason} onChange={e => setReason(e.target.value)} placeholder="เช่น ตรวจนับสต็อก, สินค้าเสียหาย"/>
-          </div>
-          {valid && (
-            <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 12, color: "var(--muted)" }}>คงเหลือหลังปรับ</span>
-              <span className="tnum" style={{ fontSize: 20, fontWeight: 600, color: resultQty < 0 ? "var(--danger)" : "var(--fg)" }}>
-                {effQty} → {Math.max(0, resultQty)}
-              </span>
-            </div>
+          {!sel && (
+            <>
+              <div className="field">
+                <label>สแกนบาร์โค้ด / พิมพ์ SKU</label>
+                <input ref={scanRef} className="input" value={scan} onChange={e => setScan(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") submitScan(); }}
+                  placeholder="ยิงบาร์โค้ดหรือพิมพ์ SKU แล้วกด Enter" autoFocus/>
+              </div>
+              <div className="field">
+                <label>หรือเลือกจากรายการ</label>
+                <SkuPicker value="" onChange={sku => {
+                  const p = PRODUCTS.find(x => x.sku === sku);
+                  if (p) { if (typeof playScanBeep === "function") playScanBeep(); setSel(p); }
+                }} products={PRODUCTS}/>
+              </div>
+            </>
+          )}
+          {sel && (
+            <>
+              {!product && (
+                <div className="row" style={{ justifyContent: "space-between", padding: "8px 12px", background: "var(--surface-2)", borderRadius: 10 }}>
+                  <span className="mono" style={{ fontSize: 12 }}>{sel.sku}</span>
+                  <button className="btn btn-sm" onClick={resetForNext}>เปลี่ยนสินค้า</button>
+                </div>
+              )}
+              <div className="seg" style={{ width: "100%" }}>
+                <button className={mode === "add" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("add")}>เพิ่มเข้า</button>
+                <button className={mode === "remove" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("remove")}>หักออก</button>
+                <button className={mode === "set" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("set")}>ตั้งค่าเป็น</button>
+              </div>
+              <div className="field">
+                <label>{mode === "set" ? "จำนวนคงเหลือใหม่" : "จำนวน (ชิ้น)"}</label>
+                <input className="input" type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" style={{ textAlign: "right" }} autoFocus={!!product}/>
+              </div>
+              <div className="field">
+                <label>เหตุผล <span style={{ color: "var(--danger)" }}>*</span></label>
+                <div className="adj-reasons">
+                  {ADJUST_REASONS.map(r => (
+                    <button key={r.id} type="button" className={"adj-reason" + (reasonId === r.id ? " on" : "")} onClick={() => setReasonId(r.id)}>{r.label}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="field">
+                <label>หมายเหตุ {reason && reason.requireNote
+                  ? <span style={{ color: "var(--danger)" }}>*</span>
+                  : <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span>}</label>
+                <input className="input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, อ้างอิงการนับ"/>
+              </div>
+              {valid && (
+                <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>คงเหลือหลังปรับ</span>
+                  <span className="tnum" style={{ fontSize: 20, fontWeight: 600, color: resultQty < 0 ? "var(--danger)" : "var(--fg)" }}>
+                    {effQty} → {Math.max(0, resultQty)}
+                  </span>
+                </div>
+              )}
+            </>
           )}
         </div>
         <div className="modal-foot">
-          <button className="btn" onClick={onClose}>ยกเลิก</button>
-          <button className="btn btn-primary" disabled={!valid || delta === 0} onClick={() => onApply(delta, reason)} style={(!valid || delta === 0) ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
-            <Icons.Check size={14}/> ยืนยันปรับสต็อก
-          </button>
+          <button className="btn" onClick={onClose}>{product ? "ยกเลิก" : "ปิด"}</button>
+          {sel && (
+            <button className="btn btn-primary" disabled={!canConfirm} onClick={confirm} style={!canConfirm ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+              <Icons.Check size={14}/> ยืนยันปรับสต็อก
+            </button>
+          )}
         </div>
       </div>
     </>
@@ -3331,10 +3418,13 @@ function Stat({ label, value }) {
 /* ========= LOCATIONS ========= */
 function Locations() {
   const [tree, setTree] = useState(loadLocTree);
-  const [selected, setSelected] = useState(null); // { building, floor, pos, code }
+  const [selected, setSelected] = useState(null); // { building, floor, pos, code, highlightSku? }
+  const [finderQ, setFinderQ] = useState("");
 
   useEffect(() => {
-    const h = () => setTree(loadLocTree());
+    // Shallow-copy: once the cloud tree is loaded, loadLocTree() returns the same
+    // object reference every time, and setState would bail out — freezing SKU counts.
+    const h = () => setTree({ ...loadLocTree() });
     window.addEventListener("ims-locations-change", h);
     window.addEventListener("ims-products-change", h);
     return () => {
@@ -3365,6 +3455,64 @@ function Locations() {
         <div className="row">
           <button className="btn btn-primary" onClick={askBuilding}><Icons.Plus/> เพิ่มอาคาร</button>
         </div>
+      </div>
+
+      {/* ── Product finder: search a product → see & jump to its storage position ── */}
+      <div className="card" style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
+          <Icons.Search size={15} style={{ color: "var(--muted)", flexShrink: 0 }}/>
+          <input
+            value={finderQ}
+            onChange={e => setFinderQ(e.target.value)}
+            placeholder="ค้นหาสินค้า (ชื่อ / SKU / สแกนบาร์โค้ด) เพื่อเช็คตำแหน่งจัดเก็บ..."
+            style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 14, color: "var(--fg)", fontFamily: "inherit" }}
+          />
+          {finderQ && <button className="btn btn-ghost btn-icon" title="ล้างคำค้น" onClick={() => setFinderQ("")}><Icons.X size={14}/></button>}
+        </div>
+        {finderQ.trim() && (() => {
+          const res = searchProductsForLocation(finderQ, 12);
+          return (
+            <div className="stack" style={{ gap: 6, marginTop: 12 }}>
+              {res.hits.length === 0 && (
+                <div style={{ fontSize: 13, color: "var(--muted)", padding: "14px 4px", textAlign: "center" }}>ไม่พบสินค้า "{finderQ}"</div>
+              )}
+              {res.hits.map(p => {
+                const st = stockStatus(p);
+                const parts = p.loc ? locParts(p.loc) : null;
+                return (
+                  <div key={p.sku} className="row"
+                    onClick={() => parts && setSelected({ building: parts.building, floor: parts.floor, pos: parts.pos, code: p.loc, highlightSku: p.sku })}
+                    style={{ gap: 12, padding: 10, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, cursor: parts ? "pointer" : "default" }}>
+                    {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={44} radius={8}/>}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                      <div className="row" style={{ gap: 8, marginTop: 2 }}>
+                        <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</span>
+                        <span className={"badge " + st.cls} style={{ fontSize: 10 }}>{p.qty} ชิ้น</span>
+                      </div>
+                    </div>
+                    {parts ? (
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+                          <Icons.Map size={13} style={{ color: "var(--accent)" }}/>
+                          <span className="mono" style={{ fontSize: 15, fontWeight: 700 }}>{parts.pos}</span>
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{parts.building} · {parts.floor}</div>
+                      </div>
+                    ) : (
+                      <span className="badge badge-neutral" style={{ fontSize: 10, flexShrink: 0 }}>ยังไม่ระบุตำแหน่ง</span>
+                    )}
+                  </div>
+                );
+              })}
+              {res.total > res.hits.length && (
+                <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", paddingTop: 2 }}>
+                  แสดง {res.hits.length} จาก {res.total} รายการ — พิมพ์เพิ่มเพื่อค้นหาให้แคบลง
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {buildings.length === 0 ? (
@@ -3424,17 +3572,48 @@ function Locations() {
 
       <div className="row" style={{ padding: "12px 16px", background: "var(--surface-2)", borderRadius: 12, fontSize: 12, color: "var(--muted)", gap: 12, alignItems: "center" }}>
         <Icons.Refresh size={16}/>
-        <span>จำนวน SKU ของแต่ละตำแหน่งคำนวณจากสินค้าจริง — กำหนดตำแหน่งให้สินค้าได้ในหน้าสินค้า / รับเข้า</span>
+        <span>จำนวน SKU ของแต่ละตำแหน่งคำนวณจากสินค้าจริง — เปิดตำแหน่งแล้วกด “เพิ่มสินค้า” เพื่อจัดสินค้าเข้าตำแหน่งได้เลย</span>
       </div>
 
-      {selected && <LocationDrawer loc={selected} onClose={() => setSelected(null)}
+      {selected && <LocationDrawer loc={selected} highlightSku={selected.highlightSku} onClose={() => setSelected(null)}
         onDelete={allowDelete ? (() => { if (confirm(`ลบตำแหน่ง ${selected.pos}?`)) { removePosition(selected.building, selected.floor, selected.pos); setSelected(null); } }) : null}/>}
     </div>
   );
 }
 
-function LocationDrawer({ loc, onClose, onDelete }) {
+function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
   const items = PRODUCTS.filter(p => (p.loc || "") === loc.code);
+  // The product the user searched for floats to the top of the shelf list.
+  if (highlightSku) items.sort((a, b) => (b.sku === highlightSku) - (a.sku === highlightSku));
+
+  // Assign products to this position straight from the drawer — no trip to the
+  // product edit modal. Gated like every other product UPDATE (viewer sees no UI).
+  const canAssign = typeof canAdjustStock === "function" ? canAdjustStock() : true;
+  const [adding, setAdding] = useState(false);
+  const [addQ, setAddQ] = useState("");
+  const toast = (m) => window.dispatchEvent(new CustomEvent("ims-toast", { detail: m }));
+  const assign = (p) => {
+    const from = p.loc && p.loc !== loc.code ? locParts(p.loc) : null;
+    updateProductInStore(p.sku, { loc: loc.code });
+    toast(from ? `ย้าย “${p.name}” จาก ${from.pos} มา ${loc.pos} แล้ว` : `เพิ่ม “${p.name}” เข้า ${loc.pos} แล้ว`);
+  };
+  const unassign = (p) => {
+    updateProductInStore(p.sku, { loc: "" });
+    toast(`นำ “${p.name}” ออกจาก ${loc.pos} แล้ว`);
+  };
+  // Enter = keyboard-wedge scan: an exact-SKU (or single) hit is assigned and the
+  // box clears, so a batch can be shelved scan-by-scan without touching the mouse.
+  const onAddKey = (e) => {
+    if (e.key !== "Enter") return;
+    const q = addQ.trim().toLowerCase();
+    if (!q) return;
+    const exact = PRODUCTS.find(p => String(p.sku || "").toLowerCase() === q);
+    const res = searchProductsForLocation(addQ, 2);
+    const hit = exact || (res.hits.length === 1 ? res.hits[0] : null);
+    if (!hit) return;
+    if ((hit.loc || "") !== loc.code) assign(hit);
+    setAddQ("");
+  };
 
   const printLabel = () => {
     const svg = (typeof qrSvgMarkup === "function") ? qrSvgMarkup(loc.code, 360) : "";
@@ -3478,18 +3657,77 @@ function LocationDrawer({ loc, onClose, onDelete }) {
           </div>
         </div>
         <div className="drawer-body">
-          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>สินค้าในตำแหน่งนี้ ({items.length})</div>
-          <div className="stack" style={{ gap: 6 }}>
-            {items.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)", padding: 12, textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้</div>}
-            {items.slice(0, 40).map(p => (
-              <div key={p.sku} className="row" style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 13 }}>{p.name}</div>
-                  <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</div>
-                </div>
-                <div className="tnum" style={{ fontSize: 14, fontWeight: 500 }}>{p.qty} ชิ้น</div>
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>สินค้าในตำแหน่งนี้ ({items.length})</div>
+            {canAssign && (
+              <button className={"btn btn-sm" + (adding ? "" : " btn-primary")} onClick={() => { setAdding(a => !a); setAddQ(""); }}>
+                {adding ? "เสร็จแล้ว" : <><Icons.Plus size={12}/> เพิ่มสินค้า</>}
+              </button>
+            )}
+          </div>
+
+          {adding && (
+            <div style={{ marginBottom: 10, padding: 10, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                <Icons.Search size={13} style={{ color: "var(--muted)", flexShrink: 0 }}/>
+                <input autoFocus value={addQ} onChange={e => setAddQ(e.target.value)} onKeyDown={onAddKey}
+                  placeholder="ค้นหาสินค้า (ชื่อ / SKU / สแกนบาร์โค้ด)..."
+                  style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 13, color: "var(--fg)", fontFamily: "inherit" }}/>
+                {addQ && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)", flexShrink: 0 }} onClick={() => setAddQ("")}/>}
               </div>
-            ))}
+              {addQ.trim() ? (() => {
+                const res = searchProductsForLocation(addQ, 8);
+                return (
+                  <div className="stack" style={{ gap: 4, marginTop: 8 }}>
+                    {res.hits.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "10px 0" }}>ไม่พบสินค้า "{addQ}"</div>}
+                    {res.hits.map(p => {
+                      const here = (p.loc || "") === loc.code;
+                      const from = !here && p.loc ? locParts(p.loc) : null;
+                      return (
+                        <div key={p.sku} className="row" onClick={() => { if (!here) assign(p); }}
+                          style={{ gap: 10, padding: 8, borderRadius: 8, background: here ? "var(--accent-soft)" : "var(--surface-2)", cursor: here ? "default" : "pointer" }}>
+                          {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={36} radius={7}/>}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                            <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{p.sku} · {p.qty} ชิ้น</div>
+                          </div>
+                          {here
+                            ? <span className="row" style={{ gap: 4, fontSize: 11, color: "var(--accent)", fontWeight: 600, flexShrink: 0 }}><Icons.Check size={12}/> อยู่ที่นี่แล้ว</span>
+                            : (
+                              <span className="row" style={{ gap: 6, flexShrink: 0 }}>
+                                {from && <span style={{ fontSize: 10, color: "var(--muted)" }}>อยู่ที่ {from.pos}</span>}
+                                <span className="btn btn-sm btn-primary" style={{ pointerEvents: "none" }}><Icons.Plus size={11}/> {from ? "ย้ายมาที่นี่" : "เพิ่ม"}</span>
+                              </span>
+                            )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })() : (
+                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, textAlign: "center" }}>
+                  พิมพ์ชื่อ / SKU หรือยิงบาร์โค้ดทีละชิ้น — ระบบเพิ่มเข้าตำแหน่งนี้ให้ทันที
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="stack" style={{ gap: 6 }}>
+            {items.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)", padding: 12, textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้{canAssign ? " — กด “เพิ่มสินค้า” เพื่อเลือกสินค้าเข้าตำแหน่ง" : ""}</div>}
+            {items.slice(0, 40).map(p => {
+              const hl = p.sku === highlightSku;
+              return (
+                <div key={p.sku} className="row" style={{ gap: 10, padding: 10, background: hl ? "var(--accent-soft)" : "var(--surface-2)", border: hl ? "1.5px solid var(--accent)" : "1px solid transparent", borderRadius: 8 }}>
+                  {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={40} radius={8}/>}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</div>
+                  </div>
+                  <div className="tnum" style={{ fontSize: 14, fontWeight: 500, flexShrink: 0 }}>{p.qty} ชิ้น</div>
+                  {canAssign && <button className="btn btn-ghost btn-icon" title="นำออกจากตำแหน่งนี้" style={{ flexShrink: 0 }} onClick={() => unassign(p)}><Icons.X size={13}/></button>}
+                </div>
+              );
+            })}
           </div>
 
           <div style={{ marginTop: 22, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>ภาพตำแหน่ง</div>
@@ -3642,9 +3880,14 @@ function ThaiAddrAutocomplete({ value, onChange }) {
 }
 
 /* ========= SELL PRODUCT MODAL (3-step wizard) ========= */
-function SellProductModal({ onClose, onSellComplete }) {
+function SellProductModal({ onClose, onSellComplete, presetSku }) {
   const [step, setStep] = useState(1);
-  const [cart, setCart] = useState([]);
+  // presetSku: opened from the Product Finder with an already-confirmed product —
+  // start the cart with it so staff never re-search (and can't re-pick the wrong SKU).
+  const [cart, setCart] = useState(() => {
+    const p = presetSku && PRODUCTS.find(x => x.sku === presetSku);
+    return p ? [{ type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: p.loc, qty: 1 }] : [];
+  });
   const [q, setQ] = useState("");
   const [ship, setShipState] = useState({
     name: "", phone: "", addr1: "", addr2: "",
@@ -4387,4 +4630,264 @@ function StockTake({ pushToast }) {
   );
 }
 
-Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductNameSearchField });
+/* =============== PRODUCT FINDER (ค้นหาสินค้า) ===============
+   Staff visual lookup: search or scan a barcode → big product photo + storage
+   position (with the bin photo), confirm it's the right item, then sell it —
+   the anti-mistake funnel for picking / deducting stock. Mobile fork: MFinder
+   in handheld.jsx. */
+function ProductFinder({ pushToast, goTo }) {
+  const [q, setQ] = useState("");
+  const [selectedSku, setSelectedSku] = useState(null);
+  const [camOpen, setCamOpen] = useState(false);
+  const [sellSku, setSellSku] = useState(null);
+  const [stockKey, setStockKey] = useState(0);
+  const inputRef = useRef(null);
+  const images = useProductImages();
+  const locImages = useLocationImages();
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+  useEffect(() => {
+    const refresh = () => setStockKey(k => k + 1);
+    const evs = ["ims-products-change", "ims-stock-adj-change", "ims-locations-change"];
+    evs.forEach(ev => window.addEventListener(ev, refresh));
+    return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
+  }, []);
+
+  const effQty = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
+  const res = useMemo(
+    () => (typeof searchProductsForLocation === "function" ? searchProductsForLocation(q, 24) : { hits: [], total: 0 }),
+    [q, stockKey]
+  );
+
+  const role = (window.__currentUser && window.__currentUser.role) || "viewer";
+  const canSell = role === "admin" || role === "manager" || role === "staff";
+
+  // Camera + keyboard-wedge funnel: exact SKU (= barcode) → jump straight to the
+  // confirmation card; a miss beeps so the picker knows the scan didn't land.
+  const resolveScan = (code) => {
+    const s = String(code || "").trim();
+    setCamOpen(false);
+    if (!s) return;
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === s.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); pushToast("ไม่พบสินค้า: " + s); return; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setQ(p.sku);
+    setSelectedSku(p.sku);
+  };
+  const onSearchEnter = () => {
+    const exact = PRODUCTS.find(x => x.sku.toLowerCase() === q.trim().toLowerCase());
+    if (exact) { setSelectedSku(exact.sku); return; }
+    if (res.hits.length === 1) setSelectedSku(res.hits[0].sku);
+  };
+
+  const selected = selectedSku ? PRODUCTS.find(p => p.sku === selectedSku) : null;
+
+  return (
+    <div className="stack" style={{ gap: 24 }}>
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">ค้นหาสินค้า</h1>
+          <div className="page-sub">ค้นหาด้วยชื่อ / SKU / สแกนบาร์โค้ด — เห็นรูปสินค้าและตำแหน่งจัดเก็บก่อนหยิบ ตัดสต็อก หรือขาย</div>
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: 18 }}>
+        <div className="row" style={{ gap: 10 }}>
+          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
+            <Icons.Search size={16} style={{ color: "var(--muted)", flexShrink: 0 }}/>
+            <input
+              ref={inputRef}
+              value={q}
+              onChange={e => setQ(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") onSearchEnter(); }}
+              placeholder="พิมพ์ชื่อสินค้า / SKU หรือยิงบาร์โค้ดด้วยเครื่องสแกน..."
+              style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 15, color: "var(--fg)", fontFamily: "inherit" }}
+            />
+            {q && <button className="btn btn-ghost btn-icon" title="ล้างคำค้น" onClick={() => { setQ(""); inputRef.current?.focus(); }}><Icons.X size={14}/></button>}
+          </div>
+          <button className="btn" onClick={() => setCamOpen(true)}><Icons.Camera size={14}/> สแกนด้วยกล้อง</button>
+        </div>
+      </div>
+
+      {!q.trim() ? (
+        <div className="card" style={{ padding: "56px 24px", textAlign: "center", color: "var(--muted)" }}>
+          <div style={{ width: 56, height: 56, borderRadius: 16, background: "var(--accent-soft, var(--surface-2))", color: "var(--accent)", display: "grid", placeItems: "center", margin: "0 auto 14px" }}>
+            <Icons.Search size={26}/>
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: "var(--fg)", marginBottom: 4 }}>ค้นหาเพื่อยืนยันสินค้าก่อนหยิบ</div>
+          <div style={{ fontSize: 13, lineHeight: 1.7 }}>พิมพ์ชื่อหรือ SKU หรือสแกนบาร์โค้ด แล้วระบบจะแสดง<br/>รูปสินค้า สต็อกคงเหลือ และตำแหน่งจัดเก็บ เพื่อไม่ให้หยิบผิดตัว</div>
+        </div>
+      ) : res.hits.length === 0 ? (
+        <div className="card" style={{ padding: "44px 24px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+          ไม่พบสินค้า "{q}"
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>
+            {res.hits.map(p => {
+              const eq = effQty(p.sku);
+              const st = stockStatus({ ...p, qty: eq });
+              const parts = p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+              const url = typeof resolveProductImage === "function" ? resolveProductImage(p.sku, images) : "";
+              return (
+                <div key={p.sku} className="card" onClick={() => setSelectedSku(p.sku)}
+                  style={{ padding: 0, overflow: "hidden", cursor: "pointer" }}>
+                  <div style={{ aspectRatio: "1 / 1", background: "#fff", borderBottom: "1px solid var(--border)", display: "grid", placeItems: "center", overflow: "hidden" }}>
+                    {url
+                      ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+                      : <Icons.Box size={40} style={{ color: "var(--muted)", opacity: 0.45 }}/>}
+                  </div>
+                  <div style={{ padding: "10px 12px 12px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.4, minHeight: 36, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{p.name}</div>
+                    <div className="row" style={{ gap: 8, marginTop: 4 }}>
+                      <span className="mono" style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.sku}</span>
+                      <span className={"badge " + st.cls} style={{ fontSize: 10, flexShrink: 0, marginLeft: "auto" }}>{eq} ชิ้น</span>
+                    </div>
+                    <div className="row" style={{ gap: 6, marginTop: 8, paddingTop: 8, borderTop: "1px dashed var(--border)" }}>
+                      {parts ? (
+                        <>
+                          <Icons.Map size={13} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                          <span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>{parts.pos}</span>
+                          <span style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{parts.building}{parts.floor ? " · " + parts.floor : ""}</span>
+                        </>
+                      ) : (
+                        <span className="badge badge-neutral" style={{ fontSize: 10 }}>ยังไม่ระบุตำแหน่ง</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {res.total > res.hits.length && (
+            <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center" }}>
+              แสดง {res.hits.length} จาก {res.total} รายการ — พิมพ์เพิ่มเพื่อค้นหาให้แคบลง
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── Confirmation card: XL photo + storage position + actions ── */}
+      {selected && (() => {
+        const p = selected;
+        const eq = effQty(p.sku);
+        const st = stockStatus({ ...p, qty: eq });
+        const avail = Math.max(0, eq - (p.reserved || 0));
+        const parts = p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+        const locPhoto = p.loc && typeof getLocationImage === "function" ? getLocationImage(p.loc, locImages) : "";
+        const url = typeof resolveProductImage === "function" ? resolveProductImage(p.sku, images) : "";
+        const close = () => setSelectedSku(null);
+        return (
+          <>
+            <div className="drawer-backdrop" onClick={close}/>
+            <div className="modal" style={{ maxWidth: 680, maxHeight: "92vh", overflowY: "auto" }}>
+              <div className="modal-head">
+                <div>
+                  <h3>ยืนยันสินค้า</h3>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>ตรวจรูปและตำแหน่งให้ตรงกับของจริงก่อนหยิบ / ขาย</div>
+                </div>
+                <button className="btn btn-ghost btn-icon" onClick={close}><Icons.X size={16}/></button>
+              </div>
+              <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(200px, 260px) 1fr", gap: 18 }}>
+                  <div style={{ aspectRatio: "1 / 1", background: "#fff", border: "1px solid var(--border)", borderRadius: 14, display: "grid", placeItems: "center", overflow: "hidden" }}>
+                    {url
+                      ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}/>
+                      : <Icons.Box size={56} style={{ color: "var(--muted)", opacity: 0.4 }}/>}
+                  </div>
+                  <div className="stack" style={{ gap: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 17, fontWeight: 700, lineHeight: 1.4 }}>{p.name}</div>
+                      <div className="row" style={{ gap: 8, marginTop: 6 }}>
+                        {p.cat && <span className="badge badge-neutral">{p.cat}</span>}
+                        <span className={"badge " + st.cls}><span className="dot"/>{st.label}</span>
+                      </div>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, textAlign: "center", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 8px" }}>
+                      <div>
+                        <div className="tnum" style={{ fontSize: 22, fontWeight: 700 }}>{eq}</div>
+                        <div style={{ fontSize: 10, color: "var(--muted)" }}>คงเหลือ</div>
+                      </div>
+                      <div style={{ borderLeft: "1px solid var(--border)", borderRight: "1px solid var(--border)" }}>
+                        <div className="tnum" style={{ fontSize: 22, fontWeight: 700, color: "var(--muted)" }}>{p.reserved || 0}</div>
+                        <div style={{ fontSize: 10, color: "var(--muted)" }}>จอง</div>
+                      </div>
+                      <div>
+                        <div className="tnum" style={{ fontSize: 22, fontWeight: 700, color: avail > 0 ? "var(--success)" : "var(--danger)" }}>{avail}</div>
+                        <div style={{ fontSize: 10, color: "var(--muted)" }}>พร้อมขาย</div>
+                      </div>
+                    </div>
+                    <div className="row" style={{ gap: 8, fontSize: 13 }}>
+                      <span style={{ color: "var(--muted)" }}>ราคา</span>
+                      <span className="tnum" style={{ fontWeight: 700 }}>฿{(p.price || 0).toLocaleString()}</span>
+                      <span className="mono" style={{ marginLeft: "auto", fontSize: 12, color: "var(--muted)" }}>{p.sku}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Storage position — the "where do I walk to" answer, with the bin photo */}
+                <div style={{ border: "1px solid var(--border)", borderRadius: 14, padding: 14, background: "var(--surface-2)" }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 10 }}>ตำแหน่งจัดเก็บ</div>
+                  {parts ? (
+                    <div className="row" style={{ gap: 14 }}>
+                      {locPhoto ? (
+                        <img src={locPhoto} alt="" style={{ width: 92, height: 92, borderRadius: 12, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}/>
+                      ) : (
+                        <div style={{ width: 92, height: 92, borderRadius: 12, background: "var(--surface)", border: "1px solid var(--border)", display: "grid", placeItems: "center", color: "var(--accent)", flexShrink: 0 }}>
+                          <Icons.Map size={30}/>
+                        </div>
+                      )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="mono" style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.01em" }}>{parts.pos}</div>
+                        <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 2 }}>{parts.building}{parts.floor ? " · " + parts.floor : ""}</div>
+                      </div>
+                      <button className="btn btn-sm" style={{ alignSelf: "center", flexShrink: 0 }} onClick={() => { if (typeof goTo === "function") goTo("locations"); }}>
+                        <Icons.Map size={13}/> ดูผังคลัง
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="row" style={{ gap: 10, fontSize: 13, color: "var(--muted)" }}>
+                      <span className="badge badge-neutral">ยังไม่ระบุตำแหน่ง</span>
+                      <span>กำหนดได้ในหน้าตำแหน่งจัดเก็บ หรือแก้ไขสินค้าในคลัง</span>
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ textAlign: "center", padding: "4px 0 2px" }}>
+                  <Barcode value={p.sku} height={44}/>
+                  <div className="mono" style={{ fontSize: 12, marginTop: 4, letterSpacing: "0.06em", color: "var(--muted)" }}>{p.sku}</div>
+                </div>
+              </div>
+              <div className="modal-foot">
+                <button className="btn" onClick={close}>ปิด</button>
+                <div className="spacer"/>
+                {canSell && (
+                  <button className="btn btn-primary" disabled={avail <= 0} onClick={() => setSellSku(p.sku)}>
+                    <Icons.Cart size={14}/> ขายสินค้านี้
+                  </button>
+                )}
+              </div>
+            </div>
+          </>
+        );
+      })()}
+
+      {camOpen && <CameraScanner onScan={resolveScan} onClose={() => setCamOpen(false)}/>}
+
+      {sellSku && (
+        <SellProductModal
+          presetSku={sellSku}
+          onClose={() => setSellSku(null)}
+          onSellComplete={({ orderId, customerName, itemCount }) => {
+            pushToast(`สร้างออร์เดอร์ ${orderId} — ${itemCount} รายการ สำหรับ ${customerName}`);
+            setSellSku(null);
+            setSelectedSku(null);
+            if (typeof goTo === "function") goTo("outbound");
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField });

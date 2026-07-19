@@ -1939,3 +1939,28 @@ html, body {
 
 /* Sticky top bar floats over scrolling content */
 .m-topbar { box-shadow: 0 4px 18px oklch(0.32 0.02 262 / 0.05); }
+
+/* ============================================================
+   STOCK-ADJUST REASON CHIPS — shared by the desktop
+   StockAdjustModal and mobile MAdjust; token-driven so both
+   views and future theme changes stay in sync.
+   ============================================================ */
+.adj-reasons { display: flex; flex-wrap: wrap; gap: 6px; }
+.adj-reason {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--fg-2);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.adj-reason:active { transform: translateY(1px); }
+.adj-reason.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}

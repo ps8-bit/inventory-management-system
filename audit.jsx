@@ -113,6 +113,7 @@ const ACTION_LABELS = {
   update: "แก้ไข",
   create: "สร้าง",
   delete: "ลบ",
+  adjust: "ปรับสต็อก",
   "bulk-update": "แก้ไขกลุ่ม",
   "bulk-delete": "ลบกลุ่ม"
 };
@@ -121,6 +122,7 @@ const ACTION_TONES = {
   update: "badge-info",
   create: "badge-success",
   delete: "badge-danger",
+  adjust: "badge-warning",
   "bulk-update": "badge-info",
   "bulk-delete": "badge-danger"
 };
@@ -223,6 +225,7 @@ function HistoryPage({ pushToast }) {
           <div className="seg">
             <button className={actionFilter === "all" ? "on" : ""} onClick={() => setActionFilter("all")}>ทุกการกระทำ</button>
             <button className={actionFilter === "update" ? "on" : ""} onClick={() => setActionFilter("update")}>แก้ไข</button>
+            <button className={actionFilter === "adjust" ? "on" : ""} onClick={() => setActionFilter("adjust")}>ปรับสต็อก</button>
             <button className={actionFilter === "bulk-update" ? "on" : ""} onClick={() => setActionFilter("bulk-update")}>แก้ไขกลุ่ม</button>
             <button className={actionFilter === "delete" ? "on" : ""} onClick={() => setActionFilter("delete")}>ลบ</button>
           </div>

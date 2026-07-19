@@ -6,6 +6,7 @@ const ALL_NAV = [
   { id: "dashboard", label: "หน้าหลัก",       icon: Icons.Dash,    group: "main" },
   { id: "inbound",   label: "รับเข้าสินค้า",   icon: Icons.In,      group: "ops"   },
   { id: "outbound",  label: "จัดส่งสินค้า",    icon: Icons.Out,     group: "ops"   },
+  { id: "finder",    label: "ค้นหาสินค้า",     icon: Icons.Search,  group: "ops"   },
   { id: "inventory", label: "สินค้าคงคลัง",    icon: Icons.Box,     group: "stock" },
   { id: "stocktake", label: "ตรวจนับสต็อก",    icon: Icons.Scan,    group: "stock" },
   { id: "locations", label: "ตำแหน่งจัดเก็บ",  icon: Icons.Map,     group: "stock" },
@@ -31,6 +32,7 @@ const CRUMB_MAP = {
   dashboard: "หน้าหลัก",
   inbound: "รับเข้าสินค้า",
   outbound: "จัดส่งสินค้า",
+  finder: "ค้นหาสินค้า",
   inventory: "สินค้าคงคลัง",
   stocktake: "ตรวจนับสต็อก",
   locations: "ตำแหน่งจัดเก็บ",
@@ -156,10 +158,12 @@ function SearchOverlay({ q, setQ, onClose, goTo }) {
                   const st = stockStatus(p);
                   return (
                     <div key={p.sku} className="search-hit" onClick={() => { goTo("inventory"); onClose(); }}>
-                      <Icons.Box size={14} style={{ color:"var(--muted)", flexShrink:0 }}/>
+                      {typeof ProductImageThumb === "function"
+                        ? <ProductImageThumb sku={p.sku} size={34} radius={8}/>
+                        : <Icons.Box size={14} style={{ color:"var(--muted)", flexShrink:0 }}/>}
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:13, fontWeight:500, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</div>
-                        <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace" }}>{p.sku} · {p.supplier}</div>
+                        <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.sku} · {p.loc || p.supplier}</div>
                       </div>
                       <span className={"badge " + st.cls} style={{ fontSize:10, flexShrink:0 }}>{p.qty} ชิ้น</span>
                     </div>
@@ -869,6 +873,7 @@ function App({ user, onLogout, onSwitchUser }) {
           {page === "dashboard" && <Dashboard density={t.density} goTo={goTo}/>}
           {page === "inbound"   && <Inbound goTo={goTo} pushToast={pushToast}/>}
           {page === "outbound"  && <Outbound goTo={goTo} pushToast={pushToast}/>}
+          {page === "finder"    && <ProductFinder pushToast={pushToast} goTo={goTo}/>}
           {page === "inventory" && <Inventory pushToast={pushToast} density={t.density} goTo={goTo}/>}
           {page === "stocktake" && <StockTake pushToast={pushToast}/>}
           {page === "locations" && <Locations/>}

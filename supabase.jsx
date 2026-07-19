@@ -161,6 +161,41 @@ async function dbAdjustStock(adjustments) {
   return { ok: true, rows };
 }
 
+/* ── stock_adjustments history ──
+   Append-only log of reasoned manual adjustments (ปรับสต็อก) — schema in
+   supabase-schema.sql §4, RLS insert = admin/manager/staff within work hours.
+   Best-effort, mirroring dbInsertAuditEntry: the atomic adjust_stock write is
+   the authoritative operation, and it already surfaces its own permission
+   toast — a blocked history row must not toast a second error on top. */
+async function dbInsertStockAdjustment(entries) {
+  const rows = (entries || [])
+    .filter(e => e && e.sku && Number(e.delta))
+    .map(e => ({
+      sku: e.sku,
+      delta: Number(e.delta),
+      reason: e.reason || '',
+      created_by: (window.__currentUser && window.__currentUser.name) || 'ระบบ'
+    }));
+  if (!rows.length) return { ok: true };
+  const { data, error } = await sb.from('stock_adjustments').insert(rows).select('id');
+  if (error) { console.error('[DB] insert stock_adjustments:', error.message); return { error: error.message }; }
+  if (!data || data.length < rows.length) {
+    console.error('[DB] insert stock_adjustments blocked:', (data || []).length, 'of', rows.length, 'rows');
+    return { error: 'PERMISSION_OR_MISSING' };
+  }
+  return { ok: true };
+}
+/* Latest adjustments for one sku — feeds the ProductDrawer movement list. */
+async function dbLoadStockAdjustments(sku, limit = 10) {
+  const { data, error } = await sb
+    .from('stock_adjustments').select('*')
+    .eq('sku', sku)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) { console.error('[DB] load stock_adjustments:', error.message); return null; }
+  return data || [];
+}
+
 /* ═══════════════════════════════════════════
    ORDERS
    ═══════════════════════════════════════════ */
@@ -593,6 +628,29 @@ async function lineTest() {
   }
 }
 
+// Trigger the backup-to-drive Edge Function manually (admin-only — the function
+// verifies the role server-side). Uploads the JSON snapshot + today's stock
+// Excel to Drive, same as the nightly cron. Can take ~10-30s on a big catalog.
+async function runCloudBackup() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return { error: 'กรุณาเข้าสู่ระบบใหม่' };
+  try {
+    const res = await fetch(SUPABASE_URL + '/functions/v1/backup-to-drive', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + session.access_token,
+      },
+      body: JSON.stringify({}),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: json.error || 'สำรองเข้า Drive ไม่สำเร็จ' };
+    return { data: json };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 // Preview what the LINE chatbot would reply for a command, against real data
 // (admin-only). Lets the team test report output without wiring up the webhook.
 async function lineBotPreview(command) {
@@ -844,6 +902,7 @@ Object.assign(window, {
   dbInit, setupRealtimeSync,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,
+  dbInsertStockAdjustment, dbLoadStockAdjustments,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,
   dbLoadLabels,        dbUpsertLabels,       dbDeleteLabel,
@@ -851,7 +910,7 @@ Object.assign(window, {
   dbLoadState,         dbSaveState,          dbLoadProductImages,  dbLoadLocationImages,
   dbServerTimeMs,
   dbInsertAuditEntry,  dbLoadAuditLog,    dbDeleteAuditLog,
-  manageUsers,         lineTest,           lineBotPreview,
+  manageUsers,         lineTest,           lineBotPreview,      runCloudBackup,
   // Auth helpers — thin wrappers so auth.jsx / app.jsx never import sb directly
   authSignIn:        (email, password) => sb.auth.signInWithPassword({ email, password }),
   // scope:'local' clears only this device's persisted session (used by the

@@ -148,6 +148,7 @@ function Screen({ ctx }) {
   const { route } = ctx;
   // sub-views
   if (route.view === "product")   return <MProductDetail ctx={ctx}/>;
+  if (route.view === "finder")    return <MFinder ctx={ctx}/>;
   if (route.view === "issue")     return <MIssue ctx={ctx}/>;
   if (route.view === "sell")      return <MSell ctx={ctx}/>;
   if (route.view === "locations") return <MLocations ctx={ctx}/>;
@@ -161,6 +162,7 @@ function Screen({ ctx }) {
   if (route.view === "bundles")   return <MBundles ctx={ctx}/>;
   if (route.view === "analytics") return <MAnalytics ctx={ctx}/>;
   if (route.view === "stocktake") return <MStockTake ctx={ctx}/>;
+  if (route.view === "adjust")    return <MAdjust ctx={ctx}/>;
   if (route.view === "history")   return <MHistory ctx={ctx}/>;
   if (route.view === "users")     return <MUsers ctx={ctx}/>;
   if (route.view === "settings")  return <MSettings ctx={ctx}/>;
@@ -197,6 +199,14 @@ function MHome({ ctx }) {
       </div>
       <div className="m-content">
         <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, marginTop: -4 }}>{(() => { const d=new Date(); const days=["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"]; const months=["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"]; return `วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()+543}`; })()}</div>
+
+        {/* Product finder entry — tap opens the search screen (photo + storage position) */}
+        <button onClick={() => ctx.push("finder")}
+          style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "12px 14px", marginBottom: 12, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, color: "var(--muted)", fontSize: 13, fontFamily: "inherit", cursor: "pointer", textAlign: "left" }}>
+          <Icons.Search size={16} style={{ flexShrink: 0 }}/>
+          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>ค้นหาสินค้า — ดูรูปและตำแหน่งจัดเก็บ...</span>
+          <Icons.Camera size={16} style={{ flexShrink: 0, color: "var(--accent)" }}/>
+        </button>
 
         {/* KPI grid 2x2 */}
         <div className="m-kpi-row">
@@ -901,6 +911,7 @@ function MInventory({ ctx }) {
     <>
       <div className="m-topbar">
         <div className="m-title">สินค้าคงคลัง</div>
+        {!selecting && <button className="m-action" title="รายงานสต็อก Excel" onClick={() => { if (typeof downloadStockReport === "function") downloadStockReport(products); }}><Icons.Dash size={14}/></button>}
         {!selecting && <button className="m-action" title="ส่งออก CSV" onClick={exportInventoryCsv}><Icons.Pkg size={14}/></button>}
         <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)}>
           {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
@@ -1202,7 +1213,6 @@ function MBulkEdit({ count, categories, products, onClose, onApply }) {
 function MProductDetail({ ctx }) {
   const [stockKey, setStockKey] = useStateM(0);
   const [editOpen, setEditOpen] = useStateM(false);
-  const [adjOpen, setAdjOpen] = useStateM(false);
   useEffectM(() => {
     const refresh = () => setStockKey(k => k + 1);
     window.addEventListener("ims-products-change", refresh);
@@ -1212,6 +1222,8 @@ function MProductDetail({ ctx }) {
       window.removeEventListener("ims-stock-adj-change", refresh);
     };
   }, []);
+
+  const locImages = useLocationImages();
 
   const base = PRODUCTS.find(x => x.sku === ctx.route.params?.sku) || ctx.route.params;
   if (!base) { ctx.back(); return null; }
@@ -1237,25 +1249,6 @@ function MProductDetail({ ctx }) {
     }
     setEditOpen(false);
   };
-  const doAdjust = (delta, reason) => {
-    adjustProductQty(p.sku, delta); // atomic ±delta from raw value — no overlay pollution
-    try {
-      const a = JSON.parse(localStorage.getItem("ims_stock_adj") || "{}");
-      delete a[p.sku];
-      localStorage.setItem("ims_stock_adj", JSON.stringify(a));
-    } catch (e) {}
-    ctx.pushToast(`ปรับสต็อก ${p.sku} ${delta > 0 ? "+" : ""}${delta} ชิ้น`);
-    if (typeof recordChange === "function") {
-      recordChange({
-        entity: "product", entityId: p.sku, action: "update",
-        summary: `ปรับสต็อก ${p.name} (${p.sku}) ${delta > 0 ? "+" : ""}${delta} ชิ้น (มือถือ)`,
-        changes: [{ label: "ปรับจำนวน", to: `${delta > 0 ? "+" : ""}${delta} ชิ้น` }],
-        note: reason || ""
-      });
-    }
-    setAdjOpen(false);
-  };
-
   return (
     <>
       <div className="m-topbar">
@@ -1295,10 +1288,34 @@ function MProductDetail({ ctx }) {
           </div>
         </div>
 
+        {/* ── Storage position: photo + big position code — visual confirmation for pickers ── */}
+        <div className="m-section-label" style={{ padding: "8px 4px" }}>ตำแหน่งจัดเก็บ</div>
+        <div className="m-card" style={{ padding: 12 }}>
+          {(() => {
+            const parts = p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+            if (!parts) return <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "8px 0" }}>ยังไม่ระบุตำแหน่ง — แก้ไขสินค้าเพื่อกำหนดตำแหน่งจัดเก็บ</div>;
+            const photo = typeof getLocationImage === "function" ? getLocationImage(p.loc, locImages) : "";
+            return (
+              <div className="row" style={{ gap: 12 }}>
+                {photo ? (
+                  <img src={photo} alt="" style={{ width: 76, height: 76, borderRadius: 10, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}/>
+                ) : (
+                  <div style={{ width: 76, height: 76, borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", display: "grid", placeItems: "center", color: "var(--accent)", flexShrink: 0 }}>
+                    <Icons.Map size={24}/>
+                  </div>
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="mono" style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.01em" }}>{parts.pos}</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{parts.building}{parts.floor ? " · " + parts.floor : ""}</div>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+
         <div className="m-section-label" style={{ padding: "8px 4px" }}>ข้อมูล</div>
         <div className="m-list">
           <MetaRow label="SKU" value={p.sku} mono/>
-          <MetaRow label="ตำแหน่ง" value={p.loc} mono/>
           <MetaRow label="แบรนด์" value={p.brand || "—"}/>
           <MetaRow label="ผู้จัดส่ง" value={p.supplier}/>
           <MetaRow label="ราคา" value={`฿${p.price.toLocaleString()}`}/>
@@ -1341,10 +1358,12 @@ function MProductDetail({ ctx }) {
         <button className="m-btn-big success" style={{ marginTop: 8 }} disabled={(p.qty - (p.reserved || 0)) <= 0} onClick={() => ctx.push("sell", { sku: p.sku })}>
           <Icons.Cart size={16}/> ขายสินค้า
         </button>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
-          <button className="m-btn-big outline" onClick={() => setAdjOpen(true)}>
-            <Icons.Refresh size={15}/> ปรับสต็อก
-          </button>
+        <div style={{ display: "grid", gridTemplateColumns: canAdjustStock() ? "1fr 1fr" : "1fr", gap: 8, marginTop: 8 }}>
+          {canAdjustStock() && (
+            <button className="m-btn-big outline" onClick={() => ctx.push("adjust", { sku: p.sku })}>
+              <Icons.Refresh size={15}/> ปรับสต็อก
+            </button>
+          )}
           <button className="m-btn-big warn" onClick={() => ctx.push("issue", { sku: p.sku })}>
             <Icons.Out size={15}/> ตัดสต็อก
           </button>
@@ -1353,65 +1372,135 @@ function MProductDetail({ ctx }) {
       {editOpen && (
         <MAddSku categories={cats} products={PRODUCTS} editing={base} onClose={() => setEditOpen(false)} onAdd={doEdit}/>
       )}
-      {adjOpen && (
-        <MStockAdjust product={p} onClose={() => setAdjOpen(false)} onApply={doAdjust}/>
-      )}
     </>
   );
 }
 
-/* Mobile quick stock-adjustment sheet */
-function MStockAdjust({ product, onClose, onApply }) {
-  const [mode, setMode] = useStateM("add"); // add | remove | set
+/* =============== STOCK ADJUST (ปรับสต็อก — full-screen) ===============
+   Reasoned adjustment for miscounts / damaged items / sales made outside the
+   system (Shopee, Lazada, หน้าร้าน …). Mirrors the desktop StockAdjustModal;
+   both funnel through applyStockAdjustment (data.jsx) so the forks can't
+   diverge. Never creates an order — that's MIssue (ตัดสต็อก)'s job. */
+function MAdjust({ ctx }) {
+  const [skuId, setSkuId] = useStateM(() => {
+    const want = ctx.route.params?.sku;
+    if (want && PRODUCTS.some(p => p.sku === want)) return want;
+    return PRODUCTS[0]?.sku || "";
+  });
+  const [camOpen, setCamOpen] = useStateM(false);
+  const [mode, setMode] = useStateM("remove"); // add | remove | set
   const [amount, setAmount] = useStateM("");
-  const [reason, setReason] = useStateM("");
-  const eff = product.qty;
+  const [reasonId, setReasonId] = useStateM("");
+  const [note, setNote] = useStateM("");
+  useEffectM(() => () => setCamOpen(false), []);
+
+  const product = PRODUCTS.find(p => p.sku === skuId);
+  const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
+  const effQty = product ? ((typeof getEffectiveQty === "function") ? getEffectiveQty(product.sku) : product.qty) : 0;
   const n = parseInt(amount);
   const valid = Number.isFinite(n) && n >= 0;
   let delta = 0;
-  if (valid) {
+  if (valid && product) {
     if (mode === "add") delta = n;
-    else if (mode === "remove") delta = -Math.min(n, eff);
-    else delta = n - eff;
+    else if (mode === "remove") delta = -Math.min(n, effQty);
+    else delta = n - effQty;
   }
+  const canSubmit = !!product && valid && delta !== 0 && !!reason && (!reason.requireNote || note.trim());
+
+  // Camera selection funnel — exact-match + beeps, same pattern as MStockTake.
+  const pick = (code) => {
+    const q = String(code || "").trim();
+    if (!q) return;
+    // The scanner tears itself down after one decode either way — unmount it on
+    // a miss too, or the user is left staring at a frozen, dead camera panel.
+    setCamOpen(false);
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === q.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast("ไม่พบ SKU: " + q); return; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setSkuId(p.sku);
+  };
+
+  const submit = () => {
+    if (!canSubmit) return;
+    const res = applyStockAdjustment({ sku: product.sku, delta, reason, note, source: "mobile" });
+    if (!res.ok) { ctx.pushToast("ปรับสต็อกไม่สำเร็จ"); return; }
+    if (res.eff) ctx.pushToast(`ปรับสต็อก ${product.sku} ${res.eff > 0 ? "+" : ""}${res.eff} ชิ้น — ${reason.label}`);
+    else ctx.pushToast(`${product.sku} ไม่มีการเปลี่ยนแปลง (คงเหลือ 0 อยู่แล้ว)`);
+    ctx.back();
+  };
+
+  if (!PRODUCTS.length) {
+    return (
+      <>
+        <div className="m-topbar">
+          <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+          <div className="m-title-sub">ปรับสต็อก</div>
+        </div>
+        <div className="m-content">
+          <div className="m-card" style={{ textAlign: "center", color: "var(--muted)", fontSize: 13, padding: 20 }}>ยังไม่มีสินค้าในคลัง</div>
+        </div>
+      </>
+    );
+  }
+
   return (
     <>
-      <div className="m-sheet-backdrop" onClick={onClose}/>
-      <div className="m-sheet">
-        <div className="m-sheet-grabber"/>
-        <div className="m-sheet-head">
-          <div>
-            <h3>ปรับสต็อก</h3>
-            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{product.name} · คงเหลือ {eff} ชิ้น</div>
-          </div>
-          <button className="m-action" onClick={onClose}><Icons.X size={14}/></button>
+      <div className="m-topbar">
+        <button className="m-back" onClick={ctx.back}><Icons.X size={14}/></button>
+        <div className="m-title-sub">ปรับสต็อก</div>
+        <button className="m-action accent" disabled={!canSubmit} onClick={submit} style={!canSubmit ? { opacity: 0.4 } : {}}>
+          <Icons.Check size={14}/>
+        </button>
+      </div>
+      <div className="m-content">
+        <div style={{ fontSize: 11, color: "var(--muted)", margin: "0 4px 10px" }}>
+          สำหรับนับสต็อกผิด สินค้าเสียหาย หรือขายนอกระบบ (Shopee / Lazada / หน้าร้าน) — ไม่สร้างออร์เดอร์
         </div>
-        <div className="m-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div className="seg" style={{ width: "100%" }}>
-            <button className={mode === "add" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("add")}>เพิ่มเข้า</button>
-            <button className={mode === "remove" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("remove")}>หักออก</button>
-            <button className={mode === "set" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("set")}>ตั้งค่าเป็น</button>
-          </div>
-          <div>
-            <div className="m-section-label" style={{ padding: "0 2px 4px" }}>{mode === "set" ? "จำนวนคงเหลือใหม่" : "จำนวน (ชิ้น)"}</div>
-            <input className="m-input" type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0"/>
-          </div>
-          <div>
-            <div className="m-section-label" style={{ padding: "0 2px 4px" }}>เหตุผล (ไม่จำเป็น)</div>
-            <input className="m-input" value={reason} onChange={e => setReason(e.target.value)} placeholder="เช่น ตรวจนับสต็อก"/>
-          </div>
-          {valid && (
-            <div className="m-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: 0 }}>
-              <span style={{ fontSize: 12, color: "var(--muted)" }}>คงเหลือหลังปรับ</span>
-              <span className="tnum" style={{ fontSize: 20, fontWeight: 600 }}>{eff} → {Math.max(0, eff + delta)}</span>
-            </div>
-          )}
-        </div>
-        <div className="m-sheet-foot">
-          <button className="m-btn-big" onClick={() => onApply(delta, reason)} disabled={!valid || delta === 0} style={(!valid || delta === 0) ? { opacity: 0.5 } : {}}>
-            <Icons.Check size={16}/> ยืนยันปรับสต็อก
+
+        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>สินค้า</div>
+        <MSkuPicker value={skuId} onChange={setSkuId}/>
+        {!camOpen && (
+          <button className="m-btn-big dark" style={{ marginTop: 8, marginBottom: 0 }} onClick={() => setCamOpen(true)}>
+            <Icons.Camera size={18}/> สแกนบาร์โค้ด
           </button>
+        )}
+        {camOpen && <CameraScanner onScan={code => pick(code)} onClose={() => setCamOpen(false)}/>}
+        {product && (
+          <div style={{ fontSize: 11, color: "var(--muted)", margin: "8px 4px 0" }}>
+            คงเหลือ <strong style={{ color: "var(--fg)" }}>{effQty}</strong> ชิ้น · ตำแหน่ง <span className="mono">{product.loc || "—"}</span>
+          </div>
+        )}
+
+        <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>รูปแบบ</div>
+        <div className="seg" style={{ width: "100%" }}>
+          <button className={mode === "add" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("add")}>เพิ่มเข้า</button>
+          <button className={mode === "remove" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("remove")}>หักออก</button>
+          <button className={mode === "set" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("set")}>ตั้งค่าเป็น</button>
         </div>
+
+        <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>{mode === "set" ? "จำนวนคงเหลือใหม่" : "จำนวน (ชิ้น)"}</div>
+        <input className="m-input" type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0"/>
+
+        <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>เหตุผล (จำเป็น)</div>
+        <div className="adj-reasons">
+          {ADJUST_REASONS.map(r => (
+            <button key={r.id} type="button" className={"adj-reason" + (reasonId === r.id ? " on" : "")} onClick={() => setReasonId(r.id)}>{r.label}</button>
+          ))}
+        </div>
+
+        <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>หมายเหตุ {reason && reason.requireNote ? "(จำเป็น)" : "(ไม่จำเป็น)"}</div>
+        <input className="m-input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, อ้างอิงการนับ"/>
+
+        {valid && product && (
+          <div className="m-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>คงเหลือหลังปรับ</span>
+            <span className="tnum" style={{ fontSize: 20, fontWeight: 600 }}>{effQty} → {Math.max(0, effQty + delta)}</span>
+          </div>
+        )}
+
+        <button className="m-btn-big" style={{ marginTop: 12 }} onClick={submit} disabled={!canSubmit}>
+          <Icons.Check size={16}/> ยืนยันปรับสต็อก
+        </button>
       </div>
     </>
   );
@@ -2484,10 +2573,123 @@ function MBundleForm({ initial, onClose, onSave }) {
 
 /* =============== MORE =============== */
 
+/* =============== PRODUCT FINDER (ค้นหาสินค้า) ===============
+   Staff visual lookup: search or scan → big product photo + storage position,
+   then tap through to the product page to sell / issue / adjust the CONFIRMED
+   item. Desktop fork: ProductFinder in screens.jsx. */
+function MFinder({ ctx }) {
+  const [q, setQ] = useStateM("");
+  const [camOpen, setCamOpen] = useStateM(false);
+  const [, setStockKey] = useStateM(0);
+  const inputRef = useRefM(null);
+  const images = useProductImages();
+
+  useEffectM(() => {
+    const refresh = () => setStockKey(k => k + 1);
+    const evs = ["ims-products-change", "ims-stock-adj-change", "ims-locations-change"];
+    evs.forEach(ev => window.addEventListener(ev, refresh));
+    return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
+  }, []);
+  useEffectM(() => { inputRef.current && inputRef.current.focus(); }, []);
+  useEffectM(() => () => setCamOpen(false), []);
+
+  const effQty = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
+  const res = typeof searchProductsForLocation === "function" ? searchProductsForLocation(q, 20) : { hits: [], total: 0 };
+
+  // Camera funnel: exact SKU (= barcode) → straight to the product page; a miss
+  // beeps so the picker knows the scan didn't land.
+  const onScan = (code) => {
+    const s = String(code || "").trim();
+    setCamOpen(false);
+    if (!s) return;
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === s.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast("ไม่พบสินค้า: " + s); return; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    ctx.push("product", { sku: p.sku });
+  };
+
+  return (
+    <>
+      <div className="m-topbar">
+        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+        <div className="m-title-sub">ค้นหาสินค้า</div>
+        <button className="m-action" onClick={() => setCamOpen(true)}><Icons.Camera size={16}/></button>
+      </div>
+      <div className="m-content">
+        <div className="m-search">
+          <Icons.Search size={16} style={{ color: "var(--muted)" }}/>
+          <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} placeholder="ชื่อสินค้า / SKU / สแกนบาร์โค้ด..."/>
+          {q && <button onClick={() => { setQ(""); inputRef.current && inputRef.current.focus(); }} style={{ border: "none", background: "none", color: "var(--muted)", cursor: "pointer", padding: 2, display: "grid", placeItems: "center" }}><Icons.X size={14}/></button>}
+        </div>
+
+        {!q.trim() ? (
+          <div className="m-card" style={{ padding: "36px 20px", textAlign: "center" }}>
+            <div style={{ width: 48, height: 48, borderRadius: 14, background: "var(--surface-2)", color: "var(--accent)", display: "grid", placeItems: "center", margin: "0 auto 12px" }}>
+              <Icons.Search size={22}/>
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>ค้นหาเพื่อยืนยันสินค้าก่อนหยิบ</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>พิมพ์ชื่อ / SKU หรือกดกล้องมุมขวาบนเพื่อสแกน<br/>ระบบจะแสดงรูปสินค้าและตำแหน่งจัดเก็บ เพื่อไม่ให้หยิบผิดตัว</div>
+          </div>
+        ) : res.hits.length === 0 ? (
+          <div className="m-card" style={{ padding: "28px 16px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+            ไม่พบสินค้า "{q}"
+          </div>
+        ) : (
+          <>
+            {res.hits.map(p => {
+              const eq = effQty(p.sku);
+              const st = stockStatus({ ...p, qty: eq });
+              const parts = p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+              const url = typeof resolveProductImage === "function" ? resolveProductImage(p.sku, images) : "";
+              return (
+                <button key={p.sku} className="m-card" onClick={() => ctx.push("product", { sku: p.sku })}
+                  style={{ display: "flex", gap: 12, alignItems: "stretch", width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "inherit", padding: 10 }}>
+                  <div style={{ width: 84, height: 84, borderRadius: 10, overflow: "hidden", background: "#fff", border: "1px solid var(--border)", flexShrink: 0, display: "grid", placeItems: "center" }}>
+                    {url
+                      ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+                      : <Icons.Box size={26} style={{ color: "var(--muted)", opacity: 0.5 }}/>}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "2px 0" }}>
+                    <div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, lineHeight: 1.35, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{p.name}</div>
+                      <div className="row" style={{ gap: 8, marginTop: 3 }}>
+                        <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</span>
+                        <span className={"badge " + st.cls} style={{ fontSize: 10 }}>{eq} ชิ้น</span>
+                      </div>
+                    </div>
+                    {parts ? (
+                      <div className="row" style={{ gap: 6, marginTop: 6, minWidth: 0 }}>
+                        <Icons.Map size={13} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                        <span className="mono" style={{ fontSize: 14, fontWeight: 700, flexShrink: 0 }}>{parts.pos}</span>
+                        <span style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{parts.building}{parts.floor ? " · " + parts.floor : ""}</span>
+                      </div>
+                    ) : (
+                      <span className="badge badge-neutral" style={{ fontSize: 10, alignSelf: "flex-start", marginTop: 6 }}>ยังไม่ระบุตำแหน่ง</span>
+                    )}
+                  </div>
+                  <Icons.Chev size={14} style={{ alignSelf: "center", color: "var(--muted)", flexShrink: 0 }}/>
+                </button>
+              );
+            })}
+            {res.total > res.hits.length && (
+              <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "4px 0 10px" }}>
+                แสดง {res.hits.length} จาก {res.total} รายการ — พิมพ์เพิ่มเพื่อค้นหาให้แคบลง
+              </div>
+            )}
+          </>
+        )}
+      </div>
+      {camOpen && <CameraScanner onScan={onScan} onClose={() => setCamOpen(false)}/>}
+    </>
+  );
+}
+
 function MMore({ ctx }) {
   const items = [
+    { id: "finder",    icon: Icons.Search, label: "ค้นหาสินค้า",    sub: "ค้นหา/สแกน ดูรูปสินค้าและตำแหน่งจัดเก็บ" },
     { id: "analytics", icon: Icons.Dash,  label: "วิเคราะห์ยอดขาย", sub: "รายได้ ต้นทุน กำไร และสินค้าขายดี" },
     { id: "stocktake", icon: Icons.Scan,  label: "ตรวจนับสต็อก",    sub: "นับสินค้าจริงเทียบกับระบบ แล้วปรับให้ตรง" },
+    { id: "adjust",    icon: Icons.Refresh, label: "ปรับสต็อก",      sub: "นับผิด เสียหาย หรือขายนอกระบบ (Shopee/หน้าร้าน)" },
     { id: "bundles",   icon: Icons.Bundle, label: "ชุดสินค้า",       sub: "สร้างและจัดการชุดสินค้า" },
     { id: "tracking",  icon: Icons.Truck, label: "ติดตามพัสดุ",     sub: "เลขพัสดุ ขนส่ง และสถานะ" },
     { id: "locations", icon: Icons.Map,   label: "ตำแหน่งจัดเก็บ",  sub: "แผนผังคลังและการใช้พื้นที่" },
@@ -2689,7 +2891,9 @@ function MCatalog({ ctx }) {
 function MLocations({ ctx }) {
   const [tree, setTree] = useStateM(loadLocTree);
   useEffectM(() => {
-    const h = () => setTree(loadLocTree());
+    // Shallow-copy: once the cloud tree is loaded, loadLocTree() returns the same
+    // object reference every time, and setState would bail out — freezing SKU counts.
+    const h = () => setTree({ ...loadLocTree() });
     window.addEventListener("ims-locations-change", h);
     window.addEventListener("ims-products-change", h);
     return () => {
@@ -2699,7 +2903,8 @@ function MLocations({ ctx }) {
   }, []);
 
   const buildings = (tree && tree.buildings) || [];
-  const [selectedPos, setSelectedPos] = useStateM(null);
+  const [selectedPos, setSelectedPos] = useStateM(null); // { b, f, p, code, highlightSku? }
+  const [q, setQ] = useStateM("");
   const allowDelete = typeof canDeleteData === "function" ? canDeleteData() : true;
   const posCount = buildings.reduce((s, b) => s + (b.floors || []).reduce((t, f) => t + (f.positions || []).length, 0), 0);
   const locImages = useLocationImages();
@@ -2711,9 +2916,30 @@ function MLocations({ ctx }) {
   const askF = (b) => { const n = prompt(`เพิ่มชั้นใน "${b}" (เช่น ชั้น 3)`); if (n && n.trim()) addFloor(b, n.trim()); };
   const askP = (b, f) => { const n = prompt(`เพิ่มตำแหน่งใน ${b} · ${f} (เช่น A1)`); if (n && n.trim()) addPosition(b, f, n.trim()); };
   const editB = (b) => { const n = prompt("เปลี่ยนชื่ออาคาร", b); if (n && n.trim() && n.trim() !== b) renameBuilding(b, n.trim()); };
+
+  // Assign products to a position straight from the sheet — no trip to the
+  // product edit screen. Gated like every other product UPDATE (viewer sees no UI).
+  const canAssign = typeof canAdjustStock === "function" ? canAdjustStock() : true;
+  const [addingProd, setAddingProd] = useStateM(false);
+  const [addQ, setAddQ] = useStateM("");
+  const toast = (m) => (ctx && ctx.pushToast ? ctx.pushToast(m) : window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })));
+  const openPos = (sel) => { setAddingProd(false); setAddQ(""); setSelectedPos(sel); };
+  const closeSheet = () => { setAddingProd(false); setAddQ(""); setSelectedPos(null); };
+  const assignToPos = (p) => {
+    const sel = selectedPos; if (!sel) return;
+    const from = p.loc && p.loc !== sel.code && typeof locParts === "function" ? locParts(p.loc) : null;
+    updateProductInStore(p.sku, { loc: sel.code });
+    toast(from ? `ย้าย ${p.name} จาก ${from.pos} มา ${sel.p} แล้ว` : `เพิ่ม ${p.name} เข้า ${sel.p} แล้ว`);
+  };
+  const unassignFromPos = (p) => {
+    const sel = selectedPos; if (!sel) return;
+    updateProductInStore(p.sku, { loc: "" });
+    toast(`นำ ${p.name} ออกจาก ${sel.p} แล้ว`);
+  };
+
   const tapPos = (b, f, p) => {
     const code = locCode(b, f, p);
-    setSelectedPos({ b, f, p, code });
+    openPos({ b, f, p, code });
   };
   const printPosQr = (sel) => {
     const svg = (typeof qrSvgMarkup === "function") ? qrSvgMarkup(sel.code, 360) : "";
@@ -2741,6 +2967,51 @@ function MLocations({ ctx }) {
         <button className="m-action accent" onClick={askB} title="เพิ่มอาคาร"><Icons.Plus size={14}/></button>
       </div>
       <div className="m-content">
+        <div className="m-search">
+          <Icons.Search size={14}/>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหาสินค้าเพื่อเช็คตำแหน่ง (ชื่อ / SKU)"/>
+          {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+        </div>
+
+        {q.trim() && (() => {
+          const res = typeof searchProductsForLocation === "function" ? searchProductsForLocation(q, 10) : { hits: [], total: 0 };
+          return (
+            <div className="m-card" style={{ marginBottom: 12 }}>
+              {res.hits.length === 0 && (
+                <div style={{ padding: 14, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>ไม่พบสินค้า "{q}"</div>
+              )}
+              {res.hits.map((p, i) => {
+                const parts = p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+                return (
+                  <div key={p.sku} className="row"
+                    onClick={() => parts && openPos({ b: parts.building, f: parts.floor, p: parts.pos, code: p.loc, highlightSku: p.sku })}
+                    style={{ gap: 10, padding: "8px 2px", borderBottom: i < res.hits.length - 1 ? "1px solid var(--border)" : "none" }}>
+                    <ProductImageThumb sku={p.sku} size={40} radius={8}/>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                      <div className="row" style={{ gap: 6, marginTop: 2 }}>
+                        <span className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>{p.sku}</span>
+                        <span style={{ fontSize: 10, color: "var(--muted)" }}>· {p.qty} ชิ้น</span>
+                      </div>
+                    </div>
+                    {parts ? (
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <div className="mono" style={{ fontSize: 14, fontWeight: 700, color: "var(--accent)" }}>{parts.pos}</div>
+                        <div style={{ fontSize: 10, color: "var(--muted)" }}>{parts.building} · {parts.floor}</div>
+                      </div>
+                    ) : (
+                      <span style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>ยังไม่ระบุตำแหน่ง</span>
+                    )}
+                  </div>
+                );
+              })}
+              {res.total > res.hits.length && (
+                <div style={{ fontSize: 10, color: "var(--muted)", textAlign: "center", padding: "6px 0 2px" }}>แสดง {res.hits.length} จาก {res.total} รายการ</div>
+              )}
+            </div>
+          );
+        })()}
+
         <div style={{ fontSize: 12, color: "var(--muted)", padding: "2px 2px 8px" }}>
           {buildings.length} อาคาร · {posCount} ตำแหน่ง
         </div>
@@ -2803,9 +3074,11 @@ function MLocations({ ctx }) {
 
       {selectedPos && (() => {
         const items = PRODUCTS.filter(p => (p.loc || "") === selectedPos.code);
+        // The product the user searched for floats to the top of the shelf list.
+        if (selectedPos.highlightSku) items.sort((a, b) => (b.sku === selectedPos.highlightSku) - (a.sku === selectedPos.highlightSku));
         return (
           <>
-            <div className="m-sheet-backdrop" onClick={() => setSelectedPos(null)}/>
+            <div className="m-sheet-backdrop" onClick={closeSheet}/>
             <div className="m-sheet">
               <div className="m-sheet-grabber"/>
               <div className="m-sheet-head">
@@ -2813,21 +3086,71 @@ function MLocations({ ctx }) {
                   <div style={{ fontSize: 11, color: "var(--muted)" }}>{selectedPos.b} · {selectedPos.f}</div>
                   <h3 className="mono" style={{ marginTop: 2 }}>{selectedPos.p}</h3>
                 </div>
-                <button style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer" }} onClick={() => setSelectedPos(null)}><Icons.X size={18}/></button>
+                <button style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer" }} onClick={closeSheet}><Icons.X size={18}/></button>
               </div>
               <div className="m-sheet-body">
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>สินค้าในตำแหน่งนี้ ({items.length})</div>
-                {items.length === 0
-                  ? <div style={{ padding: 16, textAlign: "center", color: "var(--muted)", fontSize: 12, border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้</div>
-                  : items.slice(0, 40).map(p => (
-                    <div key={p.sku} className="row" style={{ padding: "8px 10px", background: "var(--surface-2)", borderRadius: 8, marginBottom: 6 }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 13 }}>{p.name}</div>
-                        <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</div>
-                      </div>
-                      <div className="tnum" style={{ fontSize: 14, fontWeight: 500 }}>{p.qty} ชิ้น</div>
+                <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>สินค้าในตำแหน่งนี้ ({items.length})</div>
+                  {canAssign && (
+                    <button style={addBtn} onClick={() => { setAddingProd(a => !a); setAddQ(""); }}>
+                      {addingProd ? "เสร็จแล้ว" : <><Icons.Plus size={12}/> เพิ่มสินค้า</>}
+                    </button>
+                  )}
+                </div>
+
+                {addingProd && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div className="m-search">
+                      <Icons.Search size={14}/>
+                      <input autoFocus value={addQ} onChange={e => setAddQ(e.target.value)} placeholder="ค้นหาสินค้า (ชื่อ / SKU)..."/>
+                      {addQ && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setAddQ("")}/>}
                     </div>
-                  ))
+                    {addQ.trim() ? (() => {
+                      const res = typeof searchProductsForLocation === "function" ? searchProductsForLocation(addQ, 8) : { hits: [], total: 0 };
+                      return (
+                        <div style={{ marginTop: 8 }}>
+                          {res.hits.length === 0 && <div style={{ padding: 12, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>ไม่พบสินค้า "{addQ}"</div>}
+                          {res.hits.map(p => {
+                            const here = (p.loc || "") === selectedPos.code;
+                            const from = !here && p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+                            return (
+                              <div key={p.sku} className="row" onClick={() => { if (!here) assignToPos(p); }}
+                                style={{ gap: 10, padding: "8px 10px", background: here ? "var(--accent-soft)" : "var(--surface-2)", borderRadius: 8, marginBottom: 6 }}>
+                                <ProductImageThumb sku={p.sku} size={36} radius={7}/>
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                                  <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{p.sku} · {p.qty} ชิ้น{from ? " · อยู่ที่ " + from.pos : ""}</div>
+                                </div>
+                                {here
+                                  ? <span className="row" style={{ gap: 3, fontSize: 11, color: "var(--accent)", fontWeight: 600, flexShrink: 0 }}><Icons.Check size={12}/> อยู่ที่นี่</span>
+                                  : <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", flexShrink: 0 }}>{from ? "ย้ายมาที่นี่" : "+ เพิ่ม"}</span>}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })() : (
+                      <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "8px 0 0" }}>พิมพ์ชื่อหรือ SKU เพื่อเพิ่มสินค้าเข้าตำแหน่งนี้</div>
+                    )}
+                  </div>
+                )}
+
+                {items.length === 0
+                  ? <div style={{ padding: 16, textAlign: "center", color: "var(--muted)", fontSize: 12, border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้{canAssign ? " — แตะ “เพิ่มสินค้า” เพื่อเลือกสินค้าเข้าตำแหน่ง" : ""}</div>
+                  : items.slice(0, 40).map(p => {
+                    const hl = p.sku === selectedPos.highlightSku;
+                    return (
+                      <div key={p.sku} className="row" style={{ gap: 10, padding: "8px 10px", background: hl ? "var(--accent-soft)" : "var(--surface-2)", border: hl ? "1.5px solid var(--accent)" : "1px solid transparent", borderRadius: 8, marginBottom: 6 }}>
+                        <ProductImageThumb sku={p.sku} size={40} radius={8}/>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                          <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</div>
+                        </div>
+                        <div className="tnum" style={{ fontSize: 14, fontWeight: 500, flexShrink: 0 }}>{p.qty} ชิ้น</div>
+                        {canAssign && <button style={{ display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0, cursor: "pointer" }} title="นำออกจากตำแหน่งนี้" onClick={() => unassignFromPos(p)}><Icons.X size={14}/></button>}
+                      </div>
+                    );
+                  })
                 }
                 <div style={{ marginTop: 16, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>ภาพตำแหน่ง</div>
                 {typeof LocationImageUpload === "function" ? <LocationImageUpload code={selectedPos.code}/> : null}
@@ -2836,14 +3159,14 @@ function MLocations({ ctx }) {
               </div>
               <div className="m-sheet-foot" style={{ display: "flex", gap: 8 }}>
                 {allowDelete && (
-                  <button className="m-btn-big" style={{ flex: 1, background: "var(--danger-soft)", color: "var(--danger)", border: "none" }} onClick={() => { if (confirm(`ลบตำแหน่ง ${selectedPos.p}?`)) { removePosition(selectedPos.b, selectedPos.f, selectedPos.p); setSelectedPos(null); } }}>
+                  <button className="m-btn-big" style={{ flex: 1, background: "var(--danger-soft)", color: "var(--danger)", border: "none" }} onClick={() => { if (confirm(`ลบตำแหน่ง ${selectedPos.p}?`)) { removePosition(selectedPos.b, selectedPos.f, selectedPos.p); closeSheet(); } }}>
                     <Icons.Trash size={14}/> ลบ
                   </button>
                 )}
-                <button className="m-btn-big" style={{ flex: 1, background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={() => { const n = prompt("เปลี่ยนชื่อตำแหน่ง", selectedPos.p); if (n && n.trim() && n.trim() !== selectedPos.p) { renamePosition(selectedPos.b, selectedPos.f, selectedPos.p, n.trim()); setSelectedPos(null); } }}>
+                <button className="m-btn-big" style={{ flex: 1, background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={() => { const n = prompt("เปลี่ยนชื่อตำแหน่ง", selectedPos.p); if (n && n.trim() && n.trim() !== selectedPos.p) { renamePosition(selectedPos.b, selectedPos.f, selectedPos.p, n.trim()); closeSheet(); } }}>
                   <Icons.Edit size={14}/> เปลี่ยนชื่อ
                 </button>
-                <button className="m-btn-big accent" style={{ flex: 1 }} onClick={() => setSelectedPos(null)}>เสร็จสิ้น</button>
+                <button className="m-btn-big accent" style={{ flex: 1 }} onClick={closeSheet}>เสร็จสิ้น</button>
               </div>
             </div>
           </>
@@ -3895,7 +4218,18 @@ function MSettings({ ctx }) {
             ctx.pushToast(`ดาวน์โหลดไฟล์สำรองแล้ว · ${total} รายการ`);
           } catch (e) { ctx.pushToast("สำรองไม่สำเร็จ: " + ((e && e.message) || e)); }
         }}><Icons.Down size={16}/> ดาวน์โหลดไฟล์สำรอง (.json)</button>
-        <div style={{ fontSize: 11, color: "var(--muted)", padding: "6px 4px 0" }}>เก็บไฟล์ไว้ หรืออัปโหลดเข้า Google Drive · ตั้งค่าสำรองอัตโนมัติได้ที่เดสก์ท็อป</div>
+        <button className="m-btn-big outline" style={{ marginTop: 8 }} onClick={async () => {
+          try {
+            if (typeof runCloudBackup !== "function") throw new Error("ยังไม่พร้อม");
+            ctx.pushToast("กำลังสำรองเข้า Google Drive…");
+            const r = await runCloudBackup();
+            if (r.error) throw new Error(r.error);
+            const d = r.data || {};
+            ctx.pushToast(`สำรองเข้า Drive แล้ว${d.stockFile ? " + รายงานสต็อก Excel" : ""}`);
+            if (d.stockError) ctx.pushToast("แต่รายงานสต็อก Excel ไม่สำเร็จ");
+          } catch (e) { ctx.pushToast("สำรองเข้า Drive ไม่สำเร็จ: " + ((e && e.message) || e)); }
+        }}><Icons.Refresh size={16}/> สำรองเข้า Drive ตอนนี้ (JSON + Excel)</button>
+        <div style={{ fontSize: 11, color: "var(--muted)", padding: "6px 4px 0" }}>เก็บไฟล์ไว้ หรืออัปโหลดเข้า Google Drive · สำรองอัตโนมัติทุกคืน (เฉพาะแอดมิน)</div>
 
         <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>ข้อมูลร้าน</div>
         <div className="stack" style={{ gap: 8 }}>
@@ -4954,10 +5288,18 @@ function MSkuPicker({ value, onChange }) {
           color: "var(--fg)"
         }}
       >
-        <div className="m-row-thumb" style={{ fontSize: 10, fontWeight: 600 }}>{current.sku.slice(-3)}</div>
+        {/* current can be undefined (sku deleted mid-session, catalog not yet
+            hydrated) — guard like the desktop SkuPicker instead of crashing. */}
+        <div className="m-row-thumb" style={{ fontSize: 10, fontWeight: 600 }}>{current ? current.sku.slice(-3) : "?"}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{current.name}</div>
-          <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 1 }}>{current.sku} · {current.cat}</div>
+          {current ? (
+            <>
+              <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{current.name}</div>
+              <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 1 }}>{current.sku} · {current.cat}</div>
+            </>
+          ) : (
+            <div style={{ fontSize: 13, color: "var(--muted)" }}>เลือกสินค้า…</div>
+          )}
         </div>
         <Icons.Search size={14} style={{ color: "var(--muted)", flexShrink: 0 }}/>
       </button>

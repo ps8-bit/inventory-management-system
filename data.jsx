@@ -338,6 +338,58 @@ function deductManyAndPersist(deductions) {
   if (changed && typeof applyStockAdj === "function") applyStockAdj(adj);
 }
 
+/* ── Reasoned stock adjustment (ปรับสต็อก) ──
+   One choke point for a stock correction with a recorded reason — miscount,
+   damaged/lost item, or a sale made outside the system (Shopee/Lazada/หน้าร้าน).
+   Desktop (StockAdjustModal) and mobile (MAdjust) BOTH call this; the UIs are
+   forked but the logic must not be. Distinct from the sell/ตัดสต็อก flows: it
+   never creates an order, so external sales recorded here deliberately do NOT
+   feed revenue/channel analytics (those read orders — use ตัดสต็อก for that). */
+function applyStockAdjustment({ sku, delta, reason, note, source }) {
+  const d = Math.trunc(Number(delta) || 0);
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p || !d) return { ok: false };
+  // Both modals preview against the EFFECTIVE qty (raw + ims_stock_adj overlay).
+  // Fold any residual overlay entry (legacy pending-sale artifact — nothing
+  // writes new ones) into the applied delta and clear it, so the stock shown
+  // after apply is exactly the preview the user confirmed, ตั้งค่าเป็น lands on
+  // the counted number, and the audit from→to matches what was on screen.
+  const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
+  const ov = Number(adj[sku]) || 0;
+  const from = Math.max(0, (Number(p.qty) || 0) + ov);   // what the user saw
+  // Delta from the CLAMPED baseline the user saw (≡ d + ov when raw+ov ≥ 0,
+  // but correct when a stale overlay pushed the display below the 0-clamp —
+  // ตั้งค่าเป็น still lands on the counted number instead of under-shooting).
+  const applied = from + d - (Number(p.qty) || 0);
+  if (applied) adjustProductQty(sku, applied);           // optimistic in-place + atomic RPC + offline queue
+  if (sku in adj) { delete adj[sku]; if (typeof applyStockAdj === "function") applyStockAdj(adj); }
+  const to = Math.max(0, Number(p.qty) || 0);            // overlay cleared → raw IS the displayed qty
+  const eff = to - from;
+  const reasonLabel = (reason && reason.label) || String(reason || "");
+  const noteText = String(note || "").trim();
+  const fullReason = noteText ? `${reasonLabel} — ${noteText}` : reasonLabel;
+  // Record the EFFECTIVE local delta (post-clamp), not the requested one, so the
+  // trail never claims more than happened. Skip both writes when nothing moved.
+  if (eff) {
+    // Audit trail: only summary/note survive to the DB (changes[] stays local),
+    // so sku, ±delta, from→to and the reason are all packed into them.
+    if (typeof recordChange === "function") {
+      recordChange({
+        entity: "product", entityId: sku, action: "adjust",
+        summary: `ปรับสต็อก ${p.name} (${sku}) ${eff > 0 ? "+" : ""}${eff} ชิ้น (${from} → ${to})${source === "mobile" ? " (มือถือ)" : ""}`,
+        changes: [{ label: "จำนวน", from: `${from} ชิ้น`, to: `${to} ชิ้น` }],
+        note: fullReason
+      });
+    }
+    // Structured, queryable history (stock_adjustments table). Best-effort like
+    // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
+    if (typeof dbInsertStockAdjustment === "function") {
+      dbInsertStockAdjustment([{ sku, delta: eff, reason: fullReason }]).catch(() => {});
+    }
+  }
+  return { ok: true, from, to, eff };
+}
+
 /* ── Persistent order store ──
    Mirrors outbound orders to localStorage so badge counts and other
    components can read them without requiring the Outbound screen
@@ -461,6 +513,13 @@ function canDeleteData() {
   const role = (window.__currentUser && window.__currentUser.role) || "viewer";
   return role === "admin" || role === "manager";
 }
+/* Capability: manual stock adjustment (ปรับสต็อก). Mirrors the products UPDATE
+   RLS + adjust_stock RPC gating (admin/manager/staff; viewer matches 0 rows),
+   so the UI and the server agree on who sees the buttons. */
+function canAdjustStock() {
+  const role = (window.__currentUser && window.__currentUser.role) || "viewer";
+  return role === "admin" || role === "manager" || role === "staff";
+}
 function _locDenyToast() {
   try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เฉพาะผู้ดูแลระบบหรือผู้จัดการเท่านั้นที่ลบตำแหน่งได้" })); } catch (e) {}
 }
@@ -565,6 +624,37 @@ function skusInLocation(code) {
   return PRODUCTS.filter(p => (p.loc || "") === code).length;
 }
 
+/* Product-finder search (ตำแหน่งสินค้า): match by SKU or name — the SKU doubles
+   as the barcode, so a keyboard-wedge scan into the input resolves too.
+   Ranked exact SKU → prefix → substring. Returns { hits, total }. */
+function searchProductsForLocation(query, limit = 12) {
+  const lq = String(query || "").trim().toLowerCase();
+  if (!lq) return { hits: [], total: 0 };
+  const rank = (p) => {
+    const sku = String(p.sku || "").toLowerCase();
+    const name = String(p.name || "").toLowerCase();
+    if (sku === lq) return 0;
+    if (sku.startsWith(lq) || name.startsWith(lq)) return 1;
+    return 2;
+  };
+  const all = PRODUCTS.filter(p =>
+    String(p.sku || "").toLowerCase().includes(lq) ||
+    String(p.name || "").toLowerCase().includes(lq)
+  ).sort((a, b) => rank(a) - rank(b));
+  return { hits: all.slice(0, limit), total: all.length };
+}
+
+/* Split a p.loc code back into { building, floor, pos, code }. Prefers the live
+   tree (survives odd names containing the separator); falls back to splitting
+   the string so stale codes that no longer exist in the tree still resolve. */
+function locParts(code) {
+  if (!code) return null;
+  const hit = allPositions().find(x => x.code === code);
+  if (hit) return hit;
+  const seg = String(code).split(LOC_SEP);
+  return { building: seg[0] || "", floor: seg[1] || "", pos: seg[2] || seg[seg.length - 1] || String(code), code };
+}
+
 /* One-time migration to the Building→Floor→Position model: drop the old flat demo
    bins, seed the two real buildings, and clear product locations (the old "A-01-01"
    codes don't exist in the new tree) so the warehouse starts clean. Runs once per
@@ -596,6 +686,19 @@ const CHANNEL_LIST = [
   { id: "line",   name: "LINE Shopping", color: "oklch(0.6 0.18 145)", short: "LN" },
   { id: "web",    name: "เว็บไซต์",      color: "oklch(0.55 0.13 235)", short: "WB" },
   { id: "other",  name: "ออฟไลน์ / อื่นๆ", color: "oklch(0.55 0.01 80)", short: "OT" }
+];
+
+/* Reasons for a manual stock adjustment (ปรับสต็อก) — single source for the
+   desktop modal AND mobile MAdjust so the taxonomy can't fork. External-sale
+   reasons derive from CHANNEL_LIST; the channel is carried in the label text
+   (stock_adjustments stores a reason string, not a channel column). */
+const ADJUST_REASONS = [
+  { id: "recount",      label: "นับสต็อกผิด / แก้ไขยอด" },
+  { id: "damaged",      label: "สินค้าเสียหาย / ชำรุด" },
+  { id: "lost",         label: "สินค้าสูญหาย" },
+  ...CHANNEL_LIST.filter(c => c.id !== "other").map(c => ({ id: "sale-" + c.id, label: `ขายผ่าน ${c.name} (นอกระบบ)`, channel: c.id })),
+  { id: "sale-offline", label: "ขายหน้าร้าน / ออฟไลน์", channel: "other" },
+  { id: "other",        label: "อื่นๆ (ระบุ)", requireNote: true }
 ];
 
 const CHANNELS = [
@@ -660,11 +763,13 @@ const ROLES = [
   { id: "viewer",  label: "ดูเท่านั้น",   desc: "ดูข้อมูลและรายงานได้ ไม่สามารถแก้ไข",         color: "oklch(0.55 0.01 80)",  badge: "badge-neutral" }
 ];
 
+/* "adjust" is a mobile-menu-only id (no ALL_NAV entry, so it can never appear
+   in the desktop sidebar) — it gates the MMore ปรับสต็อก row per role. */
 const ROLE_NAV = {
-  admin:   ["dashboard","inbound","outbound","inventory","stocktake","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
-  manager: ["dashboard","inbound","outbound","inventory","stocktake","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
-  staff:   ["dashboard","inbound","outbound","inventory","stocktake","locations","bundles","labels","tracking","handheld"],
-  viewer:  ["dashboard","inventory","locations","bundles","labels","tracking","analytics"]
+  admin:   ["dashboard","inbound","outbound","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
+  manager: ["dashboard","inbound","outbound","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
+  staff:   ["dashboard","inbound","outbound","finder","inventory","stocktake","adjust","locations","bundles","labels","tracking","handheld"],
+  viewer:  ["dashboard","finder","inventory","locations","bundles","labels","tracking","analytics"]
 };
 
 /* ── Working-hours access window ──
@@ -1438,7 +1543,93 @@ function openPickListWindow(orders, pushToast) {
   w.document.close();
 }
 
+/* ── Daily stock report (Excel) ──
+   Builds a real .xlsx snapshot of current stock for daily backup / quantity
+   checking. Shared by the in-app "download today" button (desktop Inventory +
+   mobile). The nightly Drive backup (backup-to-drive Edge Function) reimplements
+   the SAME columns server-side in Deno — keep the two column lists in sync.
+
+   The "เปลี่ยนจากเมื่อวาน" (change vs yesterday) column comes from a per-day qty
+   snapshot stored in app_state under STOCK_SNAPSHOT_KEY as
+   { date: "YYYY-MM-DD", map: { sku: qty } }. The nightly cron WRITES it; the
+   in-app button only READS the latest one (= yesterday's end-of-day) so it can
+   never race the cron. If no snapshot exists yet the delta shows "—". */
+const STOCK_SNAPSHOT_KEY = "stock_snapshot_daily";
+const STOCK_REPORT_HEADERS = ["SKU", "ชื่อสินค้า", "หมวดหมู่", "แบรนด์", "คงเหลือ", "จองแล้ว", "จุดสั่งซื้อ", "ตำแหน่ง", "ราคาขาย", "ต้นทุน", "มูลค่าสต็อก", "เปลี่ยนจากเมื่อวาน", "สถานะ"];
+
+function stockReportRows(products, prevMap) {
+  prevMap = prevMap || {};
+  return (products || []).map(p => {
+    const qty = Number(p.qty) || 0;
+    const cost = Number(p.cost) || 0;
+    const prev = prevMap[p.sku];
+    const hasPrev = typeof prev === "number";
+    const delta = hasPrev ? qty - prev : null;
+    const s = (typeof stockStatus === "function") ? stockStatus(p) : { label: "" };
+    return [
+      p.sku, p.name || "", p.cat || "", p.brand || "",
+      qty, Number(p.reserved) || 0, Number(p.reorder) || 0,
+      p.loc || "", Number(p.price) || 0, cost, qty * cost,
+      hasPrev ? (delta > 0 ? "+" + delta : String(delta)) : "—",
+      s.label
+    ];
+  });
+}
+
+// Assemble the two-sheet workbook (สรุป summary + สต็อก detail). Returns null if
+// the XLSX library hasn't loaded yet.
+function buildStockReportWorkbook(products, prevMap, dateStr) {
+  if (typeof XLSX === "undefined") return null;
+  const rows = stockReportRows(products, prevMap);
+  const ws = XLSX.utils.aoa_to_sheet([STOCK_REPORT_HEADERS, ...rows]);
+  ws["!cols"] = [{ wch: 16 }, { wch: 34 }, { wch: 16 }, { wch: 14 }, { wch: 9 }, { wch: 9 }, { wch: 10 }, { wch: 16 }, { wch: 10 }, { wch: 10 }, { wch: 13 }, { wch: 15 }, { wch: 18 }];
+
+  const totalQty = rows.reduce((s, r) => s + (r[4] || 0), 0);
+  const totalVal = rows.reduce((s, r) => s + (r[10] || 0), 0);
+  const outCnt = rows.filter(r => r[4] === 0).length;
+  const lowCnt = rows.filter(r => r[4] > 0 && r[4] <= r[6]).length;
+  const wsSum = XLSX.utils.aoa_to_sheet([
+    ["รายงานสต็อกประจำวัน — คลังพร้อมส่ง (PS TACTICAL)"],
+    ["วันที่", dateStr],
+    [""],
+    ["จำนวน SKU", rows.length],
+    ["รวมจำนวนชิ้น", totalQty],
+    ["มูลค่าสต็อกรวม (บาท)", totalVal],
+    ["สินค้าหมดสต็อก", outCnt],
+    ["ต่ำกว่าจุดสั่งซื้อ", lowCnt]
+  ]);
+  wsSum["!cols"] = [{ wch: 30 }, { wch: 22 }];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsSum, "สรุป");
+  XLSX.utils.book_append_sheet(wb, ws, "สต็อก");
+  return wb;
+}
+
+// Build + download today's stock report. `products` defaults to the live PRODUCTS
+// array. Reads yesterday's snapshot from app_state for the delta column.
+async function downloadStockReport(products) {
+  const toast = (m) => { if (typeof pushToast === "function") pushToast(m); };
+  if (typeof XLSX === "undefined") { toast("ไลบรารี Excel ยังไม่พร้อม กรุณารอสักครู่"); return; }
+  const list = products || (typeof PRODUCTS !== "undefined" ? PRODUCTS : []);
+  if (!list.length) { toast("ยังไม่มีข้อมูลสินค้า"); return; }
+  let prevMap = {};
+  try {
+    if (typeof dbLoadState === "function") {
+      const snap = await dbLoadState(STOCK_SNAPSHOT_KEY);
+      if (snap && snap.map && typeof snap.map === "object") prevMap = snap.map;
+    }
+  } catch (_) { /* offline / no snapshot yet — delta column just shows "—" */ }
+  const dateStr = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+  const wb = buildStockReportWorkbook(list, prevMap, dateStr);
+  if (!wb) { toast("สร้างไฟล์ Excel ไม่สำเร็จ"); return; }
+  try { XLSX.writeFile(wb, `รายงานสต็อก_${dateStr}.xlsx`); }
+  catch (e) { toast("บันทึกไฟล์ Excel ไม่สำเร็จ"); return; }
+  toast(`ดาวน์โหลดรายงานสต็อก ${list.length} รายการแล้ว`);
+}
+
 Object.assign(window, {
+  STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,
   skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem,
@@ -1448,8 +1639,9 @@ Object.assign(window, {
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, todayIso, bangkokDateOf, isoToThai,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
+  applyStockAdjustment, ADJUST_REASONS, canAdjustStock,
   loadOrders, saveOrders, appendOrder,
-  loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData,
+  loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   loadInboundDraft, saveInboundDraft,
