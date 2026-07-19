@@ -27,14 +27,15 @@ node server.js
 # LAN server for team / phones on the same Wi-Fi → http://<lan-ip>:5500
 powershell -ExecutionPolicy Bypass -File serve.ps1
 
-# Deploy to production (Vercel prod + redeploys ALL Supabase Edge Functions, checks vercel login)
+# Deploy to production (checks vercel login → deploys a FIXED SUBSET of Edge Functions → Vercel prod)
 ./deploy.ps1
 # Frontend-only prod deploy (faster; use when no Edge Function changed)
 npx vercel deploy --prod --yes --force
 
 # Deploy a single Supabase Edge Function (Deno/TS)
 npx supabase functions deploy <name> --project-ref eayufrfkmpeeeuaimvqw
-# track-lookup and store-info are PUBLIC (no auth) → add --no-verify-jwt
+# PUBLIC/webhook/cron functions self-gate and MUST add --no-verify-jwt or the gateway 401s them:
+#   track-lookup, store-info (public), line-bot (LINE webhook), line-alert (cron), extract-slip (LINE + browser)
 
 # Alternate static host: Cloudflare Pages (project "psstock", via Wrangler) — Vercel is primary
 ./deploy-cf.ps1
@@ -42,9 +43,11 @@ npx supabase functions deploy <name> --project-ref eayufrfkmpeeeuaimvqw
 
 There are no lint/test/build commands. Verify changes by running `node server.js` and exercising the app in a browser (auth is real Supabase — there is no login bypass/seed).
 
+**`deploy.ps1` only deploys 7 of the 11 Edge Functions** (extract-slip, track-lookup, parse-recipient, store-info, manage-users, line-bot, line-alert — each with its own JWT flag baked in). It does **NOT** touch `create-user`, `extract-product`, `extract-og-image`, or `backup-to-drive` — if you change one of those, deploy it by hand with the single-function command above, or the change never ships.
+
 ### Cache-bust token — bump on every deploy that changes an asset
 
-Every CSS/JSX `<link>`/`<script>` in `Inventory Management System.html` carries a shared `?v=YYYYMMDDx` query (a moving value — read the HTML for the current one, e.g. `20260606l`). **When you change any `.jsx` or `styles.css`, bump that token** (it's one shared value — replace-all it in the HTML). This is the project's enforced convention to defeat browser/CDN/PWA caching of the changed file. (`vercel.json` also sets `Cache-Control: no-store`, but bump the token regardless.) A second, complementary cache-bust path exists: `vercel.json` rewrites `/u/:ts/:rest*` → `/:rest*`, so an installed PWA can be force-refreshed by loading it under a throwaway `/u/<timestamp>/` prefix — that's what stray `/u/123456/...` URLs are.
+Every CSS/JSX `<link>`/`<script>` in `Inventory Management System.html` carries a shared `?v=YYYYMMDDx` query (a moving value — read the HTML for the current one, e.g. `20260710a`). **When you change any `.jsx` or `styles.css`, bump that token** (it's one shared value — replace-all it in the HTML). This is the project's enforced convention to defeat browser/CDN/PWA caching of the changed file. (`vercel.json` also sets `Cache-Control: no-store`, but bump the token regardless.) A second, complementary cache-bust path exists: `vercel.json` rewrites `/u/:ts/:rest*` → `/:rest*`, so an installed PWA can be force-refreshed by loading it under a throwaway `/u/<timestamp>/` prefix — that's what stray `/u/123456/...` URLs are.
 
 ### PWA / service worker — do NOT add app-code caching
 

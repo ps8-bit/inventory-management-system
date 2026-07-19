@@ -5,8 +5,96 @@
 // Triggered by cron (x-cron-secret) or manually by a logged-in admin.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+// SheetJS is not on npm/esm.sh past 0.18.x, and the Supabase bundler blocks
+// cdn.sheetjs.com — so the official 0.20.2 ESM build is VENDORED next to this
+// file (xlsx.mjs, from https://cdn.sheetjs.com/xlsx-0.20.2/package/xlsx.mjs).
+import * as XLSX from "./xlsx.mjs";
 
 const TABLES = ["products", "orders", "bundles", "bundle_items", "labels", "store_settings", "app_state", "audit_log"];
+
+// Same columns/labels as the in-app report (data.jsx buildStockReportWorkbook) —
+// keep the two in sync so the nightly Excel and the manual download match.
+const STOCK_HEADERS = ["SKU", "ชื่อสินค้า", "หมวดหมู่", "แบรนด์", "คงเหลือ", "จองแล้ว", "จุดสั่งซื้อ", "ตำแหน่ง", "ราคาขาย", "ต้นทุน", "มูลค่าสต็อก", "เปลี่ยนจากเมื่อวาน", "สถานะ"];
+const STOCK_SNAPSHOT_KEY = "stock_snapshot_daily";
+
+function statusLabel(qty: number, reorder: number): string {
+  if (qty === 0) return "หมดสต็อก";
+  if (qty <= reorder) return "ต่ำกว่าจุดสั่งซื้อ";
+  return "พร้อมขาย";
+}
+
+// Build a two-sheet .xlsx (สรุป summary + สต็อก detail) as a Uint8Array.
+// `adj` is the app_state stock_adj overlay ({sku: delta}); `prevMap` is
+// yesterday's {sku: qty} for the change-vs-yesterday column.
+function buildStockXlsx(
+  products: Array<Record<string, unknown>>,
+  adj: Record<string, number>,
+  prevMap: Record<string, number>,
+  dateStr: string,
+): { bytes: Uint8Array; snapshot: Record<string, number>; totals: Record<string, number> } {
+  const snapshot: Record<string, number> = {};
+  let totalQty = 0, totalVal = 0, outCnt = 0, lowCnt = 0;
+  const rows = products.map((p) => {
+    const sku = String(p.sku ?? "");
+    const rawQty = Number(p.qty) || 0;
+    const qty = Math.max(0, rawQty + (Number(adj[sku]) || 0));
+    const cost = Number(p.cost) || 0;
+    const reorder = Number(p.reorder) || 0;
+    const val = qty * cost;
+    snapshot[sku] = qty;
+    totalQty += qty; totalVal += val;
+    if (qty === 0) outCnt++; else if (qty <= reorder) lowCnt++;
+    const prev = prevMap[sku];
+    const hasPrev = typeof prev === "number";
+    const delta = hasPrev ? qty - prev : null;
+    return [
+      sku, p.name ?? "", p.cat ?? "", (p as Record<string, unknown>).brand ?? "",
+      qty, Number(p.reserved) || 0, reorder, p.loc ?? "",
+      Number(p.price) || 0, cost, val,
+      hasPrev ? (delta! > 0 ? "+" + delta : String(delta)) : "—",
+      statusLabel(qty, reorder),
+    ];
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet([STOCK_HEADERS, ...rows]);
+  ws["!cols"] = [{ wch: 16 }, { wch: 34 }, { wch: 16 }, { wch: 14 }, { wch: 9 }, { wch: 9 }, { wch: 10 }, { wch: 16 }, { wch: 10 }, { wch: 10 }, { wch: 13 }, { wch: 15 }, { wch: 18 }];
+  const wsSum = XLSX.utils.aoa_to_sheet([
+    ["รายงานสต็อกประจำวัน — คลังพร้อมส่ง (PS TACTICAL)"],
+    ["วันที่", dateStr],
+    [""],
+    ["จำนวน SKU", rows.length],
+    ["รวมจำนวนชิ้น", totalQty],
+    ["มูลค่าสต็อกรวม (บาท)", totalVal],
+    ["สินค้าหมดสต็อก", outCnt],
+    ["ต่ำกว่าจุดสั่งซื้อ", lowCnt],
+  ]);
+  wsSum["!cols"] = [{ wch: 30 }, { wch: 22 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, wsSum, "สรุป");
+  XLSX.utils.book_append_sheet(wb, ws, "สต็อก");
+  const bytes = XLSX.write(wb, { type: "array", bookType: "xlsx" }) as Uint8Array;
+  return { bytes, snapshot, totals: { skus: rows.length, qty: totalQty, value: totalVal, out: outCnt, low: lowCnt } };
+}
+
+// Upload arbitrary bytes as a file into the Drive folder. Returns the created
+// file's name, or throws.
+async function driveUpload(token: string, folderId: string, name: string, mime: string, bytes: Uint8Array): Promise<string> {
+  const boundary = "ims" + Math.random().toString(36).slice(2);
+  const meta = JSON.stringify({ name, parents: [folderId] });
+  const head = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`;
+  const tail = `\r\n--${boundary}--`;
+  const enc = new TextEncoder();
+  const headB = enc.encode(head), tailB = enc.encode(tail);
+  const body = new Uint8Array(headB.length + bytes.length + tailB.length);
+  body.set(headB, 0); body.set(bytes, headB.length); body.set(tailB, headB.length + bytes.length);
+  const up = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true",
+    { method: "POST", headers: { "Authorization": "Bearer " + token, "Content-Type": `multipart/related; boundary=${boundary}` }, body },
+  );
+  const j = await up.json();
+  if (!up.ok || !j.id) throw new Error("Drive upload failed: " + JSON.stringify(j).slice(0, 200));
+  return j.name as string;
+}
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -148,30 +236,68 @@ Deno.serve(async (req) => {
     return json({ success: false, error: msg }, 502);
   }
 
-  // 4) Retention — keep the newest N backups, delete the rest (best-effort).
+  // 4) Daily stock report (.xlsx) — a dated, human-readable snapshot for checking
+  //    quantities day to day. Best-effort: a failure here never fails the JSON
+  //    backup above (that's the real safety net). The change-vs-yesterday column
+  //    comes from the prior stock_snapshot_daily written on the last run; we
+  //    write today's after a successful upload. Both stock_adj (pending overlay)
+  //    and the prior snapshot are read from the app_state rows already fetched.
+  const dateStr = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 10); // Bangkok (UTC+7) calendar date
+  let stockFile: string | null = null;
+  let stockError: string | null = null;
+  try {
+    const stateRows = (Array.isArray(tables.app_state) ? tables.app_state : []) as Array<Record<string, unknown>>;
+    const adjRow = stateRows.find((r) => r.key === "stock_adj");
+    const adj = (adjRow && adjRow.value && typeof adjRow.value === "object") ? adjRow.value as Record<string, number> : {};
+    const prevRow = stateRows.find((r) => r.key === STOCK_SNAPSHOT_KEY);
+    const prevVal = prevRow ? prevRow.value as Record<string, unknown> : null;
+    const prevMap = (prevVal && prevVal.map && typeof prevVal.map === "object") ? prevVal.map as Record<string, number> : {};
+    const productRows = (Array.isArray(tables.products) ? tables.products : []) as Array<Record<string, unknown>>;
+
+    const { bytes, snapshot: stockSnap, totals } = buildStockXlsx(productRows, adj, prevMap, dateStr);
+    stockFile = await driveUpload(
+      token, folderId, `stock-report-${dateStr}.xlsx`,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bytes,
+    );
+    // Store today's qty map so tomorrow's report can show the delta. Overwrites
+    // the single rolling key (not per-day) — we only ever diff against yesterday.
+    await admin.from("app_state").upsert({
+      key: STOCK_SNAPSHOT_KEY,
+      value: { date: dateStr, map: stockSnap, totals },
+      updated_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    stockError = String(e).slice(0, 300);
+  }
+
+  // 5) Retention — keep the newest N of EACH kind (JSON backups + stock reports),
+  //    delete the rest (best-effort).
   const keep = parseInt(Deno.env.get("BACKUP_RETENTION") || "30", 10) || 30;
   let pruned = 0;
-  try {
-    const q = encodeURIComponent(`'${folderId}' in parents and name contains 'ims-backup' and trashed = false`);
-    const list = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&fields=files(id,name)&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true`,
-      { headers: { "Authorization": "Bearer " + token } },
-    );
-    const lj = await list.json();
-    const files = Array.isArray(lj.files) ? lj.files : [];
-    for (const f of files.slice(keep)) {
-      const del = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${f.id}?supportsAllDrives=true`,
-        { method: "DELETE", headers: { "Authorization": "Bearer " + token } },
+  for (const prefix of ["ims-backup", "stock-report"]) {
+    try {
+      const q = encodeURIComponent(`'${folderId}' in parents and name contains '${prefix}' and trashed = false`);
+      const list = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime desc&fields=files(id,name)&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+        { headers: { "Authorization": "Bearer " + token } },
       );
-      if (del.ok) pruned++;
-    }
-  } catch (_) { /* retention is best-effort — never fail the backup over it */ }
+      const lj = await list.json();
+      const files = Array.isArray(lj.files) ? lj.files : [];
+      for (const f of files.slice(keep)) {
+        const del = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${f.id}?supportsAllDrives=true`,
+          { method: "DELETE", headers: { "Authorization": "Bearer " + token } },
+        );
+        if (del.ok) pruned++;
+      }
+    } catch (_) { /* retention is best-effort — never fail the backup over it */ }
+  }
 
   // Record the run + alert on a partial snapshot (some table read failed but we
   // still uploaded, clearly flagged) so a slowly-degrading backup gets noticed.
-  await recordRun(admin, partial ? "partial" : "ok", { file: upJson.name, counts, partial, errors, pruned });
+  await recordRun(admin, partial ? "partial" : "ok", { file: upJson.name, stockFile, stockError, counts, partial, errors, pruned });
   if (partial) await alertOwner("⚠️ สำรองข้อมูลบางส่วน: อ่านตารางไม่สำเร็จ — " + Object.keys(errors).join(", "));
+  if (stockError) await alertOwner("⚠️ สร้างรายงานสต็อก Excel ไม่สำเร็จ (สำรอง JSON สำเร็จแล้ว) — " + stockError);
 
-  return json({ success: true, file: upJson.name, id: upJson.id, counts, partial, errors, pruned });
+  return json({ success: true, file: upJson.name, id: upJson.id, stockFile, stockError, counts, partial, errors, pruned });
 });
