@@ -3591,6 +3591,8 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
   const canAssign = typeof canAdjustStock === "function" ? canAdjustStock() : true;
   const [adding, setAdding] = useState(false);
   const [addQ, setAddQ] = useState("");
+  const [camOpen, setCamOpen] = useState(false);
+  const [showN, setShowN] = useState(8);
   const toast = (m) => window.dispatchEvent(new CustomEvent("ims-toast", { detail: m }));
   const assign = (p) => {
     const from = p.loc && p.loc !== loc.code ? locParts(p.loc) : null;
@@ -3613,6 +3615,40 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
     if (!hit) return;
     if ((hit.loc || "") !== loc.code) assign(hit);
     setAddQ("");
+  };
+  // Camera scan → exact-SKU resolve → assign here. Continuous mode: the scanner
+  // stays open between decodes so a whole shelf can be filled in one session.
+  const onCamScan = (code) => {
+    const q = String(code || "").trim();
+    if (!q) return;
+    const p = PRODUCTS.find(x => String(x.sku || "").toLowerCase() === q.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast("ไม่พบ SKU: " + q); return; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    if ((p.loc || "") === loc.code) { toast(`“${p.name}” อยู่ใน ${loc.pos} อยู่แล้ว`); return; }
+    assign(p);
+  };
+  // One row of the picker — used by both the search results and the browse list.
+  const pickRow = (p) => {
+    const here = (p.loc || "") === loc.code;
+    const from = !here && p.loc ? locParts(p.loc) : null;
+    return (
+      <div key={p.sku} className="row" onClick={() => { if (!here) assign(p); }}
+        style={{ gap: 10, padding: 8, borderRadius: 8, background: here ? "var(--accent-soft)" : "var(--surface-2)", cursor: here ? "default" : "pointer" }}>
+        {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={36} radius={7}/>}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+          <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{p.sku} · {p.qty} ชิ้น</div>
+        </div>
+        {here
+          ? <span className="row" style={{ gap: 4, fontSize: 11, color: "var(--accent)", fontWeight: 600, flexShrink: 0 }}><Icons.Check size={12}/> อยู่ที่นี่แล้ว</span>
+          : (
+            <span className="row" style={{ gap: 6, flexShrink: 0 }}>
+              {from && <span style={{ fontSize: 10, color: "var(--muted)" }}>อยู่ที่ {from.pos}</span>}
+              <span className="btn btn-sm btn-primary" style={{ pointerEvents: "none" }}><Icons.Plus size={11}/> {from ? "ย้ายมาที่นี่" : "เพิ่ม"}</span>
+            </span>
+          )}
+      </div>
+    );
   };
 
   const printLabel = () => {
@@ -3660,7 +3696,7 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
           <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
             <div style={{ fontWeight: 600, fontSize: 13 }}>สินค้าในตำแหน่งนี้ ({items.length})</div>
             {canAssign && (
-              <button className={"btn btn-sm" + (adding ? "" : " btn-primary")} onClick={() => { setAdding(a => !a); setAddQ(""); }}>
+              <button className={"btn btn-sm" + (adding ? "" : " btn-primary")} onClick={() => { setAdding(a => !a); setAddQ(""); setShowN(8); }}>
                 {adding ? "เสร็จแล้ว" : <><Icons.Plus size={12}/> เพิ่มสินค้า</>}
               </button>
             )}
@@ -3668,47 +3704,46 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
 
           {adding && (
             <div style={{ marginBottom: 10, padding: 10, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8 }}>
-                <Icons.Search size={13} style={{ color: "var(--muted)", flexShrink: 0 }}/>
-                <input autoFocus value={addQ} onChange={e => setAddQ(e.target.value)} onKeyDown={onAddKey}
-                  placeholder="ค้นหาสินค้า (ชื่อ / SKU / สแกนบาร์โค้ด)..."
-                  style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 13, color: "var(--fg)", fontFamily: "inherit" }}/>
-                {addQ && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)", flexShrink: 0 }} onClick={() => setAddQ("")}/>}
+              <div className="row" style={{ gap: 8 }}>
+                <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                  <Icons.Search size={13} style={{ color: "var(--muted)", flexShrink: 0 }}/>
+                  <input autoFocus value={addQ} onChange={e => setAddQ(e.target.value)} onKeyDown={onAddKey}
+                    placeholder="ค้นหาสินค้า (ชื่อ / SKU)..."
+                    style={{ flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent", fontSize: 13, color: "var(--fg)", fontFamily: "inherit" }}/>
+                  {addQ && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)", flexShrink: 0 }} onClick={() => setAddQ("")}/>}
+                </div>
+                <button className="btn btn-sm" style={{ flexShrink: 0, gap: 5 }} onClick={() => setCamOpen(true)} title="สแกนบาร์โค้ดด้วยกล้อง">
+                  <Icons.Camera size={14}/> สแกน
+                </button>
               </div>
-              {addQ.trim() ? (() => {
-                const res = searchProductsForLocation(addQ, 8);
+              {(() => {
+                if (addQ.trim()) {
+                  const res = searchProductsForLocation(addQ, 8);
+                  return (
+                    <div className="stack" style={{ gap: 4, marginTop: 8 }}>
+                      {res.hits.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "10px 0" }}>ไม่พบสินค้า "{addQ}"</div>}
+                      {res.hits.map(p => pickRow(p))}
+                    </div>
+                  );
+                }
+                // No query → browse the whole catalog right here; unplaced products first.
+                const browse = PRODUCTS.filter(p => (p.loc || "") !== loc.code)
+                  .sort((a, b) => ((a.loc ? 1 : 0) - (b.loc ? 1 : 0)) || String(a.name || "").localeCompare(String(b.name || ""), "th"));
                 return (
                   <div className="stack" style={{ gap: 4, marginTop: 8 }}>
-                    {res.hits.length === 0 && <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "10px 0" }}>ไม่พบสินค้า "{addQ}"</div>}
-                    {res.hits.map(p => {
-                      const here = (p.loc || "") === loc.code;
-                      const from = !here && p.loc ? locParts(p.loc) : null;
-                      return (
-                        <div key={p.sku} className="row" onClick={() => { if (!here) assign(p); }}
-                          style={{ gap: 10, padding: 8, borderRadius: 8, background: here ? "var(--accent-soft)" : "var(--surface-2)", cursor: here ? "default" : "pointer" }}>
-                          {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={36} radius={7}/>}
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-                            <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{p.sku} · {p.qty} ชิ้น</div>
-                          </div>
-                          {here
-                            ? <span className="row" style={{ gap: 4, fontSize: 11, color: "var(--accent)", fontWeight: 600, flexShrink: 0 }}><Icons.Check size={12}/> อยู่ที่นี่แล้ว</span>
-                            : (
-                              <span className="row" style={{ gap: 6, flexShrink: 0 }}>
-                                {from && <span style={{ fontSize: 10, color: "var(--muted)" }}>อยู่ที่ {from.pos}</span>}
-                                <span className="btn btn-sm btn-primary" style={{ pointerEvents: "none" }}><Icons.Plus size={11}/> {from ? "ย้ายมาที่นี่" : "เพิ่ม"}</span>
-                              </span>
-                            )}
-                        </div>
-                      );
-                    })}
+                    {browse.length === 0
+                      ? <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "10px 0" }}>สินค้าทุกรายการอยู่ในตำแหน่งนี้แล้ว</div>
+                      : <div style={{ fontSize: 11, color: "var(--muted)", padding: "0 2px" }}>เลือกจากรายการ (สินค้าที่ยังไม่มีตำแหน่งขึ้นก่อน) หรือพิมพ์ค้นหา / กดสแกน</div>}
+                    {browse.slice(0, showN).map(p => pickRow(p))}
+                    {browse.length > showN && (
+                      <button className="btn btn-sm" style={{ alignSelf: "center", marginTop: 2 }} onClick={() => setShowN(n => n + 12)}>
+                        ดูเพิ่ม — แสดง {Math.min(showN, browse.length)} จาก {browse.length}
+                      </button>
+                    )}
                   </div>
                 );
-              })() : (
-                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, textAlign: "center" }}>
-                  พิมพ์ชื่อ / SKU หรือยิงบาร์โค้ดทีละชิ้น — ระบบเพิ่มเข้าตำแหน่งนี้ให้ทันที
-                </div>
-              )}
+              })()}
+              {camOpen && <CameraScanner continuous onScan={onCamScan} onClose={() => setCamOpen(false)}/>}
             </div>
           )}
 

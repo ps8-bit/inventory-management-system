@@ -2922,14 +2922,27 @@ function MLocations({ ctx }) {
   const canAssign = typeof canAdjustStock === "function" ? canAdjustStock() : true;
   const [addingProd, setAddingProd] = useStateM(false);
   const [addQ, setAddQ] = useStateM("");
+  const [camPick, setCamPick] = useStateM(false);
+  const [showNPick, setShowNPick] = useStateM(8);
   const toast = (m) => (ctx && ctx.pushToast ? ctx.pushToast(m) : window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })));
-  const openPos = (sel) => { setAddingProd(false); setAddQ(""); setSelectedPos(sel); };
-  const closeSheet = () => { setAddingProd(false); setAddQ(""); setSelectedPos(null); };
+  const openPos = (sel) => { setAddingProd(false); setAddQ(""); setCamPick(false); setShowNPick(8); setSelectedPos(sel); };
+  const closeSheet = () => { setAddingProd(false); setAddQ(""); setCamPick(false); setShowNPick(8); setSelectedPos(null); };
   const assignToPos = (p) => {
     const sel = selectedPos; if (!sel) return;
     const from = p.loc && p.loc !== sel.code && typeof locParts === "function" ? locParts(p.loc) : null;
     updateProductInStore(p.sku, { loc: sel.code });
     toast(from ? `ย้าย ${p.name} จาก ${from.pos} มา ${sel.p} แล้ว` : `เพิ่ม ${p.name} เข้า ${sel.p} แล้ว`);
+  };
+  // Camera scan → exact-SKU resolve → assign to the open position. Continuous
+  // mode keeps the scanner up so a whole shelf can be filled in one session.
+  const scanIntoPos = (code) => {
+    const sel = selectedPos; if (!sel) return;
+    const q = String(code || "").trim(); if (!q) return;
+    const p = PRODUCTS.find(x => String(x.sku || "").toLowerCase() === q.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast("ไม่พบ SKU: " + q); return; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    if ((p.loc || "") === sel.code) { toast(`${p.name} อยู่ใน ${sel.p} อยู่แล้ว`); return; }
+    assignToPos(p);
   };
   const unassignFromPos = (p) => {
     const sel = selectedPos; if (!sel) return;
@@ -3092,48 +3105,73 @@ function MLocations({ ctx }) {
                 <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
                   <div style={{ fontWeight: 600, fontSize: 13 }}>สินค้าในตำแหน่งนี้ ({items.length})</div>
                   {canAssign && (
-                    <button style={addBtn} onClick={() => { setAddingProd(a => !a); setAddQ(""); }}>
+                    <button style={addBtn} onClick={() => { setAddingProd(a => !a); setAddQ(""); setCamPick(false); setShowNPick(8); }}>
                       {addingProd ? "เสร็จแล้ว" : <><Icons.Plus size={12}/> เพิ่มสินค้า</>}
                     </button>
                   )}
                 </div>
 
-                {addingProd && (
-                  <div style={{ marginBottom: 12 }}>
-                    <div className="m-search">
-                      <Icons.Search size={14}/>
-                      <input autoFocus value={addQ} onChange={e => setAddQ(e.target.value)} placeholder="ค้นหาสินค้า (ชื่อ / SKU)..."/>
-                      {addQ && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setAddQ("")}/>}
-                    </div>
-                    {addQ.trim() ? (() => {
-                      const res = typeof searchProductsForLocation === "function" ? searchProductsForLocation(addQ, 8) : { hits: [], total: 0 };
-                      return (
-                        <div style={{ marginTop: 8 }}>
-                          {res.hits.length === 0 && <div style={{ padding: 12, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>ไม่พบสินค้า "{addQ}"</div>}
-                          {res.hits.map(p => {
-                            const here = (p.loc || "") === selectedPos.code;
-                            const from = !here && p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
-                            return (
-                              <div key={p.sku} className="row" onClick={() => { if (!here) assignToPos(p); }}
-                                style={{ gap: 10, padding: "8px 10px", background: here ? "var(--accent-soft)" : "var(--surface-2)", borderRadius: 8, marginBottom: 6 }}>
-                                <ProductImageThumb sku={p.sku} size={36} radius={7}/>
-                                <div style={{ flex: 1, minWidth: 0 }}>
-                                  <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-                                  <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{p.sku} · {p.qty} ชิ้น{from ? " · อยู่ที่ " + from.pos : ""}</div>
-                                </div>
-                                {here
-                                  ? <span className="row" style={{ gap: 3, fontSize: 11, color: "var(--accent)", fontWeight: 600, flexShrink: 0 }}><Icons.Check size={12}/> อยู่ที่นี่</span>
-                                  : <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", flexShrink: 0 }}>{from ? "ย้ายมาที่นี่" : "+ เพิ่ม"}</span>}
-                              </div>
-                            );
-                          })}
+                {addingProd && (() => {
+                  // One row of the picker — used by both search results and the browse list.
+                  const pickRowM = (p) => {
+                    const here = (p.loc || "") === selectedPos.code;
+                    const from = !here && p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+                    return (
+                      <div key={p.sku} className="row" onClick={() => { if (!here) assignToPos(p); }}
+                        style={{ gap: 10, padding: "8px 10px", background: here ? "var(--accent-soft)" : "var(--surface-2)", borderRadius: 8, marginBottom: 6 }}>
+                        <ProductImageThumb sku={p.sku} size={36} radius={7}/>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                          <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{p.sku} · {p.qty} ชิ้น{from ? " · อยู่ที่ " + from.pos : ""}</div>
                         </div>
-                      );
-                    })() : (
-                      <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "8px 0 0" }}>พิมพ์ชื่อหรือ SKU เพื่อเพิ่มสินค้าเข้าตำแหน่งนี้</div>
-                    )}
-                  </div>
-                )}
+                        {here
+                          ? <span className="row" style={{ gap: 3, fontSize: 11, color: "var(--accent)", fontWeight: 600, flexShrink: 0 }}><Icons.Check size={12}/> อยู่ที่นี่</span>
+                          : <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", flexShrink: 0 }}>{from ? "ย้ายมาที่นี่" : "+ เพิ่ม"}</span>}
+                      </div>
+                    );
+                  };
+                  return (
+                    <div style={{ marginBottom: 12 }}>
+                      <div className="row" style={{ gap: 8 }}>
+                        <div className="m-search" style={{ flex: 1, marginBottom: 0 }}>
+                          <Icons.Search size={14}/>
+                          <input autoFocus value={addQ} onChange={e => setAddQ(e.target.value)} placeholder="ค้นหาสินค้า (ชื่อ / SKU)..."/>
+                          {addQ && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setAddQ("")}/>}
+                        </div>
+                        <button style={{ ...addBtn, flexShrink: 0 }} onClick={() => setCamPick(true)} title="สแกนบาร์โค้ดด้วยกล้อง">
+                          <Icons.Camera size={14}/> สแกน
+                        </button>
+                      </div>
+                      {addQ.trim() ? (() => {
+                        const res = typeof searchProductsForLocation === "function" ? searchProductsForLocation(addQ, 8) : { hits: [], total: 0 };
+                        return (
+                          <div style={{ marginTop: 8 }}>
+                            {res.hits.length === 0 && <div style={{ padding: 12, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>ไม่พบสินค้า "{addQ}"</div>}
+                            {res.hits.map(pickRowM)}
+                          </div>
+                        );
+                      })() : (() => {
+                        // No query → browse the whole catalog right here; unplaced products first.
+                        const browse = PRODUCTS.filter(p => (p.loc || "") !== selectedPos.code)
+                          .sort((a, b) => ((a.loc ? 1 : 0) - (b.loc ? 1 : 0)) || String(a.name || "").localeCompare(String(b.name || ""), "th"));
+                        return (
+                          <div style={{ marginTop: 8 }}>
+                            {browse.length === 0
+                              ? <div style={{ padding: 12, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>สินค้าทุกรายการอยู่ในตำแหน่งนี้แล้ว</div>
+                              : <div style={{ fontSize: 10.5, color: "var(--muted)", padding: "0 2px 6px" }}>เลือกจากรายการ (สินค้าที่ยังไม่มีตำแหน่งขึ้นก่อน) หรือค้นหา / สแกน</div>}
+                            {browse.slice(0, showNPick).map(pickRowM)}
+                            {browse.length > showNPick && (
+                              <button className="m-btn-big" style={{ marginTop: 4, background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={() => setShowNPick(n => n + 12)}>
+                                ดูเพิ่ม — แสดง {Math.min(showNPick, browse.length)} จาก {browse.length}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+                      {camPick && <CameraScanner continuous onScan={scanIntoPos} onClose={() => setCamPick(false)}/>}
+                    </div>
+                  );
+                })()}
 
                 {items.length === 0
                   ? <div style={{ padding: 16, textAlign: "center", color: "var(--muted)", fontSize: 12, border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้{canAssign ? " — แตะ “เพิ่มสินค้า” เพื่อเลือกสินค้าเข้าตำแหน่ง" : ""}</div>
