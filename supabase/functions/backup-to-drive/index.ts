@@ -169,6 +169,8 @@ async function notifyReportReady(totals: Record<string, number>, dateStr: string
       { type: "text", text: `ไฟล์ stock-report-${dateStr}.xlsx อยู่ใน Google Drive แล้ว`, size: "xs", color: "#6B7280", align: "center", wrap: true },
       { type: "button", style: "primary", color: "#FF7A1A", height: "sm",
         action: { type: "uri", label: "เปิดโฟลเดอร์ Drive", uri: `https://drive.google.com/drive/folders/${folderId}` } },
+      { type: "button", style: "link", height: "sm",
+        action: { type: "uri", label: "เปิดในแอป", uri: "https://psstock.vercel.app" } },
     ] },
   };
   try {
