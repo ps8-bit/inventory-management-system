@@ -72,7 +72,10 @@ function buildStockXlsx(
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, wsSum, "สรุป");
   XLSX.utils.book_append_sheet(wb, ws, "สต็อก");
-  const bytes = XLSX.write(wb, { type: "array", bookType: "xlsx" }) as Uint8Array;
+  // type:"array" yields an ArrayBuffer (not Uint8Array) — wrap it, or the
+  // multipart length math in driveUpload NaNs out and throws a RangeError.
+  const raw = XLSX.write(wb, { type: "array", bookType: "xlsx" }) as ArrayBuffer | Uint8Array;
+  const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
   return { bytes, snapshot, totals: { skus: rows.length, qty: totalQty, value: totalVal, out: outCnt, low: lowCnt } };
 }
 

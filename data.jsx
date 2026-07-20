@@ -119,9 +119,18 @@ async function _syncQtyDelta(sku, delta) {
   }
 }
 function addProductToStore(p) {
-  const np = { reserved: 0, ...p };
+  // A blank sku is an unmanageable row: sku is the PK, and the delete/update
+  // APIs can't address an empty key (PostgREST in.() drops it from the filter).
+  // Refuse creation instead of writing a row nobody can edit or remove.
+  const sku = String((p && p.sku) || "").trim();
+  if (!sku) {
+    try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เพิ่มสินค้าไม่สำเร็จ: ต้องมีรหัส SKU" })); } catch (e) {}
+    return false;
+  }
+  const np = { reserved: 0, ...p, sku };
   PRODUCTS.unshift(np);
   _syncProductRows([np.sku]); // single-row upsert (insert) — not the whole catalog
+  return true;
 }
 // Field edit. A qty here is an ABSOLUTE set (edit modals normally omit qty and
 // change stock via adjustProductQty). A pure field edit updates only its columns
@@ -183,7 +192,17 @@ async function removeProductsFromStore(skus) {
   window.dispatchEvent(new CustomEvent("ims-products-change"));
 
   if (!window.dbDeleteProducts) return { ok: true };
-  const res = await dbDeleteProducts([...set]);
+  let res = await dbDeleteProducts([...set]);
+  if (res && res.error === 'PERMISSION_OR_MISSING' && window.authRefresh) {
+    // An RLS block can be a phantom: a role granted in app_metadata reaches RLS
+    // only through a NEW access token, so a session minted before the grant keeps
+    // failing after the account is already correct. Refresh once and retry before
+    // concluding the account truly lacks the right.
+    try {
+      const { data } = await authRefresh();
+      if (data && data.session) res = await dbDeleteProducts([...set]);
+    } catch (e) {}
+  }
   if (res && res.error) {
     // Delete didn't persist (no permission, etc.) → restore canonical server
     // state so the UI doesn't lie about what was removed.
@@ -195,9 +214,26 @@ async function removeProductsFromStore(skus) {
     }
     try { localStorage.setItem("ims_products", JSON.stringify(PRODUCTS)); } catch (e) {}
     window.dispatchEvent(new CustomEvent("ims-products-change"));
-    const msg = res.error === 'PERMISSION_OR_MISSING'
+    let msg = res.error === 'PERMISSION_OR_MISSING'
       ? 'ลบไม่สำเร็จ: บัญชีนี้ไม่มีสิทธิ์ลบสินค้า (ต้องเป็นผู้ดูแลระบบหรือผู้จัดการ)'
       : 'ลบไม่สำเร็จ: ' + res.error;
+    // Name the role RLS actually saw (from the live token) so a permission toast
+    // is diagnosable at a glance instead of contradicting the role shown in the UI.
+    if (res.error === 'PERMISSION_OR_MISSING' && window.authTokenRole) {
+      try {
+        const tr = await authTokenRole();
+        msg += tr ? ' — สิทธิ์ในระบบขณะนี้: ' + tr : ' — ไม่พบข้อมูลสิทธิ์ใน token';
+        if (tr && tr !== 'admin' && tr !== 'manager') msg += ' → ออกจากระบบแล้วเข้าใหม่';
+      } catch (e) {}
+    }
+    // With a valid role the block means these skus matched no DB row — show them
+    // verbatim with their true length so stale/dirty local copies are visible
+    // (a hidden character makes the length exceed what the eye counts).
+    if (Array.isArray(res.missing) && res.missing.length) {
+      msg += ' — ไม่พบใน DB: ' + res.missing.slice(0, 4)
+        .map(s => JSON.stringify(String(s)) + '[' + String(s).length + ']').join(', ')
+        + (res.missing.length > 4 ? ' +' + (res.missing.length - 4) : '');
+    }
     return { ok: false, error: msg };
   }
   return { ok: true };

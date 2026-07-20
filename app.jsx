@@ -267,6 +267,7 @@ function NotifPopover({ onClose, goTo }) {
    Role + display name come from user_metadata (set when creating the user
    in the Supabase dashboard) with a fallback to the USERS constant so
    existing demo accounts still work during the transition. */
+let _roleMismatchWarned = false;
 function mapSessionToUser(session) {
   const su   = session.user;
   const meta = su.user_metadata || {};
@@ -278,6 +279,20 @@ function mapSessionToUser(session) {
   // user_metadata/USERS only for accounts created before the app_metadata migration.
   const role   = app.role    || meta.role   || found?.role || "staff";
   const avatar = meta.avatar || found?.avatar || name.slice(0, 2);
+  // The role RLS enforces (app_metadata, from the JWT) and the role the UI shows
+  // (user_metadata) can drift apart — the account then sees admin buttons but the
+  // database refuses admin writes with a confusing per-action toast. Surface the
+  // drift once, right after login, instead of letting it hide until a write fails.
+  // (Delayed so the shell has mounted its ims-toast listener; string detail only.)
+  if (meta.role && (app.role || "viewer") !== meta.role && !_roleMismatchWarned) {
+    _roleMismatchWarned = true;
+    const msg = "คำเตือน: สิทธิ์บัญชีไม่ตรงกับฐานข้อมูล (แอปเห็น '" + meta.role +
+      "' แต่ฐานข้อมูลใช้ '" + (app.role || "viewer") +
+      "') — การบันทึก/ลบอาจถูกปฏิเสธ ให้ผู้ดูแลระบบตั้งบทบาทใหม่ในหน้า ผู้ใช้และสิทธิ์";
+    setTimeout(() => {
+      try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: msg })); } catch (e) {}
+    }, 1800);
+  }
   return { id: su.id, email, name, role, avatar, active: true };
 }
 

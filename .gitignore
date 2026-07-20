@@ -9,3 +9,6 @@ uploads/
 Thumbs.db
 
 .vercel
+
+# Supabase CLI temp state
+supabase/.temp/

@@ -42,17 +42,41 @@ async function dbUpsertProducts(products) {
 }
 async function dbDeleteProducts(skus) {
   if (!skus) return { ok: true, deleted: 0 };
-  const arr = Array.isArray(skus) ? skus : [...skus];
-  if (!arr.length) return { ok: true, deleted: 0 };
-  // .select() returns the rows actually deleted. Under RLS, a DELETE the caller
-  // isn't allowed to perform succeeds with 0 rows and NO error — so we must
-  // compare the deleted count to detect a silently-blocked delete.
-  const { data, error } = await sb.from('products').delete().in('sku', arr).select('sku');
-  if (error) { console.error('[DB] delete products:', error.message); return { error: error.message, deleted: 0 }; }
-  const deleted = data ? data.length : 0;
-  if (deleted < arr.length) {
-    console.error('[DB] delete products: only', deleted, 'of', arr.length, 'rows deleted (RLS or already gone)');
-    return { error: 'PERMISSION_OR_MISSING', deleted };
+  const raw = Array.isArray(skus) ? skus : [...skus];
+  if (!raw.length) return { ok: true, deleted: 0 };
+  // PostgREST's in.() filter silently DROPS an empty string from its value list,
+  // so a blank-sku row (bad import) can never match the normal path — the delete
+  // no-ops and masquerades as an RLS block. Address blanks with an explicit
+  // eq-empty filter instead.
+  const arr = raw.filter(s => typeof s === 'string' && s.trim() !== '');
+  const wantBlank = arr.length < raw.length;
+  let blankDeleted = 0;
+  if (wantBlank) {
+    const { data: bd, error: be } = await sb.from('products').delete().eq('sku', '').select('sku');
+    if (be) { console.error('[DB] delete blank-sku product:', be.message); return { error: be.message, deleted: 0 }; }
+    blankDeleted = bd ? bd.length : 0;
+  }
+  let data = [];
+  if (arr.length) {
+    // .select() returns the rows actually deleted. Under RLS, a DELETE the caller
+    // isn't allowed to perform succeeds with 0 rows and NO error — so we must
+    // compare the deleted count to detect a silently-blocked delete.
+    const res = await sb.from('products').delete().in('sku', arr).select('sku');
+    if (res.error) { console.error('[DB] delete products:', res.error.message); return { error: res.error.message, deleted: blankDeleted }; }
+    data = res.data || [];
+  }
+  // Which requested skus came back vs not — an RLS block skips ALL rows, while
+  // a sku that matches no DB row (stale local copy, invisible characters) skips
+  // just itself. Surfacing the misses makes the two failure modes tellable apart.
+  const got = new Set(data.map(r => r.sku));
+  const missing = arr.filter(s => !got.has(s));
+  // Every local blank-sku row maps onto (at most) one DB row, so any eq-empty
+  // hit clears them all; blank is "missing" only when nothing matched at all.
+  if (wantBlank && blankDeleted === 0) missing.push('(SKU ว่าง)');
+  const deleted = data.length + blankDeleted;
+  if (missing.length) {
+    console.error('[DB] delete products: only', deleted, 'of', raw.length, 'requested; missing:', JSON.stringify(missing));
+    return { error: 'PERMISSION_OR_MISSING', deleted, missing };
   }
   return { ok: true, deleted };
 }
@@ -936,6 +960,18 @@ Object.assign(window, {
   // session whose access token merely expired (e.g. tab was backgrounded) before
   // deciding it's really dead — so users aren't bounced to login needlessly.
   authRefresh:       ()                => sb.auth.refreshSession(),
+  // The role claim RLS actually enforces: app_metadata.role inside the CURRENT
+  // access token. A role changed in the DB does not reach RLS until the token is
+  // re-minted (refresh or re-login), so this can lag both the DB and the UI role.
+  authTokenRole: async () => {
+    try {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session || !session.access_token) return null;
+      const b64 = session.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      const payload = JSON.parse(atob(b64));
+      return (payload.app_metadata && payload.app_metadata.role) || null;
+    } catch (e) { return null; }
+  },
   authOnChange:      (cb)              => sb.auth.onAuthStateChange(cb),
   // Base URL for Edge Functions
   SUPABASE_FUNC_URL: SUPABASE_URL + '/functions/v1',
