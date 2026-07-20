@@ -137,6 +137,53 @@ async function alertOwner(text: string) {
   } catch (_) { /* best-effort */ }
 }
 
+// ── Success notification: daily report summary as a LINE Flex card ──
+// (Brand kit mirrors line-alert/line-bot: PS TACTICAL gradient header.)
+// Best-effort like alertOwner — a LINE hiccup must never fail the backup.
+const BRAND_GRAD = { type: "linearGradient", angle: "135deg", startColor: "#FF7A1A", endColor: "#2A2A2A" };
+function statRow(label: string, value: string, color = "#1A1A1A") {
+  return { type: "box", layout: "horizontal", spacing: "sm", contents: [
+    { type: "text", text: label, size: "sm", color: "#6B7280", flex: 5, wrap: true },
+    { type: "text", text: value, size: "sm", color, weight: "bold", flex: 4, align: "end" },
+  ] };
+}
+async function notifyReportReady(totals: Record<string, number>, dateStr: string, folderId: string) {
+  const token = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN");
+  if (!token) return;
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const thDate = `${d}/${m}/${y + 543}`;
+  const flex = {
+    type: "bubble",
+    header: { type: "box", layout: "vertical", paddingAll: "16px", background: BRAND_GRAD, contents: [
+      { type: "text", text: "📊 รายงานสต็อกประจำวัน", color: "#FFFFFF", weight: "bold", size: "lg", wrap: true },
+      { type: "text", text: `คลังพร้อมส่ง · ${thDate} · สำรองสำเร็จ ✓`, color: "#FFFFFFCC", size: "xs", margin: "sm", wrap: true },
+    ] },
+    body: { type: "box", layout: "vertical", spacing: "md", paddingAll: "16px", contents: [
+      statRow("จำนวน SKU", String(totals.skus ?? 0)),
+      statRow("รวมจำนวนชิ้น", (totals.qty ?? 0).toLocaleString("th-TH")),
+      statRow("มูลค่าสต็อกรวม", "฿" + (totals.value ?? 0).toLocaleString("th-TH")),
+      statRow("หมดสต็อก", String(totals.out ?? 0) + " SKU", (totals.out ?? 0) > 0 ? "#A32D2D" : "#1A1A1A"),
+      statRow("ต่ำกว่าจุดสั่งซื้อ", String(totals.low ?? 0) + " SKU", (totals.low ?? 0) > 0 ? "#854F0B" : "#1A1A1A"),
+    ] },
+    footer: { type: "box", layout: "vertical", spacing: "sm", paddingAll: "12px", contents: [
+      { type: "text", text: `ไฟล์ stock-report-${dateStr}.xlsx อยู่ใน Google Drive แล้ว`, size: "xs", color: "#6B7280", align: "center", wrap: true },
+      { type: "button", style: "primary", color: "#FF7A1A", height: "sm",
+        action: { type: "uri", label: "เปิดโฟลเดอร์ Drive", uri: `https://drive.google.com/drive/folders/${folderId}` } },
+    ] },
+  };
+  try {
+    await fetch("https://api.line.me/v2/bot/message/broadcast", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{
+        type: "flex",
+        altText: `📊 รายงานสต็อก ${thDate}: ${totals.skus ?? 0} SKU · ${(totals.qty ?? 0).toLocaleString("th-TH")} ชิ้น · ฿${(totals.value ?? 0).toLocaleString("th-TH")}`,
+        contents: flex,
+      }] }),
+    });
+  } catch (_) { /* best-effort */ }
+}
+
 // Record the outcome of each run in app_state (key "last_backup") so the app's
 // Settings can show the last-successful-backup age. No new table needed.
 async function recordRun(admin: any, status: string, extra: Record<string, unknown>) {
@@ -248,6 +295,7 @@ Deno.serve(async (req) => {
   const dateStr = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 10); // Bangkok (UTC+7) calendar date
   let stockFile: string | null = null;
   let stockError: string | null = null;
+  let stockTotals: Record<string, number> | null = null;
   try {
     const stateRows = (Array.isArray(tables.app_state) ? tables.app_state : []) as Array<Record<string, unknown>>;
     const adjRow = stateRows.find((r) => r.key === "stock_adj");
@@ -258,6 +306,7 @@ Deno.serve(async (req) => {
     const productRows = (Array.isArray(tables.products) ? tables.products : []) as Array<Record<string, unknown>>;
 
     const { bytes, snapshot: stockSnap, totals } = buildStockXlsx(productRows, adj, prevMap, dateStr);
+    stockTotals = totals;
     stockFile = await driveUpload(
       token, folderId, `stock-report-${dateStr}.xlsx`,
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", bytes,
@@ -301,6 +350,9 @@ Deno.serve(async (req) => {
   await recordRun(admin, partial ? "partial" : "ok", { file: upJson.name, stockFile, stockError, counts, partial, errors, pruned });
   if (partial) await alertOwner("⚠️ สำรองข้อมูลบางส่วน: อ่านตารางไม่สำเร็จ — " + Object.keys(errors).join(", "));
   if (stockError) await alertOwner("⚠️ สร้างรายงานสต็อก Excel ไม่สำเร็จ (สำรอง JSON สำเร็จแล้ว) — " + stockError);
+  // Success card: daily summary + Drive button. Only when the report actually
+  // uploaded (a failed report already alerted above; no double-message).
+  if (stockFile && !stockError && stockTotals) await notifyReportReady(stockTotals, dateStr, folderId);
 
   return json({ success: true, file: upJson.name, id: upJson.id, stockFile, stockError, counts, partial, errors, pruned });
 });
