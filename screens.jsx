@@ -2197,7 +2197,7 @@ function IssueModal({ onClose, onSubmit }) {
               <label>สินค้า</label>
               <SkuPicker value={skuId} onChange={setSkuId} products={PRODUCTS}/>
               <div className="row" style={{ justifyContent: "space-between", fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
-                <span>คงเหลือ <strong className="tnum" style={{ color: "var(--fg)" }}>{product.qty}</strong> ชิ้น · ตำแหน่ง <span className="mono">{product.loc}</span></span>
+                <span>คงเหลือ <strong className="tnum" style={{ color: "var(--fg)" }}>{product.qty}</strong> ชิ้น · ตำแหน่ง <span className="mono">{locIsStored(product.loc) ? product.loc : "—"}</span></span>
                 <span>ราคา ฿{product.price.toLocaleString()}</span>
               </div>
             </div>
@@ -2319,21 +2319,26 @@ function Inventory({ pushToast, density, goTo }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("ทั้งหมด");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [locFilter, setLocFilter] = useState(false); // true = only products not stored in a real position
   const [open, setOpen] = useState(null);
   const [selected, setSelected] = useState({}); // { sku: true }
   const [bulkOpen, setBulkOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [adjOpen, setAdjOpen] = useState(false);
+  const [assignSkus, setAssignSkus] = useState(null); // array of skus → open AssignLocationModal
   const [stockKey, setStockKey] = useState(0);
 
-  // Re-render whenever the shared stock-adjustment layer OR the product catalog changes
+  // Re-render whenever the shared stock-adjustment layer, the product catalog
+  // OR the location tree changes (tree edits change which locs count as stored)
   useEffect(() => {
     const refresh = () => setStockKey(k => k + 1);
     window.addEventListener("ims-stock-adj-change", refresh);
     window.addEventListener("ims-products-change", refresh);
+    window.addEventListener("ims-locations-change", refresh);
     return () => {
       window.removeEventListener("ims-stock-adj-change", refresh);
       window.removeEventListener("ims-products-change", refresh);
+      window.removeEventListener("ims-locations-change", refresh);
     };
   }, []);
 
@@ -2362,10 +2367,17 @@ function Inventory({ pushToast, density, goTo }) {
   };
 
   const cats = useMemo(() => ["ทั้งหมด", ...(typeof loadCategories === "function" ? loadCategories() : [...new Set(products.map(p => p.cat))])], [products, stockKey]);
+
+  // Which loc codes are real positions in the live tree — stale codes (e.g. a
+  // legacy "A" from CSV import) count as NOT stored and get a warning badge.
+  const storedCodes = useMemo(() => storedLocSet(), [stockKey]);
+  const unstoredCount = useMemo(() => liveProducts.reduce((n, p) => n + (locIsStored(p.loc, storedCodes) ? 0 : 1), 0), [liveProducts, storedCodes]);
+
   const filtered = liveProducts.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     const s = stockStatus(p).key;
     if (statusFilter !== "all" && s !== statusFilter) return false;
+    if (locFilter && locIsStored(p.loc, storedCodes)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
@@ -2411,6 +2423,23 @@ function Inventory({ pushToast, density, goTo }) {
       });
     }
     setBulkOpen(false);
+  };
+
+  // จัดเก็บเข้าตำแหน่ง — assign every sku in assignSkus to one real position
+  const applyAssign = (code) => {
+    const skus = assignSkus || [];
+    updateManyProducts(skus, { loc: code });
+    pushToast(`จัดเก็บ ${skus.length} รายการเข้าตำแหน่ง ${code} แล้ว`);
+    if (typeof recordChange === "function") {
+      recordChange({
+        entity: "product", action: "bulk-update",
+        summary: `จัดเก็บ ${skus.length} SKU เข้าตำแหน่ง ${code}`,
+        count: skus.length,
+        changes: [{ label: "ตำแหน่งจัดเก็บ", to: code }],
+        note: `SKU: ${skus.join(", ")}`
+      });
+    }
+    setAssignSkus(null);
   };
 
   const bulkDelete = async () => {
@@ -2484,6 +2513,21 @@ function Inventory({ pushToast, density, goTo }) {
             {cats.map(c => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}
           </div>
           <div className="spacer"/>
+          {(unstoredCount > 0 || locFilter) && (
+            <button
+              onClick={() => setLocFilter(v => !v)}
+              title={locFilter ? "แสดงสินค้าทั้งหมด" : "แสดงเฉพาะสินค้าที่ยังไม่ได้จัดเก็บเข้าตำแหน่ง"}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "7px 12px", borderRadius: 10, fontSize: 12, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit",
+                border: "1px solid " + (locFilter ? "var(--warning)" : "transparent"),
+                background: locFilter ? "var(--warning)" : "var(--warning-soft)",
+                color: locFilter ? "#fff" : "oklch(0.5 0.13 65)"
+              }}>
+              <Icons.Warn size={13}/> ยังไม่จัดเก็บ <span className="tnum">{unstoredCount}</span>
+            </button>
+          )}
           <div className="seg">
             <button className={statusFilter === "all" ? "on" : ""} onClick={() => setStatusFilter("all")}>ทุกสถานะ</button>
             <button className={statusFilter === "ok" ? "on" : ""} onClick={() => setStatusFilter("ok")}>พร้อมขาย</button>
@@ -2491,15 +2535,16 @@ function Inventory({ pushToast, density, goTo }) {
             <button className={statusFilter === "out" ? "on" : ""} onClick={() => setStatusFilter("out")}>หมด</button>
           </div>
         </div>
-        {(q || cat !== "ทั้งหมด" || statusFilter !== "all") && (
+        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter) && (
           <div className="row" style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", gap: 10, fontSize: 12, color: "var(--muted)" }}>
             <span>กรองอยู่:</span>
             {q && <span className="badge badge-neutral">ค้นหา "{q}" <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setQ("")}/></span>}
             {cat !== "ทั้งหมด" && <span className="badge badge-neutral">หมวด: {cat} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setCat("ทั้งหมด")}/></span>}
             {statusFilter !== "all" && <span className="badge badge-neutral">สถานะ: {statusFilter} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setStatusFilter("all")}/></span>}
+            {locFilter && <span className="badge badge-warning">ยังไม่จัดเก็บ <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setLocFilter(false)}/></span>}
             <span className="spacer"/>
             <span><strong className="tnum" style={{ color: "var(--fg)" }}>{filtered.length}</strong> จาก {products.length} รายการ</span>
-            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); }}>ล้างตัวกรอง</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); }}>ล้างตัวกรอง</button>
           </div>
         )}
       </div>
@@ -2522,6 +2567,7 @@ function Inventory({ pushToast, density, goTo }) {
           </div>
           <div className="spacer"/>
           <div className="row" style={{ gap: 6 }}>
+            <BulkBtn icon={<Icons.Map size={13}/>} label="จัดเก็บเข้าตำแหน่ง" onClick={() => setAssignSkus([...selectedSkus])}/>
             <BulkBtn icon={<Icons.Edit size={13}/>} label="แก้ไขทั้งหมด" onClick={() => setBulkOpen(true)}/>
             <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์บาร์โค้ด" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); if (typeof printBarcodeLabels === "function") printBarcodeLabels(items, pushToast); }}/>
             <BulkBtn icon={<Icons.Pkg size={13}/>} label="ส่งออก Excel" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); exportInventoryCsv(items, `สินค้าคงคลัง_เลือก_${new Date().toISOString().slice(0,10)}.csv`); pushToast(`ส่งออก ${items.length} รายการแล้ว`); }}/>
@@ -2569,7 +2615,22 @@ function Inventory({ pushToast, density, goTo }) {
                     </div>
                   </td>
                   <td onClick={() => setOpen(p.sku)}><span className="badge badge-neutral">{p.cat}</span></td>
-                  <td className="t-mono" onClick={() => setOpen(p.sku)}>{p.loc}</td>
+                  <td onClick={() => setOpen(p.sku)}>
+                    {locIsStored(p.loc, storedCodes) ? (() => { const lp = locParts(p.loc); return (
+                      <div style={{ lineHeight: 1.3 }}>
+                        <span className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{lp.pos}</span>
+                        <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{lp.building}{lp.floor ? " · " + lp.floor : ""}</div>
+                      </div>
+                    ); })() : (
+                      <span
+                        className="badge badge-warning"
+                        title={"ยังไม่ได้จัดเก็บเข้าตำแหน่ง — คลิกเพื่อเลือกตำแหน่ง" + (p.loc ? ` (ค่าเดิม: ${p.loc})` : "")}
+                        style={{ fontSize: 10, whiteSpace: "nowrap", cursor: "pointer" }}
+                        onClick={(e) => { e.stopPropagation(); setAssignSkus([p.sku]); }}>
+                        <Icons.Warn size={10}/> ยังไม่จัดเก็บ
+                      </span>
+                    )}
+                  </td>
                   <td className="t-num tnum" style={{ fontWeight: 500 }} onClick={() => setOpen(p.sku)}>{p.qty}</td>
                   <td className="t-num tnum" style={{ color: "var(--muted)" }} onClick={() => setOpen(p.sku)}>{p.reserved}</td>
                   <td className="t-num tnum" onClick={() => setOpen(p.sku)}>{avail}</td>
@@ -2593,6 +2654,7 @@ function Inventory({ pushToast, density, goTo }) {
           If the product was deleted while open, openProduct becomes null → drawer closes. */}
       {(() => { const op = open ? liveProducts.find(p => p.sku === open) : null; return op ? <ProductDrawer product={op} onClose={() => setOpen(null)} pushToast={pushToast}/> : null; })()}
       {bulkOpen && <BulkEditModal count={selectedCount} products={products} categories={cats.filter(c => c !== "ทั้งหมด")} onClose={() => setBulkOpen(false)} onApply={applyBulkEdit}/>}
+      {assignSkus && <AssignLocationModal skus={assignSkus} products={liveProducts} storedCodes={storedCodes} onClose={() => setAssignSkus(null)} onApply={applyAssign}/>}
       {addOpen && <AddSkuModal products={products} categories={cats.filter(c => c !== "ทั้งหมด")} onClose={() => setAddOpen(false)} onAdd={addProduct}/>}
       {adjOpen && <StockAdjustModal product={null} onClose={() => setAdjOpen(false)} pushToast={pushToast}/>}
     </div>
@@ -2699,6 +2761,83 @@ function BulkEditModal({ count, products, categories, onClose, onApply }) {
           <button className="btn" onClick={onClose}>ยกเลิก</button>
           <button className="btn btn-primary" disabled={!hasChanges} onClick={apply} style={!hasChanges ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
             <Icons.Check size={14}/> บันทึก {count} รายการ
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* จัดเก็บเข้าตำแหน่ง — assign the given skus to ONE real position from the live
+   tree. Opened from the Inventory bulk bar or a row's "ยังไม่จัดเก็บ" badge. */
+function AssignLocationModal({ skus, products, storedCodes, onClose, onApply }) {
+  const [code, setCode] = useState("");
+  const groups = useMemo(() => {
+    const by = new Map();
+    allPositions().forEach(x => {
+      const g = `${x.building} · ${x.floor}`;
+      if (!by.has(g)) by.set(g, []);
+      by.get(g).push(x);
+    });
+    return [...by.entries()];
+  }, []);
+  const items = skus.map(s => products.find(p => p.sku === s)).filter(Boolean);
+  const hasPositions = groups.length > 0;
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose}/>
+      <div className="modal">
+        <div className="modal-head">
+          <div>
+            <h3>จัดเก็บเข้าตำแหน่ง ({items.length} รายการ)</h3>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>สินค้าที่เลือกทั้งหมดจะถูกบันทึกไว้ที่ตำแหน่งนี้</div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
+        </div>
+        <div className="modal-body">
+          {hasPositions ? (
+            <div>
+              <label>ตำแหน่งจัดเก็บ</label>
+              <select className="input" value={code} onChange={e => setCode(e.target.value)} autoFocus>
+                <option value="">— เลือกตำแหน่ง —</option>
+                {groups.map(([g, list]) => (
+                  <optgroup key={g} label={g}>
+                    {list.map(x => <option key={x.code} value={x.code}>{x.pos}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div className="row" style={{ gap: 10, padding: "12px 14px", background: "var(--warning-soft)", borderRadius: 10, fontSize: 13, color: "oklch(0.5 0.13 65)" }}>
+              <Icons.Warn size={15} style={{ flexShrink: 0 }}/>
+              <span>ยังไม่มีตำแหน่งในระบบ — ไปที่หน้า “ตำแหน่งจัดเก็บ” เพื่อเพิ่มอาคาร / ชั้น / ตำแหน่งก่อน</span>
+            </div>
+          )}
+
+          <div className="stack" style={{ gap: 6, marginTop: 14, maxHeight: 240, overflowY: "auto" }}>
+            {items.slice(0, 30).map(p => {
+              const stored = locIsStored(p.loc, storedCodes);
+              const lp = stored ? locParts(p.loc) : null;
+              return (
+                <div key={p.sku} className="row" style={{ gap: 10, padding: "6px 8px", background: "var(--surface-2)", borderRadius: 8 }}>
+                  {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={30} radius={6}/>}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    <div className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>{p.sku}</div>
+                  </div>
+                  {stored
+                    ? <span className="mono" style={{ fontSize: 11, color: "var(--muted)", flexShrink: 0 }}>{lp.pos} · {lp.building}</span>
+                    : <span className="badge badge-warning" style={{ fontSize: 9, flexShrink: 0 }}><Icons.Warn size={9}/> ยังไม่จัดเก็บ</span>}
+                </div>
+              );
+            })}
+            {items.length > 30 && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "4px 0" }}>+ อีก {items.length - 30} รายการ</div>}
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn" onClick={onClose}>ยกเลิก</button>
+          <button className="btn btn-primary" disabled={!code} onClick={() => onApply(code)} style={!code ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+            <Icons.Check size={14}/> จัดเก็บ {items.length} รายการ
           </button>
         </div>
       </div>
@@ -3011,7 +3150,9 @@ function ProductDrawer({ product, onClose, pushToast }) {
           <div className="grid-2" style={{ gap: 12, marginTop: 18 }}>
             <Stat label="SKU" value={<span className="mono">{product.sku}</span>}/>
             <Stat label="หมวดหมู่" value={product.cat}/>
-            <Stat label="ตำแหน่ง" value={<span className="mono">{product.loc}</span>}/>
+            <Stat label="ตำแหน่ง" value={locIsStored(product.loc)
+              ? <span className="mono">{product.loc}</span>
+              : <span className="badge badge-warning" style={{ fontSize: 10 }} title={product.loc ? `ค่าเดิม: ${product.loc}` : undefined}><Icons.Warn size={10}/> ยังไม่จัดเก็บ</span>}/>
             <Stat label="แบรนด์" value={product.brand || "—"}/>
             <Stat label="ผู้จัดส่ง" value={product.supplier}/>
             <Stat label="ราคาทุน" value={`฿${(product.cost ?? Math.round(product.price * 0.6)).toLocaleString()}`}/>
@@ -3416,7 +3557,7 @@ function Stat({ label, value }) {
 }
 
 /* ========= LOCATIONS ========= */
-function Locations() {
+function Locations({ goTo }) {
   const [tree, setTree] = useState(loadLocTree);
   const [selected, setSelected] = useState(null); // { building, floor, pos, code, highlightSku? }
   const [finderQ, setFinderQ] = useState("");
@@ -3438,6 +3579,8 @@ function Locations() {
   const posCount = buildings.reduce((s, b) => s + (b.floors || []).reduce((t, f) => t + (f.positions || []).length, 0), 0);
   const allowDelete = typeof canDeleteData === "function" ? canDeleteData() : true;
   const locImages = useLocationImages();
+  // tree state refreshes on both products- and locations-change, so this stays live
+  const unstored = useMemo(() => countUnstoredProducts(), [tree]);
 
   const askBuilding = () => { const n = prompt("ชื่ออาคาร / โซน (เช่น สภ.)"); if (n && n.trim()) addBuilding(n.trim()); };
   const askFloor    = (b) => { const n = prompt(`เพิ่มชั้นในอาคาร "${b}" (เช่น ชั้น 3)`); if (n && n.trim()) addFloor(b, n.trim()); };
@@ -3456,6 +3599,15 @@ function Locations() {
           <button className="btn btn-primary" onClick={askBuilding}><Icons.Plus/> เพิ่มอาคาร</button>
         </div>
       </div>
+
+      {/* ── Warning: products not yet stored in any real position ── */}
+      {unstored > 0 && (
+        <div className="row" style={{ padding: "12px 16px", background: "var(--warning-soft)", borderRadius: 12, gap: 12, alignItems: "center", fontSize: 13, color: "oklch(0.5 0.13 65)" }}>
+          <Icons.Warn size={16} style={{ flexShrink: 0 }}/>
+          <span style={{ flex: 1 }}>มีสินค้า <strong className="tnum">{unstored}</strong> รายการที่ยังไม่ได้จัดเก็บเข้าตำแหน่ง — เปิดตำแหน่งแล้วกด “เพิ่มสินค้า” หรือจัดเก็บทีละหลายรายการจากหน้าสินค้าคงคลัง</span>
+          {typeof goTo === "function" && <button className="btn btn-sm" style={{ flexShrink: 0 }} onClick={() => goTo("inventory")}>ไปที่สินค้าคงคลัง</button>}
+        </div>
+      )}
 
       {/* ── Product finder: search a product → see & jump to its storage position ── */}
       <div className="card" style={{ padding: 18 }}>
@@ -3478,7 +3630,7 @@ function Locations() {
               )}
               {res.hits.map(p => {
                 const st = stockStatus(p);
-                const parts = p.loc ? locParts(p.loc) : null;
+                const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
                 return (
                   <div key={p.sku} className="row"
                     onClick={() => parts && setSelected({ building: parts.building, floor: parts.floor, pos: parts.pos, code: p.loc, highlightSku: p.sku })}
@@ -3500,7 +3652,7 @@ function Locations() {
                         <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{parts.building} · {parts.floor}</div>
                       </div>
                     ) : (
-                      <span className="badge badge-neutral" style={{ fontSize: 10, flexShrink: 0 }}>ยังไม่ระบุตำแหน่ง</span>
+                      <span className="badge badge-warning" style={{ fontSize: 10, flexShrink: 0 }}><Icons.Warn size={10}/> ยังไม่จัดเก็บ</span>
                     )}
                   </div>
                 );
@@ -3630,7 +3782,7 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
   // One row of the picker — used by both the search results and the browse list.
   const pickRow = (p) => {
     const here = (p.loc || "") === loc.code;
-    const from = !here && p.loc ? locParts(p.loc) : null;
+    const from = !here && locIsStored(p.loc) ? locParts(p.loc) : null;
     return (
       <div key={p.sku} className="row" onClick={() => { if (!here) assign(p); }}
         style={{ gap: 10, padding: 8, borderRadius: 8, background: here ? "var(--accent-soft)" : "var(--surface-2)", cursor: here ? "default" : "pointer" }}>
@@ -3726,9 +3878,11 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
                     </div>
                   );
                 }
-                // No query → browse the whole catalog right here; unplaced products first.
+                // No query → browse the whole catalog right here; unplaced products first
+                // (stale codes count as unplaced, same as the ยังไม่จัดเก็บ badge).
+                const stored = storedLocSet();
                 const browse = PRODUCTS.filter(p => (p.loc || "") !== loc.code)
-                  .sort((a, b) => ((a.loc ? 1 : 0) - (b.loc ? 1 : 0)) || String(a.name || "").localeCompare(String(b.name || ""), "th"));
+                  .sort((a, b) => ((locIsStored(a.loc, stored) ? 1 : 0) - (locIsStored(b.loc, stored) ? 1 : 0)) || String(a.name || "").localeCompare(String(b.name || ""), "th"));
                 return (
                   <div className="stack" style={{ gap: 4, marginTop: 8 }}>
                     {browse.length === 0
@@ -4762,7 +4916,7 @@ function ProductFinder({ pushToast, goTo }) {
             {res.hits.map(p => {
               const eq = effQty(p.sku);
               const st = stockStatus({ ...p, qty: eq });
-              const parts = p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+              const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
               const url = typeof resolveProductImage === "function" ? resolveProductImage(p.sku, images) : "";
               return (
                 <div key={p.sku} className="card" onClick={() => setSelectedSku(p.sku)}
@@ -4786,7 +4940,7 @@ function ProductFinder({ pushToast, goTo }) {
                           <span style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{parts.building}{parts.floor ? " · " + parts.floor : ""}</span>
                         </>
                       ) : (
-                        <span className="badge badge-neutral" style={{ fontSize: 10 }}>ยังไม่ระบุตำแหน่ง</span>
+                        <span className="badge badge-warning" style={{ fontSize: 10 }}><Icons.Warn size={10}/> ยังไม่จัดเก็บ</span>
                       )}
                     </div>
                   </div>
@@ -4808,7 +4962,7 @@ function ProductFinder({ pushToast, goTo }) {
         const eq = effQty(p.sku);
         const st = stockStatus({ ...p, qty: eq });
         const avail = Math.max(0, eq - (p.reserved || 0));
-        const parts = p.loc && typeof locParts === "function" ? locParts(p.loc) : null;
+        const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
         const locPhoto = p.loc && typeof getLocationImage === "function" ? getLocationImage(p.loc, locImages) : "";
         const url = typeof resolveProductImage === "function" ? resolveProductImage(p.sku, images) : "";
         const close = () => setSelectedSku(null);
@@ -4882,7 +5036,7 @@ function ProductFinder({ pushToast, goTo }) {
                     </div>
                   ) : (
                     <div className="row" style={{ gap: 10, fontSize: 13, color: "var(--muted)" }}>
-                      <span className="badge badge-neutral">ยังไม่ระบุตำแหน่ง</span>
+                      <span className="badge badge-warning"><Icons.Warn size={11}/> ยังไม่จัดเก็บ</span>
                       <span>กำหนดได้ในหน้าตำแหน่งจัดเก็บ หรือแก้ไขสินค้าในคลัง</span>
                     </div>
                   )}

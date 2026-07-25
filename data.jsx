@@ -691,6 +691,17 @@ function locParts(code) {
   return { building: seg[0] || "", floor: seg[1] || "", pos: seg[2] || seg[seg.length - 1] || String(code), code };
 }
 
+/* "Stored" = the product's loc points at a REAL position in the live tree.
+   An empty loc and a stale code (deleted position, or a legacy zone letter like
+   "A" imported from CSV) both count as NOT stored — the UI shows a warning
+   badge for them. Pass a prebuilt Set (storedLocSet()) when checking many rows. */
+function storedLocSet() { return new Set(allLocationCodes()); }
+function locIsStored(loc, set) { return !!loc && (set || storedLocSet()).has(String(loc)); }
+function countUnstoredProducts() {
+  const set = storedLocSet();
+  return PRODUCTS.reduce((n, p) => n + (locIsStored(p.loc, set) ? 0 : 1), 0);
+}
+
 /* One-time migration to the Building→Floor→Position model: drop the old flat demo
    bins, seed the two real buildings, and clear product locations (the old "A-01-01"
    codes don't exist in the new tree) so the warehouse starts clean. Runs once per
@@ -1678,6 +1689,7 @@ Object.assign(window, {
   applyStockAdjustment, ADJUST_REASONS, canAdjustStock,
   loadOrders, saveOrders, appendOrder,
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
+  storedLocSet, locIsStored, countUnstoredProducts,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   loadInboundDraft, saveInboundDraft,

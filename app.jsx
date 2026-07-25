@@ -891,7 +891,7 @@ function App({ user, onLogout, onSwitchUser }) {
           {page === "finder"    && <ProductFinder pushToast={pushToast} goTo={goTo}/>}
           {page === "inventory" && <Inventory pushToast={pushToast} density={t.density} goTo={goTo}/>}
           {page === "stocktake" && <StockTake pushToast={pushToast}/>}
-          {page === "locations" && <Locations/>}
+          {page === "locations" && <Locations goTo={goTo}/>}
           {page === "import"    && <ImportPage pushToast={pushToast} goTo={goTo}/>}
           {page === "labels"    && <Labels pushToast={pushToast} store={store}/>}
           {page === "tracking"  && <TrackingPage pushToast={pushToast} store={store}/>}
