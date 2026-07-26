@@ -133,8 +133,13 @@ function saveOrderEdit(order, fields) {
 // saveLabels preserves any tracked label into the orders table (so the customer
 // page keeps showing it) — the exact opposite of a delete.
 async function deleteOrdersFromDb(ids) {
-  const role = (window.__currentUser && window.__currentUser.role) || "staff";
-  if (role !== "admin" && role !== "manager") return { blocked: true };
+  // Capability, not a raw role test: an admin can revoke ลบข้อมูล from manager
+  // in ผู้ใช้งานและสิทธิ์, and this is the choke point every delete button funnels
+  // through (desktop Outbound + Tracking, mobile MOutbound + MTracking).
+  const allowed = typeof canDeleteData === "function"
+    ? canDeleteData()
+    : ["admin", "manager"].indexOf((window.__currentUser && window.__currentUser.role) || "staff") !== -1;
+  if (!allowed) return { blocked: true };
 
   const idSet = new Set(ids);
   const labels = (typeof loadLabels === "function") ? loadLabels() : [];
@@ -568,11 +573,11 @@ function TrackingPage({ pushToast, store, focus }) {
           <div className="page-sub">ระบุเลขพัสดุและขนส่งของออร์เดอร์ที่จัดส่ง ลูกค้าใช้ลิงก์เดียวกันค้นหาเองได้</div>
         </div>
         <div className="row">
-          <button className="btn" onClick={() => {
+          {canDo("exportData") && <button className="btn" onClick={() => {
             if (!sorted.length) { pushToast("ไม่มีออร์เดอร์ให้ส่งออก"); return; }
             exportOrdersCsv(sorted, `tracking-${TODAY_ISO}.csv`);
             pushToast(`ส่งออก ${sorted.length} ออร์เดอร์`);
-          }}><Icons.Pkg size={14}/> ส่งออก CSV</button>
+          }}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
           <button className="btn btn-primary" onClick={() => setSlipOpen(true)}><Icons.Camera size={14}/> สแกนสลิป</button>
           <button className="btn btn-accent" onClick={() => setShareOpen(true)}><Icons.Copy size={14}/> ลิงก์ค้นหาของลูกค้า</button>
         </div>
@@ -620,13 +625,13 @@ function TrackingPage({ pushToast, store, focus }) {
           <div className="row" style={{ gap: 6, position: "relative" }}>
             <BulkBtn icon={<Icons.Truck size={13}/>} label="อัปเดตสถานะ" onClick={() => setBulkMenu(bulkMenu === "status" ? null : "status")}/>
             <BulkBtn icon={<Icons.Tag size={13}/>}   label="เปลี่ยนขนส่ง" onClick={() => setBulkMenu(bulkMenu === "carrier" ? null : "carrier")}/>
-            <BulkBtn icon={<Icons.Pkg size={13}/>}   label="ส่งออก" onClick={() => {
+            {canDo("exportData") && <BulkBtn icon={<Icons.Pkg size={13}/>}   label="ส่งออก" onClick={() => {
               const rows = sorted.filter(o => selected[o.id]);
               if (!rows.length) return;
               exportOrdersCsv(rows, `tracking-selected-${TODAY_ISO}.csv`);
               pushToast(`ส่งออก ${rows.length} ออร์เดอร์`);
-            }}/>
-            <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDelete} danger/>
+            }}/>}
+            {canDeleteData() && <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDelete} danger/>}
 
             {bulkMenu === "status" && (
               <BulkPopover onClose={() => setBulkMenu(null)} title="เปลี่ยนสถานะเป็น">

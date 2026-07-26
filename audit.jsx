@@ -198,8 +198,8 @@ function HistoryPage({ pushToast }) {
           <div className="page-sub">บันทึกการเปลี่ยนแปลงทั้งหมด — ใครเปลี่ยนอะไร เมื่อไหร่</div>
         </div>
         <div className="row">
-          <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const csv = "Date,User,Action,Entity,Details\n" + filtered.map(e => [new Date(e.ts).toLocaleString("th-TH"), e.user?.name || "ระบบ", e.action, e.entity, e.summary].map(esc).join(",")).join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "audit.csv"; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>
-          <button className="btn btn-danger" onClick={clearLog}><Icons.Trash size={14}/> ล้างประวัติ</button>
+          {canDo("exportData") && <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const csv = "Date,User,Action,Entity,Details\n" + filtered.map(e => [new Date(e.ts).toLocaleString("th-TH"), e.user?.name || "ระบบ", e.action, e.entity, e.summary].map(esc).join(",")).join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "audit.csv"; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
+          {currentRoleId() === "admin" && <button className="btn btn-danger" onClick={clearLog}><Icons.Trash size={14}/> ล้างประวัติ</button>}
         </div>
       </div>
 

@@ -884,13 +884,35 @@ function loadRolePerms() {
   return {};
 }
 
-function saveRolePerms(perms) {
+/* Persist the override blob. ASYNC and awaited by both editors: dbSaveState
+   RESOLVES with { error } instead of rejecting, so a swallowed failure would
+   leave the admin's own screen restricted, a success toast on screen, and every
+   other device untouched. On failure we roll the local copy back to what the
+   cloud still holds, so what you see matches what everyone else sees. */
+async function saveRolePerms(perms) {
+  const prevLocal = (() => { try { return localStorage.getItem(ROLE_PERMS_KEY); } catch (e) { return null; } })();
+  const prevCloud = window._DB_ROLE_PERMS;
   const clean = { nav: (perms && perms.nav) || {}, caps: (perms && perms.caps) || {} };
+
   try { localStorage.setItem(ROLE_PERMS_KEY, JSON.stringify(clean)); } catch (e) {}
   window._DB_ROLE_PERMS = clean;
   window.dispatchEvent(new CustomEvent("ims-perms-change"));
-  if (window.dbSaveState) dbSaveState("role_perms", clean).catch(() => {});
-  return clean;
+
+  if (!window.dbSaveState) return { ok: true, perms: clean, offline: true };
+  let res;
+  try { res = await dbSaveState("role_perms", clean); }
+  catch (e) { res = { error: (e && e.message) || String(e) }; }
+
+  if (res && res.error) {
+    try {
+      if (prevLocal === null) localStorage.removeItem(ROLE_PERMS_KEY);
+      else localStorage.setItem(ROLE_PERMS_KEY, prevLocal);
+    } catch (e) {}
+    window._DB_ROLE_PERMS = prevCloud;
+    window.dispatchEvent(new CustomEvent("ims-perms-change"));
+    return { ok: false, error: res.error };
+  }
+  return { ok: true, perms: clean };
 }
 
 function currentRoleId() {

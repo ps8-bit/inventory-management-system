@@ -39,7 +39,12 @@ create policy "update" on public.app_state for update using (
   public.auth_role() in ('admin','manager','staff')
   and (key <> 'role_perms' or public.auth_role() = 'admin')
 );
-create policy "delete" on public.app_state for delete using (public.auth_role() in ('admin','manager'));
+-- DELETE is carved out too: dbSaveState(key, null) deletes the row, and deleting
+-- 'role_perms' would reset every role to the permissive built-in defaults.
+create policy "delete" on public.app_state for delete using (
+  public.auth_role() in ('admin','manager')
+  and (key <> 'role_perms' or public.auth_role() = 'admin')
+);
 
 -- Enable realtime so KV changes broadcast to other open devices.
 alter publication supabase_realtime add table public.app_state;

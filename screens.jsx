@@ -1391,7 +1391,7 @@ function Inbound({ goTo, pushToast }) {
           </div>
           <div className="row">
             <button className="btn btn-ghost btn-sm" onClick={() => window.location.reload()}><Icons.Refresh size={14}/></button>
-            <button className="btn btn-sm" onClick={() => {
+            {canDo("exportData") && <button className="btn btn-sm" onClick={() => {
               if (!received.length) return;
               const cols = ["SKU", "ชื่อสินค้า", "ตำแหน่งจัดเก็บ", "จำนวนรับ"];
               const rows = received.map(r => [r.sku, r.name, r.loc, r.qty]);
@@ -1401,7 +1401,7 @@ function Inbound({ goTo, pushToast }) {
               a.download = `GR-inbound-${new Date().toISOString().slice(0,10)}.csv`;
               a.click();
               URL.revokeObjectURL(a.href);
-            }}>ส่งออก CSV</button>
+            }}>ส่งออก CSV</button>}
           </div>
         </div>
         <table className="t">
@@ -1902,7 +1902,7 @@ function Outbound({ goTo, pushToast, focus }) {
               </body></html>`);
               w.document.close();
             }}/>
-            <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDeleteOrders} danger/>
+            {canDeleteData() && <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDeleteOrders} danger/>}
             {obBulkMenu === "status" && (
               <div ref={obBulkMenuRef} style={{
                 position: "absolute", top: "calc(100% + 8px)", right: 0,
@@ -4901,7 +4901,7 @@ function StockTake({ pushToast }) {
           <div className="page-sub">นับสินค้าจริงเทียบกับระบบ แล้วปรับให้ตรง — สแกนหรือกรอกจำนวนที่นับได้</div>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          <button className="btn" onClick={exportCsv} disabled={!summary.counted}><Icons.Pkg size={14}/> ส่งออก CSV</button>
+          {canDo("exportData") && <button className="btn" onClick={exportCsv} disabled={!summary.counted}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
           <button className="btn btn-accent" onClick={() => setConfirmOpen(true)} disabled={!changeList.length}>
             <Icons.Check size={14}/> บันทึกผลการนับ{changeList.length ? ` (${changeList.length})` : ""}
           </button>

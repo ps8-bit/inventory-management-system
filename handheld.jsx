@@ -74,7 +74,11 @@ function PhoneFrame({ children }) {
 function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
   const [route, setRouteRaw] = useStateM({ tab: "home", view: null, params: null, history: [] });
   const setRoute = (r) => setRouteRaw(r);
-  const switchTab = (tab) => setRoute({ tab, view: null, params: null, history: [] });
+  /* switchTab("inventory") — plain tab switch (every existing caller).
+     switchTab("inventory", { status: "low" }) — switch AND hand the tab screen a
+     preset (read once from ctx.route.params when it mounts), so a KPI tile can
+     land on the filtered list instead of the raw one. */
+  const switchTab = (tab, params) => setRoute({ tab, view: null, params: params || null, history: [] });
   const push = (view, params) => setRoute(r => ({ ...r, history: [...r.history, { view: r.view, params: r.params }], view, params }));
   const back = () => setRoute(r => {
     const h = [...r.history];
@@ -128,6 +132,17 @@ function StatusBar() {
   );
 }
 
+/* Bottom tabs → the nav id each one maps to. "home"/"more" are always available
+   (dashboard is the landing screen and "more" is how you reach everything else);
+   the other three are real nav ids and must honour the role's page list, or the
+   permission editor's chips would be a no-op on the phone. */
+const M_TAB_NAV_ID = { inbound: "inbound", outbound: "outbound", inventory: "inventory" };
+function mTabAllowed(tabId) {
+  const navId = M_TAB_NAV_ID[tabId];
+  if (!navId) return true;
+  return typeof canOpenPage !== "function" || canOpenPage(navId);
+}
+
 function TabBar({ tab, onSwitch }) {
   const tabs = [
     { id: "home",      label: "หน้าหลัก", icon: Icons.Dash },
@@ -135,7 +150,7 @@ function TabBar({ tab, onSwitch }) {
     { id: "outbound",  label: "จัดส่ง",   icon: Icons.Out },
     { id: "inventory", label: "สินค้า",   icon: Icons.Box },
     { id: "more",      label: "เพิ่มเติม", icon: Icons.Setting }
-  ];
+  ].filter(t => mTabAllowed(t.id));
   return (
     <div className="m-tabbar">
       {tabs.map(t => {
@@ -161,8 +176,20 @@ const M_GATED_VIEWS = ["locations", "labels", "tracking", "import", "bundles", "
 /* Screen dispatcher */
 function Screen({ ctx }) {
   const { route } = ctx;
-  if (route.view && M_GATED_VIEWS.indexOf(route.view) !== -1 && typeof roleNav === "function"
-      && roleNav().indexOf(route.view) === -1) {
+  if (route.view && M_GATED_VIEWS.indexOf(route.view) !== -1
+      && typeof canOpenPage === "function" && !canOpenPage(route.view)) {
+    return <MNoAccess ctx={ctx}/>;
+  }
+  // Tab screens are dispatched from route.tab, so they need their own check —
+  // the tab bar hides a revoked tab, but a route saved before the change can
+  // still land here.
+  if (!route.view && !mTabAllowed(route.tab)) return <MNoAccess ctx={ctx}/>;
+  // Selling / issuing stock is a capability, not a page — MSell and MIssue have
+  // several entry points, so the guard lives here rather than on each button.
+  if ((route.view === "sell" || route.view === "issue") && typeof canDo === "function" && !canDo("sell")) {
+    return <MNoAccess ctx={ctx}/>;
+  }
+  if (route.view === "adjust" && typeof canAdjustStock === "function" && !canAdjustStock()) {
     return <MNoAccess ctx={ctx}/>;
   }
   // sub-views
@@ -218,6 +245,9 @@ function MNoAccess({ ctx }) {
 
 /* =============== HOME =============== */
 
+// A .m-kpi rendered as a <button> needs the button chrome reset to keep the tile look.
+const KPI_TAP = { textAlign: "left", font: "inherit", fontFamily: "inherit", cursor: "pointer", width: "100%", display: "block" };
+
 function MHome({ ctx }) {
   const totalSkus = PRODUCTS.length;
   const totalQty = PRODUCTS.reduce((s, p) => s + p.qty, 0);
@@ -249,24 +279,26 @@ function MHome({ ctx }) {
           <Icons.Camera size={16} style={{ flexShrink: 0, color: "var(--accent)" }}/>
         </button>
 
-        {/* KPI grid 2x2 */}
+        {/* KPI grid 2x2 — each tile opens the list it counts (the two action
+            tiles land pre-filtered; the two totals just open the plain list). */}
         <div className="m-kpi-row">
-          <div className="m-kpi">
+          <button className="m-kpi" style={KPI_TAP} onClick={() => ctx.switchTab("inventory")}>
             <div className="m-kpi-label">SKU ทั้งหมด</div>
             <div className="m-kpi-value">{totalSkus}</div>
-          </div>
-          <div className="m-kpi">
+          </button>
+          <button className="m-kpi" style={KPI_TAP} onClick={() => ctx.switchTab("inventory")}>
             <div className="m-kpi-label">สต็อกรวม</div>
             <div className="m-kpi-value">{totalQty.toLocaleString()}</div>
-          </div>
-          <div className="m-kpi">
+          </button>
+          <button className="m-kpi" style={KPI_TAP} onClick={() => ctx.switchTab("outbound", { pending: true })}>
             <div className="m-kpi-label">ออร์เดอร์ค้าง</div>
             <div className="m-kpi-value">{pendingOrders}</div>
-          </div>
-          <div className="m-kpi" style={{ background: outOfStock + lowStock > 0 ? "var(--danger-soft)" : "var(--surface)" }}>
+          </button>
+          <button className="m-kpi" style={{ ...KPI_TAP, background: outOfStock + lowStock > 0 ? "var(--danger-soft)" : "var(--surface)" }}
+            onClick={() => ctx.switchTab("inventory", { status: outOfStock > 0 && lowStock === 0 ? "out" : "low" })}>
             <div className="m-kpi-label">ต้องสั่งซื้อ</div>
             <div className="m-kpi-value" style={{ color: "var(--danger)" }}>{lowStock + outOfStock}</div>
-          </div>
+          </button>
         </div>
 
         {/* Channels */}
@@ -294,11 +326,13 @@ function MHome({ ctx }) {
 
         {/* Quick actions */}
         <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>ทางลัด</div>
+        {/* Each shortcut is dropped when its capability/page is revoked — the
+            Screen guard would otherwise bounce the tap to "ไม่มีสิทธิ์เข้าถึง". */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, marginBottom: 14 }}>
-          <QuickTile icon={<Icons.Cart size={20}/>} label="ขายสินค้า" color="oklch(0.95 0.05 50)"  fg="oklch(0.5 0.16 40)"  onClick={() => ctx.push("sell")}/>
-          <QuickTile icon={<Icons.In size={20}/>}   label="รับเข้า"   color="oklch(0.96 0.04 150)" fg="oklch(0.4 0.13 150)" onClick={() => ctx.switchTab("inbound")}/>
-          <QuickTile icon={<Icons.Out size={20}/>}  label="ตัดสต็อก"  color="oklch(0.95 0.04 230)" fg="oklch(0.4 0.13 230)" onClick={() => ctx.push("issue")}/>
-          <QuickTile icon={<Icons.Tag size={20}/>}  label="ฉลาก"     color="oklch(0.96 0.03 310)" fg="oklch(0.4 0.13 310)" onClick={() => ctx.push("labels")}/>
+          {canDo("sell") && <QuickTile icon={<Icons.Cart size={20}/>} label="ขายสินค้า" color="oklch(0.95 0.05 50)"  fg="oklch(0.5 0.16 40)"  onClick={() => ctx.push("sell")}/>}
+          {canOpenPage("inbound") && <QuickTile icon={<Icons.In size={20}/>}   label="รับเข้า"   color="oklch(0.96 0.04 150)" fg="oklch(0.4 0.13 150)" onClick={() => ctx.switchTab("inbound")}/>}
+          {canDo("sell") && <QuickTile icon={<Icons.Out size={20}/>}  label="ตัดสต็อก"  color="oklch(0.95 0.04 230)" fg="oklch(0.4 0.13 230)" onClick={() => ctx.push("issue")}/>}
+          {canOpenPage("labels") && <QuickTile icon={<Icons.Tag size={20}/>}  label="ฉลาก"     color="oklch(0.96 0.03 310)" fg="oklch(0.4 0.13 310)" onClick={() => ctx.push("labels")}/>}
         </div>
 
         {/* Recent activity */}
@@ -662,7 +696,8 @@ function MInbound({ ctx }) {
 
 function MOutbound({ ctx }) {
   const tabs = ["ทั้งหมด", "รอหยิบ", "พร้อมส่ง", "ส่งแล้ว"];
-  const [tab, setTab] = useStateM(0);
+  // Opened from the home "ออร์เดอร์ค้าง" tile → start on รอหยิบ, not ทั้งหมด.
+  const [tab, setTab] = useStateM(() => (ctx.route.params && ctx.route.params.pending) ? 1 : 0);
   const [q, setQ] = useStateM("");
   const [chanFilter, setChanFilter] = useStateM("all");
   // Single source of truth shared with ติดตามพัสดุ: labels-as-shipments + overrides.
@@ -704,6 +739,19 @@ function MOutbound({ ctx }) {
     else ctx.push("track-edit", o);
   };
 
+  /* Bulk ฉลาก: carry the selection into the label queue instead of opening the
+     unfiltered list (which ignored what the user had just selected). One order
+     opens its label directly; several arrive pre-selected, ready to batch-print. */
+  const openSelectedLabels = () => {
+    const labels = (typeof loadLabels === "function") ? loadLabels() : [];
+    const idFor = (x) => (x.soId && !/^ฉลากใหม่/.test(x.soId)) ? x.soId : x.id;
+    const picked = labels.filter(l => selectedIds.includes(idFor(l)));
+    if (!picked.length) { ctx.pushToast("ออร์เดอร์ที่เลือกยังไม่มีฉลาก"); return; }
+    if (picked.length < selectedIds.length) ctx.pushToast(`มีฉลาก ${picked.length} จาก ${selectedIds.length} ออร์เดอร์ที่เลือก`);
+    if (picked.length === 1) ctx.push("label-view", picked[0]);
+    else ctx.push("labels", { labelIds: picked.map(l => l.id) });
+  };
+
   const bulkStatus = (status) => {
     if (typeof setOrderField === "function") selectedIds.forEach(id => setOrderField(id, { status }));
     ctx.pushToast(`อัปเดต ${selectedCount} ออร์เดอร์`);
@@ -740,7 +788,7 @@ function MOutbound({ ctx }) {
         <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)}>
           {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
         </button>
-        {!selecting && <button className="m-action accent" onClick={() => ctx.push("sell")}><Icons.Cart size={18}/></button>}
+        {!selecting && canDo("sell") && <button className="m-action accent" onClick={() => ctx.push("sell")}><Icons.Cart size={18}/></button>}
       </div>
       <div className="m-content">
         {!selecting && (
@@ -842,7 +890,7 @@ function MOutbound({ ctx }) {
           <span style={{ width: 26, height: 26, borderRadius: 999, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600 }} className="tnum">{selectedCount}</span>
           <span style={{ fontSize: 12, flex: 1 }}>เลือก {selectedCount} ออร์เดอร์</span>
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkMenu(bulkMenu === "status" ? null : "status")}><Icons.Truck size={14}/></button>
-          <button className="m-action" style={{ background: "rgba(90,180,255,0.3)", color: "white", width: 36, height: 36 }} onClick={() => { ctx.push("labels"); }}><Icons.Tag size={14}/></button>
+          <button className="m-action" style={{ background: "rgba(90,180,255,0.3)", color: "white", width: 36, height: 36 }} title="ฉลากของออร์เดอร์ที่เลือก" onClick={openSelectedLabels}><Icons.Tag size={14}/></button>
           {canDeleteData() && <button className="m-action" style={{ background: "rgba(255,90,90,0.3)", color: "white", width: 36, height: 36 }} onClick={bulkDelete}><Icons.Trash size={14}/></button>}
           {bulkMenu === "status" && (
             <div style={{
@@ -874,7 +922,8 @@ function MOutbound({ ctx }) {
 function MInventory({ ctx }) {
   const [q, setQ] = useStateM("");
   const [cat, setCat] = useStateM("ทั้งหมด");
-  const [statusFilter, setStatusFilter] = useStateM("all"); // all | ok | low | out
+  // all | ok | low | out — preset when opened from the home "ต้องสั่งซื้อ" tile.
+  const [statusFilter, setStatusFilter] = useStateM(() => (ctx.route.params && ctx.route.params.status) || "all");
   const [locFilter, setLocFilter] = useStateM(false); // true = only products not stored in a real position
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
@@ -969,7 +1018,7 @@ function MInventory({ ctx }) {
     <>
       <div className="m-topbar">
         <div className="m-title">สินค้าคงคลัง</div>
-        {!selecting && <button className="m-action" title="รายงานสต็อก Excel" onClick={() => { if (typeof downloadStockReport === "function") downloadStockReport(products); }}><Icons.Dash size={14}/></button>}
+        {!selecting && canDo("exportData") && <button className="m-action" title="รายงานสต็อก Excel" onClick={() => { if (typeof downloadStockReport === "function") downloadStockReport(products); }}><Icons.Dash size={14}/></button>}
         {!selecting && canDo("exportData") && <button className="m-action" title="ส่งออก CSV" onClick={exportInventoryCsv}><Icons.Pkg size={14}/></button>}
         <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)}>
           {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
@@ -2966,7 +3015,10 @@ function MMore({ ctx }) {
         <div className="m-list">
           {items.filter(it =>
             it.id === "catalog" ||
-            (typeof roleNav === "function" && roleNav(user.role).includes(it.id))
+            ((typeof canOpenPage !== "function" || canOpenPage(it.id, user.role))
+              // ปรับสต็อก is a page id AND a capability — both must hold, or the
+              // row would open a screen the Screen guard immediately blocks.
+              && (it.id !== "adjust" || typeof canAdjustStock !== "function" || canAdjustStock()))
           ).map(it => {
             const I = it.icon;
             return (
@@ -3098,9 +3150,17 @@ function MCatalog({ ctx }) {
 
             <div className="m-list">
               {filtered.slice(0, showN).map((e, i) => {
-                const inStock = PRODUCTS.some(p => p.sku.toLowerCase() === (e.sku || "").toLowerCase());
+                // A row badged ในคลัง has a real SKU behind it — open it. Reference-only
+                // rows stay inert (there is no product page to show).
+                const stockSku = (PRODUCTS.find(p => p.sku.toLowerCase() === (e.sku || "").toLowerCase()) || {}).sku;
+                const inStock = !!stockSku;
+                const Row = inStock ? "button" : "div";
                 return (
-                  <div key={e.sku || i} className="m-row" style={{ cursor: "default" }}>
+                  <Row key={e.sku || i} className="m-row"
+                    onClick={inStock ? (() => ctx.push("product", { sku: stockSku })) : undefined}
+                    style={inStock
+                      ? { cursor: "pointer", width: "100%", textAlign: "left", font: "inherit", fontFamily: "inherit" }
+                      : { cursor: "default" }}>
                     <ProductImageThumb sku={e.sku} size={40} radius={8}/>
                     <div className="m-row-main">
                       <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.name || "—"}</div>
@@ -3109,7 +3169,7 @@ function MCatalog({ ctx }) {
                     {inStock
                       ? <span className="badge badge-success" style={{ flexShrink: 0 }}>ในคลัง</span>
                       : <span className="badge badge-neutral" style={{ flexShrink: 0 }}>อ้างอิง</span>}
-                  </div>
+                  </Row>
                 );
               })}
               {filtered.length === 0 && <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่พบรายการที่ตรงกับเงื่อนไข</div>}
@@ -3488,8 +3548,15 @@ function MLocations({ ctx }) {
 
 function MLabels({ ctx }) {
   const [labels, setLabels] = useStateM(() => typeof loadLabels === "function" ? loadLabels() : SAMPLE_LABELS);
-  const [selecting, setSelecting] = useStateM(false);
-  const [selected, setSelected] = useStateM({});
+  // Arrived from จัดส่งสินค้า with a selection (push("labels", { labelIds })) →
+  // open straight into select-mode with those labels ticked, ready to print.
+  const initialIds = (ctx.route.params && Array.isArray(ctx.route.params.labelIds)) ? ctx.route.params.labelIds : null;
+  const [selecting, setSelecting] = useStateM(!!initialIds);
+  const [selected, setSelected] = useStateM(() => {
+    const o = {};
+    if (initialIds) initialIds.forEach(id => { o[id] = true; });
+    return o;
+  });
   const [dateFilter, setDateFilter] = useStateM(""); // "" = all days; else a YYYY-MM-DD key
   const [batchLabels, setBatchLabels] = useStateM([]);
   const [batchLoading, setBatchLoading] = useStateM(false);
@@ -3648,7 +3715,9 @@ function MLabels({ ctx }) {
                     <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{l.soId || "ฉลากใหม่"}</span>
                     <span style={{ fontSize: 10, color: "var(--muted)" }}>{(l.carrier || "").split(" ")[0]}</span>
                   </div>
-                  <div className="m-row-sub">{l.recipient.name || "ยังไม่ระบุผู้รับ"} · {l.items.length} รายการ · {l.weight || "—"}</div>
+                  {/* Guarded: one partial label row (no recipient / no items) used to
+                      throw here and white-screen the whole ฉลาก list. */}
+                  <div className="m-row-sub">{(l.recipient && l.recipient.name) || "ยังไม่ระบุผู้รับ"} · {(l.items || []).length} รายการ · {l.weight || "—"}</div>
                 </div>
                 {!selecting && <Icons.Chev size={14} className="m-row-chev"/>}
               </button>
@@ -4819,8 +4888,12 @@ function MAnalytics({ ctx }) {
   const chartMax = Math.max(...chart, 1);
 
   const exportCsv = () => {
-    const rows = [["สินค้า", "SKU", "ขายได้", "ยอดขาย", "กำไร", "มาร์จิ้น%"]];
-    data.forEach(p => rows.push([p.name, p.sku, p.units, Math.round(p.revenue), Math.round(p.profit), (p.margin * 100).toFixed(1)]));
+    // Profit/margin are cost-derived — drop the columns for roles without viewCost.
+    const withCost = canDo("viewCost");
+    const rows = [withCost ? ["สินค้า", "SKU", "ขายได้", "ยอดขาย", "กำไร", "มาร์จิ้น%"] : ["สินค้า", "SKU", "ขายได้", "ยอดขาย"]];
+    data.forEach(p => rows.push(withCost
+      ? [p.name, p.sku, p.units, Math.round(p.revenue), Math.round(p.profit), (p.margin * 100).toFixed(1)]
+      : [p.name, p.sku, p.units, Math.round(p.revenue)]));
     const csv = "﻿" + rows.map(r => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -4829,12 +4902,16 @@ function MAnalytics({ ctx }) {
     ctx.pushToast("ส่งออก CSV แล้ว");
   };
 
+  // Mirror of the desktop rule: this whole screen is the sales view, so the
+  // page id alone must not grant it — viewSales does.
+  if (!canDo("viewSales")) return <MNoAccess ctx={ctx}/>;
+
   return (
     <>
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub">วิเคราะห์ยอดขาย</div>
-        <button className="m-action" onClick={exportCsv}><Icons.Pkg size={14}/></button>
+        {canDo("exportData") && <button className="m-action" onClick={exportCsv}><Icons.Pkg size={14}/></button>}
       </div>
       <div className="m-content">
         <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
@@ -4858,11 +4935,13 @@ function MAnalytics({ ctx }) {
               {total.revenue > 0 ? `${revDelta >= 0 ? "▲" : "▼"} ${Math.abs(revPct).toFixed(1)}% เทียบช่วงก่อน` : "ยังไม่มีข้อมูลรายสินค้า"}
             </div>
           </div>
-          <div className="m-kpi">
-            <div className="m-kpi-label">กำไรขั้นต้น</div>
-            <div className="m-kpi-value" style={{ fontSize: 18, color: total.profit > 0 ? "var(--success)" : "var(--fg)" }}>{mMoney(total.profit)}</div>
-            <div style={{ fontSize: 10, marginTop: 2, color: "var(--muted)" }}>{total.revenue > 0 ? `มาร์จิ้น ${(totalMargin * 100).toFixed(1)}%` : "—"}</div>
-          </div>
+          {canDo("viewCost") && (
+            <div className="m-kpi">
+              <div className="m-kpi-label">กำไรขั้นต้น</div>
+              <div className="m-kpi-value" style={{ fontSize: 18, color: total.profit > 0 ? "var(--success)" : "var(--fg)" }}>{mMoney(total.profit)}</div>
+              <div style={{ fontSize: 10, marginTop: 2, color: "var(--muted)" }}>{total.revenue > 0 ? `มาร์จิ้น ${(totalMargin * 100).toFixed(1)}%` : "—"}</div>
+            </div>
+          )}
           <div className="m-kpi">
             <div className="m-kpi-label">จำนวนที่ขาย</div>
             <div className="m-kpi-value" style={{ fontSize: 18 }}>{mFmt(total.units)}</div>
@@ -4948,8 +5027,8 @@ function MAnalytics({ ctx }) {
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
                       <MSumCell label="สต็อกเหลือ" value={p.qty + " ชิ้น"}/>
-                      <MSumCell label="กำไร/ชิ้น" value={"฿" + mFmt(p.price - p.costPrice)}/>
-                      <MSumCell label="กำไรรวม" value={mMoney(p.profit)} accent/>
+                      {canDo("viewCost") && <MSumCell label="กำไร/ชิ้น" value={"฿" + mFmt(p.price - p.costPrice)}/>}
+                      {canDo("viewCost") && <MSumCell label="กำไรรวม" value={mMoney(p.profit)} accent/>}
                     </div>
                   </div>
                 )}
@@ -5095,7 +5174,7 @@ function MStockTake({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub">ตรวจนับสต็อก</div>
-        <button className="m-action" title="ส่งออก CSV" onClick={exportCsv}><Icons.Pkg size={14}/></button>
+        {canDo("exportData") && <button className="m-action" title="ส่งออก CSV" onClick={exportCsv}><Icons.Pkg size={14}/></button>}
         <button className="m-action accent" onClick={save} disabled={!changeList.length} style={!changeList.length ? { opacity: 0.4 } : {}}><Icons.Check size={16}/></button>
       </div>
       <div className="m-content">
@@ -5189,6 +5268,24 @@ function MHistory({ ctx }) {
   const entts = ["all", "product", "bundle", "order", "user"];
   const entLabel = { all: "ทั้งหมด", product: "สินค้า", bundle: "ชุดสินค้า", order: "ออร์เดอร์", user: "ผู้ใช้" };
 
+  /* Return a handler that opens the record an entry changed, or null when there
+     is nothing to open (no entityId, bulk entry, deleted record, or an entity
+     with no mobile detail screen) — the row then stays inert instead of
+     pretending to be tappable. */
+  const openTarget = (e) => {
+    const id = e && e.entityId;
+    if (!id) return null;
+    if (e.entity === "product") {
+      return PRODUCTS.some(p => p.sku === id) ? (() => ctx.push("product", { sku: id })) : null;
+    }
+    if (e.entity === "order") {
+      const orders = (typeof buildOrders === "function") ? buildOrders() : [];
+      const hit = orders.find(o => o.id === id);
+      return hit ? (() => ctx.push("track-edit", hit)) : null;
+    }
+    return null;
+  };
+
   const filtered = log.filter(e => {
     if (filter !== "all" && e.entity !== filter) return false;
     if (q) {
@@ -5236,19 +5333,29 @@ function MHistory({ ctx }) {
         </div>
 
         <div className="m-list">
-          {filtered.map((e, i) => (
-            <div key={e.id || i} className="m-row" style={{ cursor: "default", alignItems: "flex-start" }}>
-              <div className="m-row-thumb" style={{ background: "var(--surface-2)", color: "var(--fg-2)" }}><Icons.History size={15}/></div>
-              <div className="m-row-main">
-                <div className="m-row-title" style={{ fontSize: 13, whiteSpace: "normal" }}>{e.summary || (e.entityId ? "แก้ไข " + e.entityId : "เปลี่ยนแปลง")}</div>
-                {e.changes && e.changes.length > 0 && (
-                  <div className="m-row-sub" style={{ whiteSpace: "normal" }}>{e.changes.map(c => c.label + (c.to ? `: ${c.to}` : "")).join(" · ")}</div>
-                )}
-                {e.note && <div className="m-row-sub" style={{ whiteSpace: "normal", fontStyle: "italic" }}>{e.note}</div>}
-                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{mFormatTime(e.ts)} · {e.user?.name || "ระบบ"}</div>
-              </div>
-            </div>
-          ))}
+          {filtered.map((e, i) => {
+            // Entries that name a record they changed become tappable and open it.
+            const open = openTarget(e);
+            const Row = open ? "button" : "div";
+            return (
+              <Row key={e.id || i} className="m-row"
+                onClick={open || undefined}
+                style={open
+                  ? { alignItems: "flex-start", cursor: "pointer", width: "100%", textAlign: "left", font: "inherit", fontFamily: "inherit" }
+                  : { cursor: "default", alignItems: "flex-start" }}>
+                <div className="m-row-thumb" style={{ background: "var(--surface-2)", color: "var(--fg-2)" }}><Icons.History size={15}/></div>
+                <div className="m-row-main">
+                  <div className="m-row-title" style={{ fontSize: 13, whiteSpace: "normal" }}>{e.summary || (e.entityId ? "แก้ไข " + e.entityId : "เปลี่ยนแปลง")}</div>
+                  {e.changes && e.changes.length > 0 && (
+                    <div className="m-row-sub" style={{ whiteSpace: "normal" }}>{e.changes.map(c => c.label + (c.to ? `: ${c.to}` : "")).join(" · ")}</div>
+                  )}
+                  {e.note && <div className="m-row-sub" style={{ whiteSpace: "normal", fontStyle: "italic" }}>{e.note}</div>}
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{mFormatTime(e.ts)} · {e.user?.name || "ระบบ"}</div>
+                </div>
+                {open && <Icons.Chev size={14} style={{ color: "var(--muted)", flexShrink: 0, alignSelf: "center" }}/>}
+              </Row>
+            );
+          })}
           {filtered.length === 0 && (
             <div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
               <Icons.History size={22} style={{ opacity: 0.4, marginBottom: 6 }}/>
@@ -5273,6 +5380,7 @@ function MRolePerms({ ctx, onClose }) {
     return { nav: { ...(p.nav || {}) }, caps: { ...(p.caps || {}) } };
   });
   const [dirty, setDirty] = useStateM(false);
+  const [saving, setSaving] = useStateM(false);
 
   const roleMeta = ROLES.find(r => r.id === role) || ROLES[0];
   const locked = role === "admin";
@@ -5301,11 +5409,19 @@ function MRolePerms({ ctx, onClose }) {
     setDraft(d => ({ ...d, nav: { ...d.nav, [role]: next } }));
     setDirty(true);
   };
-  const save = () => {
-    if (typeof saveRolePerms !== "function") return;
-    saveRolePerms(draft);
+  const save = async () => {
+    if (typeof saveRolePerms !== "function" || saving) return;
+    setSaving(true);
+    const res = await saveRolePerms(draft);
+    setSaving(false);
+    // Failed write → saveRolePerms already rolled the local copy back; keep the
+    // sheet open with the edits intact rather than claiming success.
+    if (res && res.ok === false) {
+      ctx.pushToast("บันทึกไม่สำเร็จ: " + (res.error || "ไม่ทราบสาเหตุ"));
+      return;
+    }
     setDirty(false);
-    ctx.pushToast("บันทึกสิทธิ์ตามตำแหน่งแล้ว");
+    ctx.pushToast(res && res.offline ? "บันทึกในเครื่องแล้ว (ยังไม่ซิงค์)" : "บันทึกสิทธิ์ตามตำแหน่งแล้ว");
     if (typeof recordChange === "function") {
       recordChange({ entity: "settings", action: "update", summary: `แก้ไขสิทธิ์ของตำแหน่ง ${roleMeta.label} (มือถือ)` });
     }
@@ -5378,8 +5494,8 @@ function MRolePerms({ ctx, onClose }) {
         </div>
         <div className="m-sheet-foot" style={{ display: "flex", gap: 8 }}>
           <button className="m-btn-big outline" style={{ flex: 1 }} onClick={onClose}>ยกเลิก</button>
-          <button className="m-btn-big" style={{ flex: 1, opacity: dirty ? 1 : 0.5 }} disabled={!dirty} onClick={save}>
-            <Icons.Check size={15}/> บันทึก
+          <button className="m-btn-big" style={{ flex: 1, opacity: (dirty && !saving) ? 1 : 0.5 }} disabled={!dirty || saving} onClick={save}>
+            <Icons.Check size={15}/> {saving ? "กำลังบันทึก…" : "บันทึก"}
           </button>
         </div>
       </div>
@@ -5934,7 +6050,7 @@ function MTracking({ ctx }) {
           <span style={{ fontSize: 12, flex: 1 }}>เลือก {selCount}</span>
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkMenu(bulkMenu === "status" ? null : "status")}><Icons.Truck size={14}/></button>
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkMenu(bulkMenu === "carrier" ? null : "carrier")}><Icons.Tag size={14}/></button>
-          <button className="m-action" style={{ background: "rgba(255,90,90,0.3)", color: "white", width: 36, height: 36 }} onClick={bulkDelete}><Icons.Trash size={14}/></button>
+          {canDeleteData() && <button className="m-action" style={{ background: "rgba(255,90,90,0.3)", color: "white", width: 36, height: 36 }} onClick={bulkDelete}><Icons.Trash size={14}/></button>}
           {bulkMenu && (
             <div style={{
               position: "absolute", bottom: "calc(100% + 8px)", right: 12, left: 12,

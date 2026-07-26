@@ -824,6 +824,15 @@ function App({ user, onLogout, onSwitchUser }) {
      goTo("inventory", { sku }) / goTo("outbound", { orderId }) — navigate AND
      tell that screen which record to open. Screens read it via the `focus` prop. */
   const goTo = (p, focus) => {
+    /* Single choke point for cross-page navigation: a page this role may not
+       open would otherwise be bounced straight back by the guard below, which
+       reads as a dead button. Refuse it here and say why instead. Call sites
+       that can predict this (the Excel-import / history / analytics buttons)
+       hide themselves with canOpenPage() — this catches the rest. */
+    if (typeof canOpenPage === "function" && !canOpenPage(p)) {
+      pushToast("ไม่มีสิทธิ์เข้าถึงหน้านี้ — ติดต่อผู้ดูแลระบบ");
+      return;
+    }
     setPage(p);
     focusSeqRef.current += 1;
     setPageFocus(focus ? { ...focus, page: p, n: focusSeqRef.current } : null);

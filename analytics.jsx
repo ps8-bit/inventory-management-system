@@ -181,6 +181,32 @@ function AnalyticsPage({ pushToast }) {
   const chart = isRev ? revChart : ordChart;
   const chartMax = Math.max(...chart, 1);
 
+  /* This whole page IS the daily-sales view, so viewSales gates it outright —
+     the page id and the capability are independent toggles in the permission
+     editor, and granting the page alone must not hand over the money view.
+     viewCost additionally controls the cost / profit / margin columns. */
+  const showSales = typeof canDo !== "function" || canDo("viewSales");
+  const showCost  = typeof canDo !== "function" || canDo("viewCost");
+  if (!showSales) {
+    return (
+      <div className="stack" style={{ gap: 24 }}>
+        <div className="page-head">
+          <div>
+            <h1 className="page-title">วิเคราะห์ยอดขาย</h1>
+            <div className="page-sub">ต้องมีสิทธิ์ "ดูยอดขายและรายได้" จึงจะเปิดหน้านี้ได้</div>
+          </div>
+        </div>
+        <div className="card" style={{ textAlign: "center", padding: 48 }}>
+          <div style={{ width: 56, height: 56, borderRadius: 999, background: "var(--warning-soft)", color: "var(--warning)", display: "grid", placeItems: "center", margin: "0 auto 14px" }}>
+            <Icons.Warn size={26}/>
+          </div>
+          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>ไม่มีสิทธิ์ดูยอดขายและรายได้</div>
+          <div style={{ fontSize: 13, color: "var(--muted)" }}>ติดต่อผู้ดูแลระบบเพื่อเปิดสิทธิ์ให้ตำแหน่งของคุณ</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="stack" style={{ gap: 24 }}>
       <div className="page-head">
@@ -194,7 +220,7 @@ function AnalyticsPage({ pushToast }) {
               <button key={p.id} className={period === p.id ? "on" : ""} onClick={() => setPeriod(p.id)}>{p.label}</button>
             ))}
           </div>
-          <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const head = "SKU,สินค้า,จำนวนขาย,ยอดขาย,ต้นทุน,กำไร,มาร์จิน%"; const rows = data.map(p => [p.sku, p.name, p.units, p.revenue, p.costTotal, p.profit, (p.margin * 100).toFixed(1)].map(esc).join(",")); const totalRow = ["รวม", "", total.units, total.revenue, total.cost, total.profit, (totalMargin * 100).toFixed(1)].map(esc).join(","); const csv = [head, ...rows, totalRow].join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `analytics-${period}.csv`; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>
+          {canDo("exportData") && <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const head = showCost ? "SKU,สินค้า,จำนวนขาย,ยอดขาย,ต้นทุน,กำไร,มาร์จิน%" : "SKU,สินค้า,จำนวนขาย,ยอดขาย"; const rows = data.map(p => (showCost ? [p.sku, p.name, p.units, p.revenue, p.costTotal, p.profit, (p.margin * 100).toFixed(1)] : [p.sku, p.name, p.units, p.revenue]).map(esc).join(",")); const totalRow = (showCost ? ["รวม", "", total.units, total.revenue, total.cost, total.profit, (totalMargin * 100).toFixed(1)] : ["รวม", "", total.units, total.revenue]).map(esc).join(","); const csv = [head, ...rows, totalRow].join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `analytics-${period}.csv`; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
         </div>
       </div>
 
@@ -217,11 +243,13 @@ function AnalyticsPage({ pushToast }) {
               : <span style={{ color: "var(--muted)" }}>ยังไม่มีข้อมูลรายสินค้า</span>}
           </div>
         </div>
-        <div className="kpi">
-          <div className="kpi-label">กำไรขั้นต้น</div>
-          <div className="kpi-value" style={{ marginTop: 4, color: total.profit > 0 ? "var(--success)" : "var(--fg)" }}>{fmtMoney(total.profit)}</div>
-          <div className="kpi-delta">{total.revenue > 0 ? <><span className="up">{(totalMargin*100).toFixed(1)}%</span> มาร์จิ้น</> : <span style={{ color: "var(--muted)" }}>—</span>}</div>
-        </div>
+        {showCost && (
+          <div className="kpi">
+            <div className="kpi-label">กำไรขั้นต้น</div>
+            <div className="kpi-value" style={{ marginTop: 4, color: total.profit > 0 ? "var(--success)" : "var(--fg)" }}>{fmtMoney(total.profit)}</div>
+            <div className="kpi-delta">{total.revenue > 0 ? <><span className="up">{(totalMargin*100).toFixed(1)}%</span> มาร์จิ้น</> : <span style={{ color: "var(--muted)" }}>—</span>}</div>
+          </div>
+        )}
         <div className="kpi">
           <div className="kpi-label">จำนวนชิ้นที่ขาย</div>
           <div className="kpi-value" style={{ marginTop: 4 }}>{fmt(total.units)}</div>
@@ -305,11 +333,11 @@ function AnalyticsPage({ pushToast }) {
             <th style={{ width: 36 }}>#</th>
             <th>สินค้า</th>
             <th className="t-num">ขายได้</th>
-            <th className="t-num">ราคาทุน</th>
+            {showCost && <th className="t-num">ราคาทุน</th>}
             <th className="t-num">ราคาขาย</th>
             <th className="t-num">ยอดขาย</th>
-            <th className="t-num">กำไร</th>
-            <th className="t-num">มาร์จิ้น</th>
+            {showCost && <th className="t-num">กำไร</th>}
+            {showCost && <th className="t-num">มาร์จิ้น</th>}
             <th style={{ width: 1 }}/>
           </tr></thead>
           <tbody>
@@ -331,11 +359,11 @@ function AnalyticsPage({ pushToast }) {
                       </div>
                     </td>
                     <td className="t-num tnum">{p.units}</td>
-                    <td className="t-num tnum" style={{ color: "var(--muted)" }}>฿{fmt(p.cost ?? p.price * 0.6)}</td>
+                    {showCost && <td className="t-num tnum" style={{ color: "var(--muted)" }}>฿{fmt(p.cost ?? p.price * 0.6)}</td>}
                     <td className="t-num tnum">฿{fmt(p.price)}</td>
                     <td className="t-num tnum" style={{ fontWeight: 500 }}>{fmtMoney(p.revenue)}</td>
-                    <td className="t-num tnum" style={{ color: "var(--success)" }}>{fmtMoney(p.profit)}</td>
-                    <td className="t-num tnum" style={{ color: marginTone, fontWeight: 500 }}>{margin.toFixed(1)}%</td>
+                    {showCost && <td className="t-num tnum" style={{ color: "var(--success)" }}>{fmtMoney(p.profit)}</td>}
+                    {showCost && <td className="t-num tnum" style={{ color: marginTone, fontWeight: 500 }}>{margin.toFixed(1)}%</td>}
                     <td><Icons.Chev size={14} style={{ color: "var(--muted)", transform: isOpen ? "rotate(90deg)" : "rotate(0)", transition: "transform 0.15s" }}/></td>
                   </tr>
                   {isOpen && (
@@ -364,10 +392,10 @@ function AnalyticsPage({ pushToast }) {
                             <div className="grid-3" style={{ gap: 10 }}>
                               <SummaryCell label="ขาย" value={p.units + " ชิ้น"}/>
                               <SummaryCell label="สต็อกเหลือ" value={p.qty + " ชิ้น"}/>
-                              <SummaryCell label="กำไรต่อชิ้น" value={"฿" + fmt(p.price - (p.cost ?? p.price * 0.6))}/>
+                              {showCost && <SummaryCell label="กำไรต่อชิ้น" value={"฿" + fmt(p.price - (p.cost ?? p.price * 0.6))}/>}
                               <SummaryCell label="ยอดขาย" value={fmtMoney(p.revenue)}/>
-                              <SummaryCell label="ต้นทุน" value={fmtMoney(p.costTotal)}/>
-                              <SummaryCell label="กำไร" value={fmtMoney(p.profit)} accent/>
+                              {showCost && <SummaryCell label="ต้นทุน" value={fmtMoney(p.costTotal)}/>}
+                              {showCost && <SummaryCell label="กำไร" value={fmtMoney(p.profit)} accent/>}
                             </div>
                           </div>
                         </div>

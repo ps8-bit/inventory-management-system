@@ -179,9 +179,11 @@ function QuickActionsWidget({ goTo }) {
     { id: "locations",icon: Icons.Map,  label: "ตำแหน่งจัดเก็บ", tone: "oklch(0.95 0.04 270)", fg: "oklch(0.4 0.13 270)" },
     { id: "handheld", icon: Icons.Phone,label: "โหมดมือถือ",     tone: "oklch(0.95 0.04 200)", fg: "oklch(0.4 0.13 200)" }
   ];
+  // Drop shortcuts to pages this role can't open — goTo would refuse them anyway.
+  const visible = actions.filter(a => typeof canOpenPage !== "function" || canOpenPage(a.id));
   return (
     <div style={{ padding: 14, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
-      {actions.map(a => {
+      {visible.map(a => {
         const I = a.icon;
         return (
           <button key={a.id} className="btn" onClick={() => goTo(a.id)} style={{

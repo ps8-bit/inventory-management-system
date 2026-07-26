@@ -102,8 +102,12 @@ end $$;
 --     (that's how categories/locations sync), so without this the very users a
 --     permission restricts could lift it by rewriting the blob. Re-create the
 --     two write policies for app_state with that one key carved out for admin.
+--     DELETE matters just as much as INSERT/UPDATE here: dbSaveState(key, null)
+--     issues a DELETE, and deleting the row resets every role to the permissive
+--     built-in defaults — so a manager could lift their own restrictions with it.
 drop policy if exists "insert" on public.app_state;
 drop policy if exists "update" on public.app_state;
+drop policy if exists "delete" on public.app_state;
 create policy "insert" on public.app_state for insert with check (
   public.auth_role() in ('admin','manager','staff')
   and public.within_work_hours()
@@ -114,6 +118,11 @@ create policy "update" on public.app_state for update using (
   and (key <> 'role_perms' or public.auth_role() = 'admin')
 ) with check (
   public.auth_role() in ('admin','manager','staff')
+  and public.within_work_hours()
+  and (key <> 'role_perms' or public.auth_role() = 'admin')
+);
+create policy "delete" on public.app_state for delete using (
+  public.auth_role() in ('admin','manager')
   and public.within_work_hours()
   and (key <> 'role_perms' or public.auth_role() = 'admin')
 );

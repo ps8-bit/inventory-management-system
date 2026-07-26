@@ -1081,6 +1081,7 @@ function RolePermissions({ currentUser, pushToast, allNav }) {
     return { nav: { ...(p.nav || {}) }, caps: { ...(p.caps || {}) } };
   });
   const [dirty, setDirty] = useStateAuth(false);
+  const [saving, setSaving] = useStateAuth(false);
 
   /* Another device (or the initial cloud load) changed the blob — adopt it,
      unless this admin has unsaved edits in front of them. */
@@ -1131,11 +1132,19 @@ function RolePermissions({ currentUser, pushToast, allNav }) {
     setDirty(true);
   };
 
-  const save = () => {
-    if (!isAdmin || typeof saveRolePerms !== "function") return;
-    saveRolePerms(draft);
+  const save = async () => {
+    if (!isAdmin || typeof saveRolePerms !== "function" || saving) return;
+    setSaving(true);
+    const res = await saveRolePerms(draft);
+    setSaving(false);
+    // A rejected write (RLS drift, offline, outside working hours) rolls the
+    // local copy back — say so instead of claiming a save that never landed.
+    if (res && res.ok === false) {
+      pushToast("บันทึกไม่สำเร็จ: " + (res.error || "ไม่ทราบสาเหตุ") + " — การตั้งค่ายังไม่ถูกใช้งาน");
+      return;
+    }
     setDirty(false);
-    pushToast("บันทึกสิทธิ์ตามตำแหน่งแล้ว");
+    pushToast(res && res.offline ? "บันทึกในเครื่องแล้ว (ยังไม่ได้ซิงค์ขึ้นคลาวด์)" : "บันทึกสิทธิ์ตามตำแหน่งแล้ว");
     if (typeof recordChange === "function") {
       recordChange({
         entity: "settings", action: "update",
@@ -1161,9 +1170,9 @@ function RolePermissions({ currentUser, pushToast, allNav }) {
           <button className="btn" onClick={resetRole} disabled={locked} style={locked ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
             <Icons.Refresh size={13}/> คืนค่าเริ่มต้น
           </button>
-          <button className="btn btn-primary" onClick={save} disabled={!dirty || !isAdmin}
-            style={(!dirty || !isAdmin) ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
-            <Icons.Check size={13}/> บันทึก
+          <button className="btn btn-primary" onClick={save} disabled={!dirty || !isAdmin || saving}
+            style={(!dirty || !isAdmin || saving) ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+            <Icons.Check size={13}/> {saving ? "กำลังบันทึก…" : "บันทึก"}
           </button>
         </div>
       </div>

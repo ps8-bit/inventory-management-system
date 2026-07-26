@@ -596,6 +596,14 @@ function setupRealtimeSync() {
       for (const k of keys) {
         const v = await dbLoadState(k);
         if (v != null) window[map[k][0]] = v;
+        // Keep the permission mirror in step with the cloud on every push, so an
+        // offline relaunch enforces the CURRENT rules (see dbInit for why).
+        if (k === 'role_perms') {
+          try {
+            if (v == null) localStorage.removeItem('ims_role_perms');
+            else localStorage.setItem('ims_role_perms', JSON.stringify(v));
+          } catch (e) {}
+        }
         window.dispatchEvent(new CustomEvent(map[k][1]));
       }
     })
@@ -739,11 +747,20 @@ async function dbInit() {
     if (orderOverrides && typeof orderOverrides === 'object') window._DB_ORDER_OVERRIDES = orderOverrides;
     if (wooCatalog && typeof wooCatalog === 'object') window._DB_WOO_CATALOG = wooCatalog;
     /* Per-role permission overrides (nav + capabilities). Absent = every role
-       keeps its built-in defaults, so a fresh install needs no seeding. Fire
-       the change event so anything already mounted re-reads the gates. */
+       keeps its built-in defaults, so a fresh install needs no seeding.
+       MIRROR IT LOCALLY on every load: saveRolePerms only ever runs on the
+       admin's device, so without this a restricted user whose next launch can't
+       reach Supabase would fall back to {} — i.e. the permissive built-in
+       defaults — instead of the rules the admin set. Fire the change event so
+       anything already mounted re-reads the gates. */
     if (rolePerms && typeof rolePerms === 'object') {
       window._DB_ROLE_PERMS = rolePerms;
+      try { localStorage.setItem('ims_role_perms', JSON.stringify(rolePerms)); } catch (e) {}
       window.dispatchEvent(new CustomEvent('ims-perms-change'));
+    } else if (rolePerms === null) {
+      // Cloud says "no overrides" — clear a stale mirror so a reverted setup
+      // doesn't keep restricting this device forever.
+      try { localStorage.removeItem('ims_role_perms'); } catch (e) {}
     }
 
     /* One-time seed: if the cloud has no copy yet but this device has local
