@@ -426,6 +426,27 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
   return { ok: true, from, to, eff };
 }
 
+/* Multi-SKU version of the above — one shared reason/note, many products.
+   Both ปรับสต็อก UIs (desktop StockAdjustModal, mobile MAdjust) select several
+   items at once, and both must stay on the single choke point above, so this
+   only loops it and aggregates: per-SKU audit rows + stock_adjustments history
+   stay granular (the ProductDrawer history panel reads them per product).
+   items = [{ sku, delta }] → { ok, applied, skipped, net, results }. */
+function applyStockAdjustmentBatch(items, opts) {
+  const { reason, note, source } = opts || {};
+  const list = Array.isArray(items) ? items : [];
+  const results = [];
+  let applied = 0, skipped = 0, net = 0;
+  list.forEach(it => {
+    if (!it || !it.sku) { skipped++; return; }
+    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source }) || { ok: false };
+    results.push({ sku: it.sku, ...res });
+    // eff === 0 means the clamp ate the change (already 0 คงเหลือ) — not applied.
+    if (res.ok && res.eff) { applied++; net += res.eff; } else skipped++;
+  });
+  return { ok: applied > 0, applied, skipped, net, results };
+}
+
 /* ── Persistent order store ──
    Mirrors outbound orders to localStorage so badge counts and other
    components can read them without requiring the Outbound screen
@@ -540,21 +561,20 @@ function saveLocTree(tree) {
   if (window.dbSaveState) dbSaveState("locations", tree).catch(() => {});
 }
 
-/* Capability: hard-delete of records is reserved for admin/manager (mirrors the
-   Supabase DELETE RLS policy). Locations live in the app_state blob, where a
-   delete is persisted by dbSaveState as an UPDATE of the blob — which staff IS
-   allowed to do — so the row-level DELETE policy can't stop them. The app must
-   gate it instead. */
+/* Capability: hard-delete of records. Defaults to admin/manager (mirrors the
+   Supabase DELETE RLS policy) and is admin-tunable via canDo("deleteData").
+   Locations live in the app_state blob, where a delete is persisted by
+   dbSaveState as an UPDATE of the blob — which staff IS allowed to do — so the
+   row-level DELETE policy can't stop them. The app must gate it instead. */
 function canDeleteData() {
-  const role = (window.__currentUser && window.__currentUser.role) || "viewer";
-  return role === "admin" || role === "manager";
+  return typeof canDo === "function" ? canDo("deleteData") : false;
 }
-/* Capability: manual stock adjustment (ปรับสต็อก). Mirrors the products UPDATE
-   RLS + adjust_stock RPC gating (admin/manager/staff; viewer matches 0 rows),
-   so the UI and the server agree on who sees the buttons. */
+/* Capability: manual stock adjustment (ปรับสต็อก). Defaults to the products
+   UPDATE RLS + adjust_stock RPC gating (admin/manager/staff; viewer matches 0
+   rows) so the UI and the server agree on who sees the buttons, and is
+   admin-tunable via canDo("adjustStock") — but never grantable to viewer. */
 function canAdjustStock() {
-  const role = (window.__currentUser && window.__currentUser.role) || "viewer";
-  return role === "admin" || role === "manager" || role === "staff";
+  return typeof canDo === "function" ? canDo("adjustStock") : false;
 }
 function _locDenyToast() {
   try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เฉพาะผู้ดูแลระบบหรือผู้จัดการเท่านั้นที่ลบตำแหน่งได้" })); } catch (e) {}
@@ -818,6 +838,91 @@ const ROLE_NAV = {
   staff:   ["dashboard","inbound","outbound","finder","inventory","stocktake","adjust","locations","bundles","labels","tracking","handheld"],
   viewer:  ["dashboard","finder","inventory","locations","bundles","labels","tracking","analytics"]
 };
+
+/* ── Capabilities (admin-customizable per role) ──
+   ROLE_NAV above and DEFAULT_ROLE_CAPS below are the DEFAULTS. An admin can
+   override both, per role, from ผู้ใช้งานและสิทธิ์. The override lives in
+   app_state key "role_perms" (one cloud blob shared by every device) with a
+   localStorage mirror, shaped:
+     { nav: { staff: [navId, …] }, caps: { staff: { viewCost: false, … } } }
+   Only keys actually present in the override win, so a page or capability
+   added in a later release starts from its own default instead of silently
+   vanishing for every role.
+
+   `server` on a capability lists the roles the DATABASE allows (see
+   supabase/rls-policies.sql). Such a capability can be taken AWAY here but
+   never granted — otherwise the UI would show a button whose every write RLS
+   rejects. Capabilities without `server` are pure display gates. */
+const CAPS = [
+  { id: "viewCost",    label: "ดูราคาทุนและกำไร",   desc: "ราคาทุน กำไรต่อชิ้น มาร์จิ้น และคอลัมน์ต้นทุนในไฟล์ส่งออก" },
+  { id: "viewSales",   label: "ดูยอดขายและรายได้",  desc: "ยอดขายรายวัน รายได้ กำไรรวม และสรุปยอดขายรายสินค้า" },
+  { id: "sell",        label: "ขาย / ตัดสต็อก",      desc: "เปิดออร์เดอร์และตัดสต็อกออกจากคลัง", server: ["admin", "manager", "staff"] },
+  { id: "adjustStock", label: "ปรับสต็อก",           desc: "แก้ยอดคงเหลือด้วยมือ (นับผิด เสียหาย ขายนอกระบบ)", server: ["admin", "manager", "staff"] },
+  { id: "addProduct",  label: "เพิ่มสินค้าใหม่",     desc: "สร้าง SKU ใหม่ และนำเข้าจาก Excel", server: ["admin", "manager", "staff"] },
+  { id: "editProduct", label: "แก้ไขข้อมูลสินค้า",   desc: "แก้ชื่อ ราคา หมวดหมู่ และตำแหน่งจัดเก็บ", server: ["admin", "manager", "staff"] },
+  { id: "deleteData",  label: "ลบข้อมูล",            desc: "ลบสินค้า ออร์เดอร์ และอาคาร/ชั้น/ตำแหน่ง", server: ["admin", "manager"] },
+  { id: "exportData",  label: "ส่งออก/พิมพ์รายงาน",  desc: "ดาวน์โหลด CSV รายงาน Excel และพิมพ์รายงาน" }
+];
+
+const DEFAULT_ROLE_CAPS = {
+  admin:   { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  deleteData: true,  exportData: true },
+  manager: { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  deleteData: true,  exportData: true },
+  // Warehouse staff work the floor: they move stock but never see money.
+  staff:   { viewCost: false, viewSales: false, sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  deleteData: false, exportData: true },
+  viewer:  { viewCost: true,  viewSales: true,  sell: false, adjustStock: false, addProduct: false, editProduct: false, deleteData: false, exportData: true }
+};
+
+const ROLE_PERMS_KEY = "ims_role_perms";
+
+function loadRolePerms() {
+  const cloud = window._DB_ROLE_PERMS;
+  if (cloud && typeof cloud === "object") return cloud;
+  try {
+    const s = localStorage.getItem(ROLE_PERMS_KEY);
+    if (s) { const o = JSON.parse(s); if (o && typeof o === "object") return o; }
+  } catch (e) {}
+  return {};
+}
+
+function saveRolePerms(perms) {
+  const clean = { nav: (perms && perms.nav) || {}, caps: (perms && perms.caps) || {} };
+  try { localStorage.setItem(ROLE_PERMS_KEY, JSON.stringify(clean)); } catch (e) {}
+  window._DB_ROLE_PERMS = clean;
+  window.dispatchEvent(new CustomEvent("ims-perms-change"));
+  if (window.dbSaveState) dbSaveState("role_perms", clean).catch(() => {});
+  return clean;
+}
+
+function currentRoleId() {
+  return (window.__currentUser && window.__currentUser.role) || "viewer";
+}
+
+// Nav ids a role may open — the admin's override first, the built-in default
+// otherwise. Used by the desktop sidebar AND the mobile "เพิ่มเติม" menu.
+function roleNav(role) {
+  const r = role || currentRoleId();
+  const ov = loadRolePerms().nav;
+  const list = ov && Array.isArray(ov[r]) ? ov[r] : ROLE_NAV[r];
+  return Array.isArray(list) ? list : [];
+}
+
+/* Capability check — canDo("viewCost") tests the signed-in user; pass a role to
+   test someone else (the permission editor previews every role this way). */
+function canDo(capId, role) {
+  const r = role || currentRoleId();
+  const def = DEFAULT_ROLE_CAPS[r] || DEFAULT_ROLE_CAPS.viewer;
+  const ov = loadRolePerms().caps;
+  const on = (ov && ov[r] && typeof ov[r][capId] === "boolean") ? ov[r][capId] : !!def[capId];
+  if (!on) return false;
+  return !capServerLocked(capId, r);
+}
+
+// True when the DB would reject this capability for the role whatever the
+// override says — the editor renders those toggles locked with a hint.
+function capServerLocked(capId, role) {
+  const cap = CAPS.find(c => c.id === capId);
+  return !!(cap && cap.server && cap.server.indexOf(role) === -1);
+}
 
 /* ── Working-hours access window ──
    Admin-configured, per-weekday open/close schedule (stored in store.workHours,
@@ -1623,25 +1728,35 @@ function stockReportRows(products, prevMap) {
   });
 }
 
-// Assemble the two-sheet workbook (สรุป summary + สต็อก detail). Returns null if
-// the XLSX library hasn't loaded yet.
-function buildStockReportWorkbook(products, prevMap, dateStr) {
-  if (typeof XLSX === "undefined") return null;
-  const rows = stockReportRows(products, prevMap);
-  const ws = XLSX.utils.aoa_to_sheet([STOCK_REPORT_HEADERS, ...rows]);
-  ws["!cols"] = [{ wch: 16 }, { wch: 34 }, { wch: 16 }, { wch: 14 }, { wch: 9 }, { wch: 9 }, { wch: 10 }, { wch: 16 }, { wch: 10 }, { wch: 10 }, { wch: 13 }, { wch: 15 }, { wch: 18 }];
+// Column indices of the two money columns (ต้นทุน, มูลค่าสต็อก) — stripped for
+// roles without the viewCost capability.
+const STOCK_REPORT_COST_COLS = [9, 10];
 
+/* Assemble the two-sheet workbook (สรุป summary + สต็อก detail). Returns null if
+   the XLSX library hasn't loaded yet. showCost === false drops both cost columns
+   and the stock-value total, so a staff download carries no cost data at all —
+   the nightly cron always passes the full set. */
+function buildStockReportWorkbook(products, prevMap, dateStr, showCost) {
+  if (typeof XLSX === "undefined") return null;
+  const withCost = showCost !== false;
+  const rows = stockReportRows(products, prevMap);
+  // Totals read the FULL rows, so they stay correct whichever columns ship.
   const totalQty = rows.reduce((s, r) => s + (r[4] || 0), 0);
   const totalVal = rows.reduce((s, r) => s + (r[10] || 0), 0);
   const outCnt = rows.filter(r => r[4] === 0).length;
   const lowCnt = rows.filter(r => r[4] > 0 && r[4] <= r[6]).length;
+
+  const keep = (arr) => withCost ? arr : arr.filter((_, i) => STOCK_REPORT_COST_COLS.indexOf(i) === -1);
+  const ws = XLSX.utils.aoa_to_sheet([keep(STOCK_REPORT_HEADERS), ...rows.map(keep)]);
+  ws["!cols"] = keep([{ wch: 16 }, { wch: 34 }, { wch: 16 }, { wch: 14 }, { wch: 9 }, { wch: 9 }, { wch: 10 }, { wch: 16 }, { wch: 10 }, { wch: 10 }, { wch: 13 }, { wch: 15 }, { wch: 18 }]);
+
   const wsSum = XLSX.utils.aoa_to_sheet([
     ["รายงานสต็อกประจำวัน — คลังพร้อมส่ง (PS TACTICAL)"],
     ["วันที่", dateStr],
     [""],
     ["จำนวน SKU", rows.length],
     ["รวมจำนวนชิ้น", totalQty],
-    ["มูลค่าสต็อกรวม (บาท)", totalVal],
+    ...(withCost ? [["มูลค่าสต็อกรวม (บาท)", totalVal]] : []),
     ["สินค้าหมดสต็อก", outCnt],
     ["ต่ำกว่าจุดสั่งซื้อ", lowCnt]
   ]);
@@ -1668,7 +1783,7 @@ async function downloadStockReport(products) {
     }
   } catch (_) { /* offline / no snapshot yet — delta column just shows "—" */ }
   const dateStr = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
-  const wb = buildStockReportWorkbook(list, prevMap, dateStr);
+  const wb = buildStockReportWorkbook(list, prevMap, dateStr, typeof canDo !== "function" || canDo("viewCost"));
   if (!wb) { toast("สร้างไฟล์ Excel ไม่สำเร็จ"); return; }
   try { XLSX.writeFile(wb, `รายงานสต็อก_${dateStr}.xlsx`); }
   catch (e) { toast("บันทึกไฟล์ Excel ไม่สำเร็จ"); return; }
@@ -1684,9 +1799,10 @@ Object.assign(window, {
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, todayIso, bangkokDateOf, isoToThai,
+  CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canDo, capServerLocked, currentRoleId,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
-  applyStockAdjustment, ADJUST_REASONS, canAdjustStock,
+  applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock,
   loadOrders, saveOrders, appendOrder,
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
   storedLocSet, locIsStored, countUnstoredProducts,

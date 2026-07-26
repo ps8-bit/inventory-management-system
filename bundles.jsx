@@ -480,8 +480,9 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
             />
           )}
 
-          {/* Status + pricing */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 18 }}>
+          {/* Status + pricing — the profit tile needs the cost of every component
+              SKU, so it follows the viewCost capability. */}
+          <div style={{ display: "grid", gridTemplateColumns: canDo("viewCost") ? "1fr 1fr 1fr" : "1fr 1fr", gap: 10, marginBottom: 18 }}>
             <div style={{ background: "var(--surface-2)", borderRadius: 10, padding: "12px 14px", border: "1px solid var(--border)" }}>
               <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>พร้อมขาย</div>
               <div className="tnum" style={{ fontSize: 22, fontWeight: 700, color: avail === 0 ? "var(--danger)" : "var(--fg)" }}>{avail}</div>
@@ -492,11 +493,13 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
               <div className="tnum" style={{ fontSize: 18, fontWeight: 700 }}>฿{bundle.price.toLocaleString()}</div>
               <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>ปกติ ฿{retail.toLocaleString()}</div>
             </div>
-            <div style={{ background: "var(--surface-2)", borderRadius: 10, padding: "12px 14px", border: "1px solid var(--border)" }}>
-              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>กำไรต่อชุด</div>
-              <div className="tnum" style={{ fontSize: 18, fontWeight: 700, color: "var(--success)" }}>฿{(bundle.price - cost).toLocaleString()}</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>มาร์จิ้น {margin}%</div>
-            </div>
+            {canDo("viewCost") && (
+              <div style={{ background: "var(--surface-2)", borderRadius: 10, padding: "12px 14px", border: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>กำไรต่อชุด</div>
+                <div className="tnum" style={{ fontSize: 18, fontWeight: 700, color: "var(--success)" }}>฿{(bundle.price - cost).toLocaleString()}</div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>มาร์จิ้น {margin}%</div>
+              </div>
+            )}
           </div>
 
           {/* Component items */}
@@ -692,8 +695,8 @@ function BundlePage({ pushToast }) {
         </button>
       </div>
 
-      {/* KPI strip */}
-      <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+      {/* KPI strip — the baht tile is a revenue figure, so viewSales gates it */}
+      <div className="kpi-grid" style={{ gridTemplateColumns: canDo("viewSales") ? "repeat(3, 1fr)" : "repeat(2, 1fr)" }}>
         <div className="kpi">
           <div className="kpi-label">ชุดสินค้าทั้งหมด</div>
           <div className="kpi-value">{totalBundles}</div>
@@ -704,11 +707,13 @@ function BundlePage({ pushToast }) {
           <div className="kpi-value">{availableBundles}</div>
           <div className="kpi-delta">{totalBundles - availableBundles} ชุดสต็อกหมด</div>
         </div>
-        <div className="kpi">
-          <div className="kpi-label">มูลค่าที่ขายได้</div>
-          <div className="kpi-value tnum">฿{totalRevenuePotential.toLocaleString()}</div>
-          <div className="kpi-delta">จากทุกชุดที่มีสต็อก</div>
-        </div>
+        {canDo("viewSales") && (
+          <div className="kpi">
+            <div className="kpi-label">มูลค่าที่ขายได้</div>
+            <div className="kpi-value tnum">฿{totalRevenuePotential.toLocaleString()}</div>
+            <div className="kpi-delta">จากทุกชุดที่มีสต็อก</div>
+          </div>
+        )}
       </div>
 
       {/* Inventory sync verification banner */}

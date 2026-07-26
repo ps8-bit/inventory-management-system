@@ -102,7 +102,7 @@ function useBadges() {
 }
 
 /* ======== GLOBAL SEARCH OVERLAY ======== */
-function SearchOverlay({ q, setQ, onClose, goTo }) {
+function SearchOverlay({ q, setQ, onClose, goToProduct, goToOrder }) {
   const inputRef = useRefApp(null);
   useEffectApp(() => { inputRef.current?.focus(); }, []);
 
@@ -157,7 +157,7 @@ function SearchOverlay({ q, setQ, onClose, goTo }) {
                 {results.products.map(p => {
                   const st = stockStatus(p);
                   return (
-                    <div key={p.sku} className="search-hit" onClick={() => { goTo("inventory"); onClose(); }}>
+                    <div key={p.sku} className="search-hit" onClick={() => { goToProduct(p.sku); onClose(); }}>
                       {typeof ProductImageThumb === "function"
                         ? <ProductImageThumb sku={p.sku} size={34} radius={8}/>
                         : <Icons.Box size={14} style={{ color:"var(--muted)", flexShrink:0 }}/>}
@@ -176,7 +176,7 @@ function SearchOverlay({ q, setQ, onClose, goTo }) {
                   const stCls = { picking:"badge-warning", packed:"badge-info", shipped:"badge-success", delivered:"badge-neutral" }[o.status] || "badge-neutral";
                   const stLab = { picking:"กำลังหยิบ", packed:"พร้อมส่ง", shipped:"ส่งแล้ว", delivered:"จัดส่งสำเร็จ" }[o.status] || o.status;
                   return (
-                    <div key={o.id} className="search-hit" onClick={() => { goTo("outbound"); onClose(); }}>
+                    <div key={o.id} className="search-hit" onClick={() => { goToOrder(o.id); onClose(); }}>
                       <Icons.Truck size={14} style={{ color:"var(--muted)", flexShrink:0 }}/>
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:13, fontWeight:500 }}>{o.customer}</div>
@@ -196,7 +196,7 @@ function SearchOverlay({ q, setQ, onClose, goTo }) {
 }
 
 /* ======== NOTIFICATION POPOVER ======== */
-function NotifPopover({ onClose, goTo }) {
+function NotifPopover({ onClose, goTo, goToProduct, goToOrder }) {
   const outOfStock = PRODUCTS.filter(p => p.qty === 0);
   const lowStock   = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder);
   const pending    = ordersSnapshot().filter(o => o.status === "picking" || o.status === "packed");
@@ -216,7 +216,7 @@ function NotifPopover({ onClose, goTo }) {
             หมดสต็อก ({outOfStock.length})
           </div>
           {outOfStock.slice(0, 4).map(p => (
-            <div key={p.sku} className="notif-row" onClick={() => { goTo("inventory"); onClose(); }}>
+            <div key={p.sku} className="notif-row" onClick={() => { goToProduct(p.sku); onClose(); }}>
               <span style={{ width:7, height:7, borderRadius:999, background:"var(--danger)", flexShrink:0 }}/>
               <span style={{ flex:1, fontSize:12, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</span>
               <span style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace", flexShrink:0 }}>{p.sku}</span>
@@ -231,7 +231,7 @@ function NotifPopover({ onClose, goTo }) {
             ใกล้หมด ({lowStock.length})
           </div>
           {lowStock.slice(0, 5).map(p => (
-            <div key={p.sku} className="notif-row" onClick={() => { goTo("inventory"); onClose(); }}>
+            <div key={p.sku} className="notif-row" onClick={() => { goToProduct(p.sku); onClose(); }}>
               <span style={{ width:7, height:7, borderRadius:999, background:"var(--warning)", flexShrink:0 }}/>
               <span style={{ flex:1, fontSize:12, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</span>
               <span style={{ fontSize:11, fontWeight:600, color:"var(--warning)", fontFamily:"IBM Plex Mono, monospace", flexShrink:0 }} className="tnum">{p.qty}</span>
@@ -246,7 +246,7 @@ function NotifPopover({ onClose, goTo }) {
             ออร์เดอร์ค้างส่ง ({pending.length})
           </div>
           {pending.slice(0, 4).map(o => (
-            <div key={o.id} className="notif-row" onClick={() => { goTo("outbound"); onClose(); }}>
+            <div key={o.id} className="notif-row" onClick={() => { goToOrder(o.id); onClose(); }}>
               <span style={{ width:7, height:7, borderRadius:999, background:"var(--info)", flexShrink:0 }}/>
               <span style={{ flex:1, fontSize:12 }}>{o.customer}</span>
               <span style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace", flexShrink:0 }}>{o.id}</span>
@@ -257,7 +257,8 @@ function NotifPopover({ onClose, goTo }) {
 
       <div style={{ padding:"8px 16px 10px", borderTop:"1px solid var(--border)", display:"flex", justifyContent:"space-between", marginTop:4 }}>
         <button className="btn btn-ghost btn-sm" onClick={() => { goTo("inventory"); onClose(); }}>ดูสินค้า →</button>
-        <button className="btn btn-ghost btn-sm" onClick={() => { goTo("outbound"); onClose(); }}>ดูออร์เดอร์ →</button>
+        {/* No id → plain navigation, but still routed to a page this role can open. */}
+        <button className="btn btn-ghost btn-sm" onClick={() => { goToOrder(null); onClose(); }}>ดูออร์เดอร์ →</button>
       </div>
     </div>
   );
@@ -688,6 +689,13 @@ function MobileFullscreen({ user, onLogout, onSwitchUser }) {
 
 function App({ user, onLogout, onSwitchUser }) {
   const [page, setPage] = useStateApp("dashboard");
+  /* Optional "open this exact thing" payload handed to the destination screen by
+     goTo(page, focus) — e.g. the global search opening the product you clicked.
+     Shape: { page, sku?, orderId?, n }. `n` is a nonce so clicking the SAME hit
+     twice (or clicking a hit for the page you are already on) still fires the
+     screen's effect — without it a repeat click would be a silent no-op. */
+  const [pageFocus, setPageFocus] = useStateApp(null);
+  const focusSeqRef = useRefApp(0);
   const [toast, setToast] = useStateApp(null);
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [sellOpen, setSellOpen] = useStateApp(false);
@@ -802,10 +810,31 @@ function App({ user, onLogout, onSwitchUser }) {
     return () => window.removeEventListener("ims-queue-change", h);
   }, []);
 
-  const goTo = (p) => { setPage(p); window.scrollTo(0, 0); };
+  /* Role permissions changed (admin edited them here, or realtime pushed
+     another device's edit) → re-render so the sidebar and every canDo() gate
+     inside the screens pick up the new rules without a reload. */
+  const [permTick, setPermTick] = useStateApp(0);
+  useEffectApp(() => {
+    const h = () => setPermTick(t => t + 1);
+    window.addEventListener("ims-perms-change", h);
+    return () => window.removeEventListener("ims-perms-change", h);
+  }, []);
 
-  /* Build the visible NAV: filter by role + visibility + order */
-  const allowed = new Set(ROLE_NAV[user.role] || []);
+  /* goTo("inventory") — plain navigation (every existing caller).
+     goTo("inventory", { sku }) / goTo("outbound", { orderId }) — navigate AND
+     tell that screen which record to open. Screens read it via the `focus` prop. */
+  const goTo = (p, focus) => {
+    setPage(p);
+    focusSeqRef.current += 1;
+    setPageFocus(focus ? { ...focus, page: p, n: focusSeqRef.current } : null);
+    window.scrollTo(0, 0);
+  };
+  const focusFor = (p) => (pageFocus && pageFocus.page === p ? pageFocus : null);
+
+  /* Build the visible NAV: filter by role + visibility + order.
+     roleNav() honours the admin's per-role override (app_state "role_perms")
+     and falls back to the built-in ROLE_NAV defaults. */
+  const allowed = new Set(typeof roleNav === "function" ? roleNav(user.role) : (ROLE_NAV[user.role] || []));
   const visibleNav = navItems
     .filter(i => i.visible)
     .map(i => ALL_NAV.find(n => n.id === i.id))
@@ -815,10 +844,23 @@ function App({ user, onLogout, onSwitchUser }) {
   const navByGroup = {};
   visibleNav.forEach(n => { (navByGroup[n.group] ||= []).push(n); });
 
-  // If current page is not allowed for this role, redirect to dashboard
+  // If current page is not allowed for this role, redirect to dashboard.
+  // permTick re-runs this when an admin edits permissions (own tab or another
+  // device via realtime), so a page just revoked closes instead of lingering.
   useEffectApp(() => {
     if (!allowed.has(page)) setPage("dashboard");
-  }, [user.role]);
+  }, [user.role, permTick, page]);
+
+  /* Open one specific record from the global search / notifications, on a page
+     THIS role is actually allowed to see — the page guard above silently bounces
+     a disallowed page to the dashboard, which is how a viewer clicking an order
+     hit used to end up on the dashboard instead of the order.
+     Products → สินค้าคงคลัง (drawer), falling back to ค้นหาสินค้า.
+     Orders   → ติดตามพัสดุ, the only screen with a per-order detail drawer
+                (Outbound has none), falling back to จัดส่งสินค้า. */
+  const pickPage = (...candidates) => candidates.find(p => allowed.has(p)) || "dashboard";
+  const goToProduct = (sku) => goTo(pickPage("inventory", "finder"), { sku });
+  const goToOrder   = (orderId) => goTo(pickPage("tracking", "outbound"), orderId ? { orderId } : undefined);
 
   // Capability check: only admins see users/layout
   const isAdmin = user.role === "admin";
@@ -878,7 +920,7 @@ function App({ user, onLogout, onSwitchUser }) {
                 <Icons.Bell size={16}/>
                 {notifCount > 0 && <span style={{ position:"absolute", top:5, right:5, width:7, height:7, borderRadius:999, background:"var(--danger)" }}/>}
               </button>
-              {notifOpen && <NotifPopover onClose={() => setNotifOpen(false)} goTo={goTo}/>}
+              {notifOpen && <NotifPopover onClose={() => setNotifOpen(false)} goTo={goTo} goToProduct={goToProduct} goToOrder={goToOrder}/>}
             </div>
           </div>
         </header>
@@ -887,18 +929,18 @@ function App({ user, onLogout, onSwitchUser }) {
           <ErrorBoundary key={page}>
           {page === "dashboard" && <Dashboard density={t.density} goTo={goTo}/>}
           {page === "inbound"   && <Inbound goTo={goTo} pushToast={pushToast}/>}
-          {page === "outbound"  && <Outbound goTo={goTo} pushToast={pushToast}/>}
-          {page === "finder"    && <ProductFinder pushToast={pushToast} goTo={goTo}/>}
-          {page === "inventory" && <Inventory pushToast={pushToast} density={t.density} goTo={goTo}/>}
+          {page === "outbound"  && <Outbound goTo={goTo} pushToast={pushToast} focus={focusFor("outbound")}/>}
+          {page === "finder"    && <ProductFinder pushToast={pushToast} goTo={goTo} focus={focusFor("finder")}/>}
+          {page === "inventory" && <Inventory pushToast={pushToast} density={t.density} goTo={goTo} focus={focusFor("inventory")}/>}
           {page === "stocktake" && <StockTake pushToast={pushToast}/>}
           {page === "locations" && <Locations goTo={goTo}/>}
           {page === "import"    && <ImportPage pushToast={pushToast} goTo={goTo}/>}
           {page === "labels"    && <Labels pushToast={pushToast} store={store}/>}
-          {page === "tracking"  && <TrackingPage pushToast={pushToast} store={store}/>}
+          {page === "tracking"  && <TrackingPage pushToast={pushToast} store={store} focus={focusFor("tracking")}/>}
           {page === "analytics" && <AnalyticsPage pushToast={pushToast}/>}
           {page === "history"   && <HistoryPage pushToast={pushToast}/>}
           {page === "handheld"  && <Handheld pushToast={pushToast}/>}
-          {page === "users"     && <UserManagement currentUser={user} pushToast={pushToast} store={store} setStore={setStore}/>}
+          {page === "users"     && <UserManagement currentUser={user} pushToast={pushToast} store={store} setStore={setStore} allNav={ALL_NAV}/>}
           {page === "layout"    && <LayoutCustomize navItems={navItems} setNavItems={setNavItems} pushToast={pushToast} allNavItems={ALL_NAV}/>}
           {page === "bundles"   && <BundlePage pushToast={pushToast}/>}
           {page === "settings"  && (
@@ -925,7 +967,7 @@ function App({ user, onLogout, onSwitchUser }) {
         />
       )}
 
-      {searchOpen && <SearchOverlay q={searchQ} setQ={setSearchQ} onClose={() => setSearchOpen(false)} goTo={goTo}/>}
+      {searchOpen && <SearchOverlay q={searchQ} setQ={setSearchQ} onClose={() => setSearchOpen(false)} goToProduct={goToProduct} goToOrder={goToOrder}/>}
 
       <TweaksPanel title="ปรับแต่งหน้าจอ">
         <TweakSection label="การแสดงผล">

@@ -534,7 +534,7 @@ function fmtUser(u) {
   };
 }
 
-function UserManagement({ currentUser, pushToast, store, setStore }) {
+function UserManagement({ currentUser, pushToast, store, setStore, allNav }) {
   const [users, setUsers] = useStateAuth([]);
   const [loadingUsers, setLoadingUsers] = useStateAuth(true);
   const [loadError, setLoadError] = useStateAuth("");
@@ -768,12 +768,15 @@ function UserManagement({ currentUser, pushToast, store, setStore }) {
               </div>
               <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.5 }}>{r.desc}</div>
               <div style={{ fontSize: 11, color: "var(--fg-2)", marginTop: 8 }}>
-                เข้าถึง: {ROLE_NAV[r.id].length} หน้า
+                เข้าถึง: {(typeof roleNav === "function" ? roleNav(r.id) : (ROLE_NAV[r.id] || [])).length} หน้า
               </div>
             </div>
           ))}
         </div>
       </div>
+
+      {/* Per-role permission editor */}
+      <RolePermissions currentUser={currentUser} pushToast={pushToast} allNav={allNav}/>
 
       {inviteOpen && <InviteUserModal onClose={() => setInviteOpen(false)} onSubmit={inviteUser}/>}
       {schedOpen && setStore && (
@@ -1059,6 +1062,198 @@ function LayoutCustomize({ navItems, setNavItems, pushToast, allNavItems }) {
   );
 }
 
+/* ── Per-role permission editor (admin only) ──
+   An editable overlay on ROLE_NAV + DEFAULT_ROLE_CAPS (data.jsx). Saving writes
+   the app_state "role_perms" blob, so every screen — desktop and mobile, on
+   every device — re-gates through roleNav()/canDo() without a reload.
+   The admin row is deliberately not editable: an admin who unticks
+   "ผู้ใช้งานและสิทธิ์" would lock everyone out of this very screen. */
+const MOBILE_ONLY_NAV = [
+  { id: "adjust", label: "ปรับสต็อก (เมนูมือถือ)", group: "ops" }
+];
+
+function RolePermissions({ currentUser, pushToast, allNav }) {
+  const navCatalog = [...(allNav || (typeof ALL_NAV !== "undefined" ? ALL_NAV : [])), ...MOBILE_ONLY_NAV];
+  const isAdmin = currentUser && currentUser.role === "admin";
+  const [role, setRole] = useStateAuth("staff");
+  const [draft, setDraft] = useStateAuth(() => {
+    const p = typeof loadRolePerms === "function" ? loadRolePerms() : {};
+    return { nav: { ...(p.nav || {}) }, caps: { ...(p.caps || {}) } };
+  });
+  const [dirty, setDirty] = useStateAuth(false);
+
+  /* Another device (or the initial cloud load) changed the blob — adopt it,
+     unless this admin has unsaved edits in front of them. */
+  useEffectAuth(() => {
+    const h = () => {
+      if (dirty) return;
+      const p = typeof loadRolePerms === "function" ? loadRolePerms() : {};
+      setDraft({ nav: { ...(p.nav || {}) }, caps: { ...(p.caps || {}) } });
+    };
+    window.addEventListener("ims-perms-change", h);
+    return () => window.removeEventListener("ims-perms-change", h);
+  }, [dirty]);
+
+  const roleMeta = ROLES.find(r => r.id === role) || ROLES[0];
+  const locked = !isAdmin || role === "admin";
+
+  // Effective value for the role being edited: draft override first, default second.
+  const capOn = (id) => {
+    const ov = draft.caps[role];
+    if (ov && typeof ov[id] === "boolean") return ov[id];
+    return !!((DEFAULT_ROLE_CAPS[role] || {})[id]);
+  };
+  const navList = () => Array.isArray(draft.nav[role]) ? draft.nav[role] : (ROLE_NAV[role] || []);
+  const navOn = (id) => navList().indexOf(id) !== -1;
+
+  const toggleCap = (id) => {
+    if (locked || (typeof capServerLocked === "function" && capServerLocked(id, role))) return;
+    const next = !capOn(id);
+    setDraft(d => ({ ...d, caps: { ...d.caps, [role]: { ...(d.caps[role] || {}), [id]: next } } }));
+    setDirty(true);
+  };
+  const toggleNav = (id) => {
+    if (locked) return;
+    const cur = navList();
+    const next = cur.indexOf(id) === -1 ? [...cur, id] : cur.filter(x => x !== id);
+    setDraft(d => ({ ...d, nav: { ...d.nav, [role]: next } }));
+    setDirty(true);
+  };
+
+  const resetRole = () => {
+    if (locked) return;
+    if (!confirm(`คืนค่าสิทธิ์ของ "${roleMeta.label}" เป็นค่าเริ่มต้น?`)) return;
+    setDraft(d => {
+      const nav = { ...d.nav }; delete nav[role];
+      const caps = { ...d.caps }; delete caps[role];
+      return { nav, caps };
+    });
+    setDirty(true);
+  };
+
+  const save = () => {
+    if (!isAdmin || typeof saveRolePerms !== "function") return;
+    saveRolePerms(draft);
+    setDirty(false);
+    pushToast("บันทึกสิทธิ์ตามตำแหน่งแล้ว");
+    if (typeof recordChange === "function") {
+      recordChange({
+        entity: "settings", action: "update",
+        summary: `แก้ไขสิทธิ์ของตำแหน่ง ${roleMeta.label}`,
+        note: `หน้า ${navList().length} · ${CAPS.filter(c => capOn(c.id)).length}/${CAPS.length} ความสามารถ`
+      });
+    }
+  };
+
+  const groups = {};
+  navCatalog.forEach(n => { (groups[n.group] ||= []).push(n); });
+
+  return (
+    <div className="card">
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 14 }}>
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 14 }}>ปรับสิทธิ์ตามตำแหน่ง</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+            เลือกตำแหน่ง แล้วกำหนดว่าเห็นหน้าไหนและทำอะไรได้บ้าง — มีผลกับทุกคนในตำแหน่งนั้น ทั้งเดสก์ท็อปและมือถือ
+          </div>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn" onClick={resetRole} disabled={locked} style={locked ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+            <Icons.Refresh size={13}/> คืนค่าเริ่มต้น
+          </button>
+          <button className="btn btn-primary" onClick={save} disabled={!dirty || !isAdmin}
+            style={(!dirty || !isAdmin) ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+            <Icons.Check size={13}/> บันทึก
+          </button>
+        </div>
+      </div>
+
+      <div className="seg" style={{ marginBottom: 14 }}>
+        {ROLES.map(r => (
+          <button key={r.id} className={role === r.id ? "on" : ""} onClick={() => setRole(r.id)}>{r.label}</button>
+        ))}
+      </div>
+
+      {!isAdmin && (
+        <div style={{ padding: "10px 12px", background: "var(--warning-soft)", borderRadius: 10, fontSize: 12, marginBottom: 14 }}>
+          เฉพาะผู้ดูแลระบบเท่านั้นที่แก้ไขสิทธิ์ได้ — หน้านี้แสดงค่าปัจจุบันแบบอ่านอย่างเดียว
+        </div>
+      )}
+      {isAdmin && role === "admin" && (
+        <div style={{ padding: "10px 12px", background: "var(--accent-soft)", borderRadius: 10, fontSize: 12, marginBottom: 14, color: "var(--accent)" }}>
+          ผู้ดูแลระบบมีสิทธิ์ทั้งหมดเสมอ และแก้ไขไม่ได้ เพื่อป้องกันการล็อกตัวเองออกจากหน้านี้
+        </div>
+      )}
+      {dirty && (
+        <div style={{ padding: "10px 12px", background: "var(--warning-soft)", borderRadius: 10, fontSize: 12, marginBottom: 14 }}>
+          มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก — กด <strong>บันทึก</strong> เพื่อใช้งานจริง
+        </div>
+      )}
+
+      <div className="grid-2" style={{ gap: 16, alignItems: "start" }}>
+        {/* Capabilities */}
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 8 }}>ทำอะไรได้บ้าง</div>
+          <div className="stack" style={{ gap: 6 }}>
+            {CAPS.map(c => {
+              const srvLocked = typeof capServerLocked === "function" && capServerLocked(c.id, role);
+              const on = capOn(c.id) && !srvLocked;
+              const disabled = locked || srvLocked;
+              return (
+                <button key={c.id} onClick={() => toggleCap(c.id)} disabled={disabled}
+                  style={{ display: "flex", gap: 10, alignItems: "flex-start", textAlign: "left", width: "100%",
+                    padding: "10px 12px", borderRadius: 10, cursor: disabled ? "not-allowed" : "pointer",
+                    background: on ? "var(--accent-soft)" : "var(--surface-2)",
+                    border: "1px solid " + (on ? "var(--accent-ring)" : "var(--border)"),
+                    opacity: disabled ? 0.6 : 1, fontFamily: "inherit", color: "var(--fg)" }}>
+                  <span className={"check" + (on ? " on" : "")} style={{ flexShrink: 0, marginTop: 1 }}/>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{c.label}</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.45, marginTop: 2 }}>{c.desc}</div>
+                    {srvLocked && (
+                      <div style={{ fontSize: 11, color: "var(--warning)", marginTop: 4 }}>
+                        ฐานข้อมูลไม่อนุญาตให้ตำแหน่งนี้ทำรายการนี้ (RLS) — เปิดจากหน้านี้ไม่ได้
+                      </div>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Page access */}
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 8 }}>เข้าหน้าไหนได้บ้าง ({navList().length} หน้า)</div>
+          <div className="stack" style={{ gap: 12 }}>
+            {Object.keys(groups).map(g => (
+              <div key={g}>
+                <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 500, marginBottom: 6 }}>{NAV_GROUP_LABELS[g] || g}</div>
+                <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+                  {groups[g].map(n => {
+                    const on = navOn(n.id);
+                    return (
+                      <button key={n.id} onClick={() => toggleNav(n.id)} disabled={locked}
+                        style={{ display: "flex", gap: 7, alignItems: "center", padding: "7px 11px", borderRadius: 999,
+                          cursor: locked ? "not-allowed" : "pointer", fontSize: 12, fontFamily: "inherit",
+                          background: on ? "var(--accent-soft)" : "var(--surface-2)",
+                          border: "1px solid " + (on ? "var(--accent-ring)" : "var(--border)"),
+                          color: on ? "var(--accent)" : "var(--muted)", opacity: locked ? 0.6 : 1 }}>
+                        <span className={"check" + (on ? " on" : "")} style={{ flexShrink: 0 }}/>
+                        {n.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const NAV_GROUP_LABELS = {
   main: "ภาพรวม",
   ops: "การดำเนินงาน",
@@ -1067,4 +1262,4 @@ const NAV_GROUP_LABELS = {
   system: "ระบบ"
 };
 
-Object.assign(window, { LoginScreen, ResetPasswordScreen, ForgotPasswordScreen, UserManagement, LayoutCustomize, NAV_GROUP_LABELS, recoveryLinkErrorMsg });
+Object.assign(window, { LoginScreen, ResetPasswordScreen, ForgotPasswordScreen, UserManagement, LayoutCustomize, RolePermissions, MOBILE_ONLY_NAV, NAV_GROUP_LABELS, recoveryLinkErrorMsg });

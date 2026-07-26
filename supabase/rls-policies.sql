@@ -97,6 +97,27 @@ begin
   end loop;
 end $$;
 
+-- 4b. app_state key "role_perms" holds the per-role permission overrides the
+--     admin edits in ผู้ใช้งานและสิทธิ์. Every write role can update app_state
+--     (that's how categories/locations sync), so without this the very users a
+--     permission restricts could lift it by rewriting the blob. Re-create the
+--     two write policies for app_state with that one key carved out for admin.
+drop policy if exists "insert" on public.app_state;
+drop policy if exists "update" on public.app_state;
+create policy "insert" on public.app_state for insert with check (
+  public.auth_role() in ('admin','manager','staff')
+  and public.within_work_hours()
+  and (key <> 'role_perms' or public.auth_role() = 'admin')
+);
+create policy "update" on public.app_state for update using (
+  public.auth_role() in ('admin','manager','staff')
+  and (key <> 'role_perms' or public.auth_role() = 'admin')
+) with check (
+  public.auth_role() in ('admin','manager','staff')
+  and public.within_work_hours()
+  and (key <> 'role_perms' or public.auth_role() = 'admin')
+);
+
 -- 5. audit_log — append-only: anyone signed in can read + insert; only admin can delete; no updates.
 create policy "read"   on public.audit_log for select using (auth.role() = 'authenticated');
 create policy "insert" on public.audit_log for insert with check (auth.role() = 'authenticated');

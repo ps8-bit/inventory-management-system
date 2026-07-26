@@ -590,6 +590,7 @@ function setupRealtimeSync() {
                     locations:  ['_DB_LOCATIONS',  'ims-locations-change'],
                     stock_adj:  ['_DB_STOCK_ADJ',  'ims-stock-adj-change'],
                     woo_catalog: ['_DB_WOO_CATALOG', 'ims-woo-catalog-change'],
+                    role_perms: ['_DB_ROLE_PERMS', 'ims-perms-change'],
                     order_overrides: ['_DB_ORDER_OVERRIDES', 'ims-orders-change'] };
       const keys = key && map[key] ? [key] : Object.keys(map).filter(k => map[k]);
       for (const k of keys) {
@@ -704,7 +705,7 @@ async function lineBotPreview(command) {
    ═══════════════════════════════════════════ */
 async function dbInit() {
   try {
-    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog] = await Promise.all([
+    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms] = await Promise.all([
       dbLoadProducts(),
       dbLoadOrders(),
       dbLoadBundles(),
@@ -715,7 +716,8 @@ async function dbInit() {
       dbLoadState('locations'),
       dbLoadState('stock_adj'),
       dbLoadState('order_overrides'),
-      dbLoadState('woo_catalog')
+      dbLoadState('woo_catalog'),
+      dbLoadState('role_perms')
     ]);
 
     /* Hydrate global PRODUCTS array (mutated in-place so existing
@@ -736,6 +738,13 @@ async function dbInit() {
     if (stockAdj && typeof stockAdj === 'object') window._DB_STOCK_ADJ = stockAdj;
     if (orderOverrides && typeof orderOverrides === 'object') window._DB_ORDER_OVERRIDES = orderOverrides;
     if (wooCatalog && typeof wooCatalog === 'object') window._DB_WOO_CATALOG = wooCatalog;
+    /* Per-role permission overrides (nav + capabilities). Absent = every role
+       keeps its built-in defaults, so a fresh install needs no seeding. Fire
+       the change event so anything already mounted re-reads the gates. */
+    if (rolePerms && typeof rolePerms === 'object') {
+      window._DB_ROLE_PERMS = rolePerms;
+      window.dispatchEvent(new CustomEvent('ims-perms-change'));
+    }
 
     /* One-time seed: if the cloud has no copy yet but this device has local
        data, push it up so categories/locations/stock_adj start syncing. */

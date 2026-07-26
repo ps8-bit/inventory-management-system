@@ -24,9 +24,21 @@ drop policy if exists "insert" on public.app_state;
 drop policy if exists "update" on public.app_state;
 drop policy if exists "delete" on public.app_state;
 
+-- The "role_perms" key (per-role permission overrides, edited in ผู้ใช้งานและสิทธิ์)
+-- is admin-only to write — otherwise a restricted role could lift its own limits
+-- by rewriting that blob. Keep this carve-out in sync with rls-policies.sql §4b.
 create policy "read"   on public.app_state for select using (auth.role() = 'authenticated');
-create policy "insert" on public.app_state for insert with check (public.auth_role() in ('admin','manager','staff'));
-create policy "update" on public.app_state for update using (public.auth_role() in ('admin','manager','staff')) with check (public.auth_role() in ('admin','manager','staff'));
+create policy "insert" on public.app_state for insert with check (
+  public.auth_role() in ('admin','manager','staff')
+  and (key <> 'role_perms' or public.auth_role() = 'admin')
+);
+create policy "update" on public.app_state for update using (
+  public.auth_role() in ('admin','manager','staff')
+  and (key <> 'role_perms' or public.auth_role() = 'admin')
+) with check (
+  public.auth_role() in ('admin','manager','staff')
+  and (key <> 'role_perms' or public.auth_role() = 'admin')
+);
 create policy "delete" on public.app_state for delete using (public.auth_role() in ('admin','manager'));
 
 -- Enable realtime so KV changes broadcast to other open devices.

@@ -396,7 +396,7 @@ function exportOrdersCsv(rows, filename) {
 
 /* ============ ADMIN: Tracking page ============ */
 
-function TrackingPage({ pushToast, store }) {
+function TrackingPage({ pushToast, store, focus }) {
   const orders = useOrders();
   const [q, setQ] = useStateTrk("");
   const [statusFilter, setStatusFilter] = useStateTrk("all");
@@ -407,6 +407,23 @@ function TrackingPage({ pushToast, store }) {
   const [bulkConfirm, setBulkConfirm] = useStateTrk(null);
   const [slipOpen, setSlipOpen] = useStateTrk(false);
   const [sortDir, setSortDir] = useStateTrk("desc"); // วันที่: desc = ใหม่สุดก่อน
+
+  /* Arrived here from the global search / notifications with one order id
+     (goTo("tracking", { orderId })) → open that order's drawer. This is the only
+     per-order detail view in the desktop app, which is why order hits route here.
+     The nonce is remembered so a re-render (orders refresh on every labels/DB
+     event) can't re-open the drawer after the user closed it, while a later
+     arrival of the order — the list loads async — still opens it once. */
+  const focusDoneRef = useRefTrk(null);
+  useEffectTrk(() => {
+    if (!focus || !focus.orderId || focusDoneRef.current === focus.n) return;
+    const hit = orders.find(o => o.id === focus.orderId);
+    if (!hit) return;
+    focusDoneRef.current = focus.n;
+    setQ("");
+    setStatusFilter("all");
+    setEdit(hit);
+  }, [focus && focus.n, orders]);
 
   const filtered = orders.filter(o => {
     if (statusFilter !== "all" && o.status !== statusFilter) return false;

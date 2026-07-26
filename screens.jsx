@@ -1534,7 +1534,7 @@ function queueLabelsAndGo(orders, goTo) {
 }
 
 /* ========= OUTBOUND ========= */
-function Outbound({ goTo, pushToast }) {
+function Outbound({ goTo, pushToast, focus }) {
   const [picked, setPicked] = useState({});
   // Tracking-model reader (labels-as-shipments + preserved + DB rows, overrides
   // applied) — the same source MOutbound and TrackingPage use, so desktop and
@@ -1563,6 +1563,15 @@ function Outbound({ goTo, pushToast }) {
   const TABS       = ["ทั้งหมด", "กำลังหยิบ", "พร้อมส่ง", "ส่งแล้ว", "จัดส่งสำเร็จ"];
   const TAB_STATUS = [null,       "picking",    "packed",   "shipped",  "delivered"];
   const [tab, setTab] = useState(0);
+
+  /* Opened from the global search / notifications with a specific order id.
+     There is no per-order drawer here, so isolate that one row instead: jump to
+     the "ทั้งหมด" tab (the order may not be in the current status tab), drop the
+     channel filter, and put the id in the text filter. Keyed on focus.n so it
+     re-runs when the user is already on this page. */
+  useEffect(() => {
+    if (focus && focus.orderId) { setTab(0); setFilterCh("all"); setFilterQ(focus.orderId); setFilterOpen(true); }
+  }, [focus && focus.n]);
 
   // Live counts from orders state (used for stats + tab badges)
   const pickingCount   = orders.filter(o => o.status === "picking").length;
@@ -2315,7 +2324,7 @@ function SmallStat({ label, value, hint, tone }) {
 }
 
 /* ========= INVENTORY ========= */
-function Inventory({ pushToast, density, goTo }) {
+function Inventory({ pushToast, density, goTo, focus }) {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("ทั้งหมด");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -2341,6 +2350,15 @@ function Inventory({ pushToast, density, goTo }) {
       window.removeEventListener("ims-locations-change", refresh);
     };
   }, []);
+
+  /* Opened from the global search / notifications with a specific SKU — show that
+     product's drawer straight away. Keyed on focus.n (a fresh nonce per click) so
+     clicking a hit while ALREADY on this page still opens it, and clicking the
+     same hit twice re-opens it after a close. Filters are left alone: the drawer
+     reads the full catalog, so a filtered-out product still opens. */
+  useEffect(() => {
+    if (focus && focus.sku) setOpen(focus.sku);
+  }, [focus && focus.n]);
 
   const products = PRODUCTS;
 
@@ -2460,10 +2478,13 @@ function Inventory({ pushToast, density, goTo }) {
   };
 
   const exportInventoryCsv = (rows, filename) => {
-    const headers = ["SKU","ชื่อสินค้า","หมวดหมู่","แบรนด์","คงเหลือ","จองแล้ว","จุดสั่งซื้อ","ตำแหน่ง","ราคาขาย","ต้นทุน","ผู้จัดส่ง","สถานะ"];
+    // ต้นทุน is dropped entirely for roles without the viewCost capability —
+    // hiding the column on screen but shipping it in the file would leak it.
+    const showCost = typeof canDo !== "function" || canDo("viewCost");
+    const headers = ["SKU","ชื่อสินค้า","หมวดหมู่","แบรนด์","คงเหลือ","จองแล้ว","จุดสั่งซื้อ","ตำแหน่ง","ราคาขาย", ...(showCost ? ["ต้นทุน"] : []),"ผู้จัดส่ง","สถานะ"];
     const csvRows = rows.map(p => {
       const s = stockStatus(p);
-      return [p.sku, p.name, p.cat, p.brand || "", p.qty, p.reserved, p.reorder, p.loc, p.price, p.cost, p.supplier, s.label]
+      return [p.sku, p.name, p.cat, p.brand || "", p.qty, p.reserved, p.reorder, p.loc, p.price, ...(showCost ? [p.cost] : []), p.supplier, s.label]
         .map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",");
     });
     const csv = "﻿" + [headers.join(","), ...csvRows].join("\n");
@@ -2482,22 +2503,22 @@ function Inventory({ pushToast, density, goTo }) {
           <div className="page-sub">{liveProducts.length} SKU • รวม {liveProducts.reduce((s,p)=>s+p.qty,0).toLocaleString()} ชิ้น</div>
         </div>
         <div className="row">
-          <button className="btn" onClick={() => {
+          {canDo("exportData") && <button className="btn" onClick={() => {
             if (typeof downloadStockReport === "function") downloadStockReport(liveProducts);
-          }}><Icons.Pkg size={14}/> รายงานสต็อก Excel</button>
-          <button className="btn" onClick={() => {
+          }}><Icons.Pkg size={14}/> รายงานสต็อก Excel</button>}
+          {canDo("exportData") && <button className="btn" onClick={() => {
             exportInventoryCsv(filtered, `สินค้าคงคลัง_${new Date().toISOString().slice(0,10)}.csv`);
             pushToast(`ส่งออก ${filtered.length} รายการเป็น CSV แล้ว`);
-          }}><Icons.Pkg size={14}/> Export CSV</button>
-          <button className="btn" onClick={() => {
+          }}><Icons.Pkg size={14}/> Export CSV</button>}
+          {canDo("exportData") && <button className="btn" onClick={() => {
             const w = window.open("", "_blank");
             const rows = filtered.map(p => { const s = stockStatus(p); return `<tr><td class="mono">${p.sku}</td><td>${p.name}</td><td>${p.cat}</td><td class="r mono">${p.qty}</td><td class="r mono">${p.reorder}</td><td class="mono">${p.loc}</td><td>${s.label}</td></tr>`; }).join("");
             w.document.write(`<!DOCTYPE html><html><head><title>รายงานสินค้าคงคลัง</title><style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 4px}p{margin:0 0 16px;color:#555}button{padding:8px 18px;cursor:pointer;margin-bottom:16px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600}td{padding:7px 10px;border-bottom:1px solid #eee}.mono{font-family:monospace;font-size:12px}.r{text-align:right}@media print{button{display:none!important}}</style></head><body><h2>รายงานสินค้าคงคลัง</h2><p>${new Date().toLocaleDateString("th-TH",{dateStyle:"full"})} · ${filtered.length} รายการ</p><button onclick="window.print()">🖨 พิมพ์</button><table><thead><tr><th>SKU</th><th>ชื่อสินค้า</th><th>หมวด</th><th class="r">คงเหลือ</th><th class="r">จุดสั่ง</th><th>ตำแหน่ง</th><th>สถานะ</th></tr></thead><tbody>${rows}</tbody></table></body></html>`);
             w.document.close();
-          }}><Icons.Print/> พิมพ์รายงาน</button>
-          <button className="btn" onClick={() => goTo && goTo("import")}><Icons.Pkg size={14}/> นำเข้า SKU จาก Excel</button>
+          }}><Icons.Print/> พิมพ์รายงาน</button>}
+          {canDo("addProduct") && <button className="btn" onClick={() => goTo && goTo("import")}><Icons.Pkg size={14}/> นำเข้า SKU จาก Excel</button>}
           {canAdjustStock() && <button className="btn" onClick={() => setAdjOpen(true)}><Icons.Refresh size={14}/> ปรับสต็อก</button>}
-          <button className="btn btn-accent" onClick={() => setAddOpen(true)}><Icons.Plus/> เพิ่ม SKU</button>
+          {canDo("addProduct") && <button className="btn btn-accent" onClick={() => setAddOpen(true)}><Icons.Plus/> เพิ่ม SKU</button>}
         </div>
       </div>
 
@@ -2568,10 +2589,10 @@ function Inventory({ pushToast, density, goTo }) {
           <div className="spacer"/>
           <div className="row" style={{ gap: 6 }}>
             <BulkBtn icon={<Icons.Map size={13}/>} label="จัดเก็บเข้าตำแหน่ง" onClick={() => setAssignSkus([...selectedSkus])}/>
-            <BulkBtn icon={<Icons.Edit size={13}/>} label="แก้ไขทั้งหมด" onClick={() => setBulkOpen(true)}/>
+            {canDo("editProduct") && <BulkBtn icon={<Icons.Edit size={13}/>} label="แก้ไขทั้งหมด" onClick={() => setBulkOpen(true)}/>}
             <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์บาร์โค้ด" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); if (typeof printBarcodeLabels === "function") printBarcodeLabels(items, pushToast); }}/>
-            <BulkBtn icon={<Icons.Pkg size={13}/>} label="ส่งออก Excel" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); exportInventoryCsv(items, `สินค้าคงคลัง_เลือก_${new Date().toISOString().slice(0,10)}.csv`); pushToast(`ส่งออก ${items.length} รายการแล้ว`); }}/>
-            <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDelete} danger/>
+            {canDo("exportData") && <BulkBtn icon={<Icons.Pkg size={13}/>} label="ส่งออก Excel" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); exportInventoryCsv(items, `สินค้าคงคลัง_เลือก_${new Date().toISOString().slice(0,10)}.csv`); pushToast(`ส่งออก ${items.length} รายการแล้ว`); }}/>}
+            {canDeleteData() && <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDelete} danger/>}
           </div>
         </div>
       )}
@@ -2949,11 +2970,16 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
   const skuTrim = f.sku.trim().toUpperCase();
   const dupe = skuTrim && products.some(p => p.sku.toUpperCase() === skuTrim);
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n >= 0 ? n : null; };
-  const cost = num(f.cost), price = num(f.price), qty = num(f.qty), reorder = num(f.reorder);
+  /* Roles without viewCost never see the ต้นทุน field, so it can't be required:
+     the cost falls back to the same 60%-of-price estimate the CSV importer uses,
+     and an admin can correct it later. */
+  const showCost = canDo("viewCost");
+  const price = num(f.price), qty = num(f.qty), reorder = num(f.reorder);
+  const cost = showCost ? num(f.cost) : (price === null ? null : Math.round(price * 0.6));
   const canSave = skuTrim && !dupe && f.name.trim() &&
     cost !== null && price !== null && qty !== null && reorder !== null;
 
-  const margin = (cost !== null && price !== null && price > 0)
+  const margin = (showCost && cost !== null && price !== null && price > 0)
     ? Math.round((1 - cost / price) * 100) : null;
 
   const save = () => {
@@ -3028,11 +3054,13 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
             <datalist id="addsku-brands">{brands.map(b => <option key={b} value={b}/>)}</datalist>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div className="field">
-              <label>ต้นทุน (฿) <span style={{ color: "var(--danger)" }}>*</span></label>
-              <input className="input" type="number" min="0" value={f.cost} onChange={e => set("cost", e.target.value)} placeholder="0" style={{ textAlign: "right" }}/>
-            </div>
+          <div style={{ display: "grid", gridTemplateColumns: showCost ? "1fr 1fr" : "1fr", gap: 12 }}>
+            {showCost && (
+              <div className="field">
+                <label>ต้นทุน (฿) <span style={{ color: "var(--danger)" }}>*</span></label>
+                <input className="input" type="number" min="0" value={f.cost} onChange={e => set("cost", e.target.value)} placeholder="0" style={{ textAlign: "right" }}/>
+              </div>
+            )}
             <div className="field">
               <label>ราคาขาย (฿) <span style={{ color: "var(--danger)" }}>*</span></label>
               <input className="input" type="number" min="0" value={f.price} onChange={e => set("price", e.target.value)} placeholder="0" style={{ textAlign: "right" }}/>
@@ -3155,9 +3183,9 @@ function ProductDrawer({ product, onClose, pushToast }) {
               : <span className="badge badge-warning" style={{ fontSize: 10 }} title={product.loc ? `ค่าเดิม: ${product.loc}` : undefined}><Icons.Warn size={10}/> ยังไม่จัดเก็บ</span>}/>
             <Stat label="แบรนด์" value={product.brand || "—"}/>
             <Stat label="ผู้จัดส่ง" value={product.supplier}/>
-            <Stat label="ราคาทุน" value={`฿${(product.cost ?? Math.round(product.price * 0.6)).toLocaleString()}`}/>
+            {canDo("viewCost") && <Stat label="ราคาทุน" value={`฿${(product.cost ?? Math.round(product.price * 0.6)).toLocaleString()}`}/>}
             <Stat label="ราคาขาย" value={`฿${product.price.toLocaleString()}`}/>
-            <Stat label="กำไรต่อชิ้น" value={`฿${(product.price - (product.cost ?? Math.round(product.price * 0.6))).toLocaleString()} · ${Math.round((1 - (product.cost ?? product.price * 0.6) / product.price) * 100)}%`}/>
+            {canDo("viewCost") && <Stat label="กำไรต่อชิ้น" value={`฿${(product.price - (product.cost ?? Math.round(product.price * 0.6))).toLocaleString()} · ${Math.round((1 - (product.cost ?? product.price * 0.6) / product.price) * 100)}%`}/>}
             <Stat label="จุดสั่งซื้อใหม่" value={product.reorder + " ชิ้น"}/>
           </div>
 
@@ -3180,7 +3208,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
             </div>
           </div>
 
-          <div style={{ marginTop: 18 }}>
+          {canDo("viewSales") && <div style={{ marginTop: 18 }}>
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
               <div style={{ fontWeight: 600, fontSize: 13 }}>ยอดขายตามช่องทาง</div>
               <span style={{ fontSize: 11, color: "var(--muted)" }}>30 วันที่ผ่านมา</span>
@@ -3222,7 +3250,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
                 );
               })()}
             </div>
-          </div>
+          </div>}
 
           <div style={{ marginTop: 18 }}>
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
@@ -3263,7 +3291,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
         </div>
         <div className="drawer-foot">
           {canAdjustStock() && <button className="btn" onClick={() => setAdjOpen(true)}><Icons.Refresh size={14}/> ปรับสต็อก</button>}
-          <button className="btn btn-primary" onClick={() => setEditOpen(true)}><Icons.Edit size={14}/> แก้ไขข้อมูล</button>
+          {canDo("editProduct") && <button className="btn btn-primary" onClick={() => setEditOpen(true)}><Icons.Edit size={14}/> แก้ไขข้อมูล</button>}
         </div>
       </div>
       {editOpen && (
@@ -3309,9 +3337,13 @@ function ProductEditModal({ product, onClose, onSave }) {
   });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) && n >= 0 ? n : null; };
-  const cost = num(f.cost), price = num(f.price), reorder = num(f.reorder);
+  /* Without viewCost the ต้นทุน field is hidden — keep the product's existing
+     cost untouched rather than blanking it on save. */
+  const showCost = canDo("viewCost");
+  const price = num(f.price), reorder = num(f.reorder);
+  const cost = showCost ? num(f.cost) : (Number.isFinite(Number(product.cost)) ? Number(product.cost) : (price === null ? null : Math.round(price * 0.6)));
   const canSave = f.name.trim() && cost !== null && price !== null && reorder !== null;
-  const margin = (cost !== null && price !== null && price > 0) ? Math.round((1 - cost / price) * 100) : null;
+  const margin = (showCost && cost !== null && price !== null && price > 0) ? Math.round((1 - cost / price) * 100) : null;
 
   const save = () => {
     if (!canSave) return;
@@ -3357,11 +3389,13 @@ function ProductEditModal({ product, onClose, onSave }) {
               placeholder="เช่น 5.11, PS TACTICAL" list="editprod-brands"/>
             <datalist id="editprod-brands">{brands.map(b => <option key={b} value={b}/>)}</datalist>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <div className="field">
-              <label>ต้นทุน (฿) <span style={{ color: "var(--danger)" }}>*</span></label>
-              <input className="input" type="number" min="0" value={f.cost} onChange={e => set("cost", e.target.value)} style={{ textAlign: "right" }}/>
-            </div>
+          <div style={{ display: "grid", gridTemplateColumns: showCost ? "1fr 1fr" : "1fr", gap: 12 }}>
+            {showCost && (
+              <div className="field">
+                <label>ต้นทุน (฿) <span style={{ color: "var(--danger)" }}>*</span></label>
+                <input className="input" type="number" min="0" value={f.cost} onChange={e => set("cost", e.target.value)} style={{ textAlign: "right" }}/>
+              </div>
+            )}
             <div className="field">
               <label>ราคาขาย (฿) <span style={{ color: "var(--danger)" }}>*</span></label>
               <input className="input" type="number" min="0" value={f.price} onChange={e => set("price", e.target.value)} style={{ textAlign: "right" }}/>
@@ -3402,113 +3436,219 @@ function ProductEditModal({ product, onClose, onSave }) {
 }
 
 /* Reason-driven stock adjustment (นับผิด / เสียหาย / ขายนอกระบบ) — applies via
-   the shared applyStockAdjustment choke point (data.jsx), which also writes the
-   audit trail + stock_adjustments history. Opened WITH a product (ProductDrawer)
-   it adjusts that product then calls onApply; opened WITHOUT one (Inventory
-   header) it shows a scan/pick stage first and resets back to it after each
-   apply, so logging a batch of external-platform sales is one loop per item. */
+   the shared applyStockAdjustmentBatch → applyStockAdjustment choke point
+   (data.jsx), which also writes the audit trail + stock_adjustments history.
+   MULTI-SKU: pick/scan any number of products (with photos), give each its own
+   จำนวน, share one รูปแบบ/เหตุผล/หมายเหตุ, confirm once — so a batch of
+   external-platform sales or a damaged-carton write-off is a single pass.
+   Opened WITH a product (ProductDrawer) it starts with that item selected and
+   calls onApply after; opened WITHOUT one (Inventory header) it starts on the
+   picker and resets back to it after each apply. */
 function StockAdjustModal({ product, onClose, onApply, pushToast }) {
-  const [sel, setSel] = useState(product || null);
+  const [rows, setRows] = useState(() => (product ? [{ sku: product.sku, amount: "" }] : []));
   const [mode, setMode] = useState("remove"); // add | remove | set
-  const [amount, setAmount] = useState("");
   const [reasonId, setReasonId] = useState("");
   const [note, setNote] = useState("");
   const [scan, setScan] = useState("");
+  const [q, setQ] = useState("");
+  const [showN, setShowN] = useState(30);
+  const [pickOpen, setPickOpen] = useState(!product);
   const scanRef = useRef(null);
   const toast = pushToast || (() => {});
   const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
+  const effQty = (sku) => (typeof getEffectiveQty === "function"
+    ? getEffectiveQty(sku)
+    : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
+
+  const picked = (sku) => rows.some(r => r.sku === sku);
+  const addSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs : [...rs, { sku, amount: "" }]));
+  const removeSku = (sku) => setRows(rs => rs.filter(r => r.sku !== sku));
+  const toggleSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs.filter(r => r.sku !== sku) : [...rs, { sku, amount: "" }]));
+  const setAmount = (sku, v) => setRows(rs => rs.map(r => (r.sku === sku ? { ...r, amount: v } : r)));
+  const fillAll = (v) => setRows(rs => rs.map(r => ({ ...r, amount: v })));
 
   // Scan/typed-SKU selection — same exact-match funnel as StockTake.submitScan
   // (product SELECTION only; not a third barcode-resolution path).
   const submitScan = (code) => {
-    const q = String(code ?? scan).trim();
-    if (!q) return;
-    const p = PRODUCTS.find(x => x.sku.toLowerCase() === q.toLowerCase());
+    const s = String(code ?? scan).trim();
+    if (!s) return;
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === s.toLowerCase());
     if (!p) {
       if (typeof playScanErrorBeep === "function") playScanErrorBeep();
-      toast("ไม่พบ SKU: " + q);
+      toast("ไม่พบ SKU: " + s);
       return;
     }
     if (typeof playScanBeep === "function") playScanBeep();
     setScan("");
-    setSel(p);
+    if (picked(p.sku)) { toast(`${p.sku} เลือกไว้แล้ว`); return; }
+    addSku(p.sku);
   };
 
-  const effQty = sel ? ((typeof getEffectiveQty === "function") ? getEffectiveQty(sel.sku) : sel.qty) : 0;
-  const n = parseInt(amount);
-  const valid = Number.isFinite(n) && n >= 0;
-  let delta = 0;
-  if (valid && sel) {
-    if (mode === "add") delta = n;
-    else if (mode === "remove") delta = -Math.min(n, effQty);
-    else delta = n - effQty;
-  }
-  const resultQty = effQty + delta;
-  const canConfirm = !!sel && valid && delta !== 0 && !!reason && (!reason.requireNote || note.trim());
+  // Per-row delta from the shared mode. หักออก clamps at the current qty so a
+  // typo can't drive stock negative; ตั้งค่าเป็น is an absolute target.
+  const deltaOf = (row) => {
+    const n = parseInt(row.amount, 10);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    const cur = effQty(row.sku);
+    if (mode === "add") return n;
+    if (mode === "remove") return -Math.min(n, cur);
+    return n - cur;
+  };
+  const changes = rows.map(r => ({ sku: r.sku, delta: deltaOf(r) })).filter(c => c.delta !== 0);
+  const net = changes.reduce((s, c) => s + c.delta, 0);
+  const canConfirm = changes.length > 0 && !!reason && (!reason.requireNote || note.trim());
+
+  const filtered = PRODUCTS.filter(p =>
+    !q ||
+    p.sku.toLowerCase().includes(q.toLowerCase()) ||
+    p.name.toLowerCase().includes(q.toLowerCase()) ||
+    (p.cat || "").toLowerCase().includes(q.toLowerCase())
+  );
 
   const resetForNext = () => {
-    setSel(null); setMode("remove"); setAmount(""); setReasonId(""); setNote(""); setScan("");
+    setRows([]); setMode("remove"); setReasonId(""); setNote(""); setScan(""); setQ(""); setShowN(30); setPickOpen(true);
     setTimeout(() => scanRef.current?.focus(), 60);
   };
 
   const confirm = () => {
     if (!canConfirm) return;
-    const res = applyStockAdjustment({ sku: sel.sku, delta, reason, note });
-    if (!res.ok) { toast("ปรับสต็อกไม่สำเร็จ"); return; }
-    if (res.eff) toast(`ปรับสต็อก ${sel.sku} ${res.eff > 0 ? "+" : ""}${res.eff} ชิ้น — ${reason.label}`);
-    else toast(`${sel.sku} ไม่มีการเปลี่ยนแปลง (คงเหลือ 0 อยู่แล้ว)`);
+    const res = (typeof applyStockAdjustmentBatch === "function")
+      ? applyStockAdjustmentBatch(changes, { reason, note })
+      : { applied: 0, net: 0 };
+    if (!res.applied) { toast("ปรับสต็อกไม่สำเร็จ"); return; }
+    toast(changes.length === 1
+      ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
+      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น) — ${reason.label}`);
     if (product) onApply?.();
-    else resetForNext(); // batch loop: back to the scan stage for the next item
+    else resetForNext(); // batch loop: back to the picker for the next round
   };
 
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 300 }}/>
-      <div className="modal" style={{ maxWidth: 480, zIndex: 301 }}>
+      <div className="modal" style={{ width: 660, maxWidth: "calc(100vw - 40px)", zIndex: 301 }}>
         <div className="modal-head">
           <div>
             <h3>ปรับสต็อก</h3>
             <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
-              {sel ? `${sel.name} · คงเหลือ ${effQty} ชิ้น` : "สำหรับนับสต็อกผิด สินค้าเสียหาย หรือขายนอกระบบ (Shopee / Lazada / หน้าร้าน)"}
+              {rows.length
+                ? `เลือกไว้ ${rows.length} รายการ · เลือกได้หลายรายการพร้อมกัน`
+                : "สำหรับนับสต็อกผิด สินค้าเสียหาย หรือขายนอกระบบ (Shopee / Lazada / หน้าร้าน)"}
             </div>
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
         <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {!sel && (
-            <>
-              <div className="field">
-                <label>สแกนบาร์โค้ด / พิมพ์ SKU</label>
-                <input ref={scanRef} className="input" value={scan} onChange={e => setScan(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter") submitScan(); }}
-                  placeholder="ยิงบาร์โค้ดหรือพิมพ์ SKU แล้วกด Enter" autoFocus/>
-              </div>
-              <div className="field">
-                <label>หรือเลือกจากรายการ</label>
-                <SkuPicker value="" onChange={sku => {
-                  const p = PRODUCTS.find(x => x.sku === sku);
-                  if (p) { if (typeof playScanBeep === "function") playScanBeep(); setSel(p); }
-                }} products={PRODUCTS}/>
-              </div>
-            </>
-          )}
-          {sel && (
-            <>
-              {!product && (
-                <div className="row" style={{ justifyContent: "space-between", padding: "8px 12px", background: "var(--surface-2)", borderRadius: 10 }}>
-                  <span className="mono" style={{ fontSize: 12 }}>{sel.sku}</span>
-                  <button className="btn btn-sm" onClick={resetForNext}>เปลี่ยนสินค้า</button>
+          <div className="field">
+            <label>สแกนบาร์โค้ด / พิมพ์ SKU เพื่อเพิ่มเข้ารายการ</label>
+            <input ref={scanRef} className="input" value={scan} onChange={e => setScan(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") submitScan(); }}
+              placeholder="ยิงบาร์โค้ดหรือพิมพ์ SKU แล้วกด Enter" autoFocus={!product}/>
+          </div>
+
+          {/* Multi-select product browser with photos */}
+          <div className="field">
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <label style={{ margin: 0 }}>เลือกสินค้า {rows.length > 0 && <span style={{ color: "var(--accent)" }}>({rows.length})</span>}</label>
+              <button className="btn btn-sm" onClick={() => setPickOpen(o => !o)}>
+                {pickOpen ? <><Icons.Chev size={12} style={{ transform: "rotate(-90deg)" }}/> ซ่อนรายการ</> : <><Icons.Plus size={12}/> เลือกสินค้าเพิ่ม</>}
+              </button>
+            </div>
+            {pickOpen && (
+              <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", background: "var(--surface)" }}>
+                <div style={{ padding: 8, borderBottom: "1px solid var(--border)", background: "var(--surface-2)" }}>
+                  <div className="search" style={{ width: "100%" }}>
+                    <Icons.Search size={14}/>
+                    <input value={q} onChange={e => { setQ(e.target.value); setShowN(30); }} placeholder="ค้นหา SKU, ชื่อสินค้า, หมวด..."/>
+                    {q && <span style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => { setQ(""); setShowN(30); }}><Icons.X size={12}/></span>}
+                  </div>
                 </div>
-              )}
+                <div style={{ maxHeight: 250, overflowY: "auto", overscrollBehavior: "contain" }}>
+                  {filtered.slice(0, showN).map(p => {
+                    const s = stockStatus(p);
+                    const on = picked(p.sku);
+                    return (
+                      <div key={p.sku} onClick={() => toggleSku(p.sku)}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 10,
+                          padding: "8px 12px", cursor: "pointer",
+                          borderBottom: "1px solid var(--border)",
+                          background: on ? "var(--accent-soft)" : "transparent"
+                        }}>
+                        <span className={"check" + (on ? " on" : "")} style={{ flexShrink: 0 }}/>
+                        {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={34} radius={7}/>}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
+                          <div className="row" style={{ gap: 6, marginTop: 1 }}>
+                            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</span>
+                            <span style={{ fontSize: 11, color: "var(--muted)" }}>· {p.cat}</span>
+                          </div>
+                        </div>
+                        <div style={{ textAlign: "right", flexShrink: 0 }}>
+                          <div className="tnum" style={{ fontSize: 14, fontWeight: 600 }}>{effQty(p.sku)}</div>
+                          <span className={"badge " + s.cls} style={{ fontSize: 9, padding: "1px 7px", marginTop: 2 }}><span className="dot"/>{s.label}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {filtered.length === 0 && (
+                    <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่พบสินค้าที่ตรงกับ "{q}"</div>
+                  )}
+                  {filtered.length > showN && (
+                    <button className="btn btn-sm" style={{ width: "100%", borderRadius: 0, justifyContent: "center" }} onClick={() => setShowN(n => n + 30)}>
+                      ดูเพิ่ม — แสดง {showN} จาก {filtered.length} รายการ
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {rows.length > 0 && (
+            <>
               <div className="seg" style={{ width: "100%" }}>
                 <button className={mode === "add" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("add")}>เพิ่มเข้า</button>
                 <button className={mode === "remove" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("remove")}>หักออก</button>
                 <button className={mode === "set" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("set")}>ตั้งค่าเป็น</button>
               </div>
+
               <div className="field">
-                <label>{mode === "set" ? "จำนวนคงเหลือใหม่" : "จำนวน (ชิ้น)"}</label>
-                <input className="input" type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" style={{ textAlign: "right" }} autoFocus={!!product}/>
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <label style={{ margin: 0 }}>{mode === "set" ? "จำนวนคงเหลือใหม่ (ต่อรายการ)" : "จำนวน (ชิ้น) ต่อรายการ"}</label>
+                  {rows.length > 1 && (
+                    <div className="row" style={{ gap: 6 }}>
+                      <span style={{ fontSize: 11, color: "var(--muted)" }}>ใส่เท่ากันทุกแถว</span>
+                      <input className="input" type="number" min="0" placeholder="0"
+                        style={{ width: 78, textAlign: "right", padding: "5px 8px", height: "auto" }}
+                        onChange={e => fillAll(e.target.value)}/>
+                    </div>
+                  )}
+                </div>
+                <div className="stack" style={{ gap: 6, maxHeight: 260, overflowY: "auto", overscrollBehavior: "contain" }}>
+                  {rows.map(r => {
+                    const p = PRODUCTS.find(x => x.sku === r.sku);
+                    const cur = effQty(r.sku);
+                    const d = deltaOf(r);
+                    return (
+                      <div key={r.sku} className="row" style={{ gap: 10, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)" }}>
+                        {typeof ProductImageThumb === "function" && <ProductImageThumb sku={r.sku} size={40} radius={8}/>}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p ? p.name : r.sku}</div>
+                          <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{r.sku} · คงเหลือ {cur}</div>
+                        </div>
+                        <input className="input" type="number" min="0" value={r.amount} placeholder="0"
+                          onChange={e => setAmount(r.sku, e.target.value)}
+                          style={{ width: 82, textAlign: "right", flexShrink: 0 }}/>
+                        <div className="tnum" style={{ width: 76, textAlign: "right", fontSize: 12, flexShrink: 0, color: d === 0 ? "var(--muted)" : d > 0 ? "var(--success)" : "var(--danger)" }}>
+                          {d === 0 ? "—" : `${cur} → ${Math.max(0, cur + d)}`}
+                        </div>
+                        <button className="btn btn-sm btn-ghost btn-icon" title="เอาออกจากรายการ" onClick={() => removeSku(r.sku)} style={{ flexShrink: 0 }}><Icons.X size={13}/></button>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
+
               <div className="field">
                 <label>เหตุผล <span style={{ color: "var(--danger)" }}>*</span></label>
                 <div className="adj-reasons">
@@ -3523,11 +3663,11 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
                   : <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span>}</label>
                 <input className="input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, อ้างอิงการนับ"/>
               </div>
-              {valid && (
+              {changes.length > 0 && (
                 <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 12, color: "var(--muted)" }}>คงเหลือหลังปรับ</span>
-                  <span className="tnum" style={{ fontSize: 20, fontWeight: 600, color: resultQty < 0 ? "var(--danger)" : "var(--fg)" }}>
-                    {effQty} → {Math.max(0, resultQty)}
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>จะปรับ {changes.length} รายการ</span>
+                  <span className="tnum" style={{ fontSize: 20, fontWeight: 600, color: net > 0 ? "var(--success)" : "var(--danger)" }}>
+                    สุทธิ {net > 0 ? "+" : ""}{net} ชิ้น
                   </span>
                 </div>
               )}
@@ -3536,9 +3676,9 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
         </div>
         <div className="modal-foot">
           <button className="btn" onClick={onClose}>{product ? "ยกเลิก" : "ปิด"}</button>
-          {sel && (
+          {rows.length > 0 && (
             <button className="btn btn-primary" disabled={!canConfirm} onClick={confirm} style={!canConfirm ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
-              <Icons.Check size={14}/> ยืนยันปรับสต็อก
+              <Icons.Check size={14}/> ยืนยันปรับสต็อก{changes.length > 1 ? ` (${changes.length})` : ""}
             </button>
           )}
         </div>
@@ -3561,6 +3701,7 @@ function Locations({ goTo }) {
   const [tree, setTree] = useState(loadLocTree);
   const [selected, setSelected] = useState(null); // { building, floor, pos, code, highlightSku? }
   const [finderQ, setFinderQ] = useState("");
+  const [assignSku, setAssignSku] = useState(null); // finder hit with no position → assign it one
 
   useEffect(() => {
     // Shallow-copy: once the cloud tree is loaded, loadLocTree() returns the same
@@ -3633,8 +3774,11 @@ function Locations({ goTo }) {
                 const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
                 return (
                   <div key={p.sku} className="row"
-                    onClick={() => parts && setSelected({ building: parts.building, floor: parts.floor, pos: parts.pos, code: p.loc, highlightSku: p.sku })}
-                    style={{ gap: 12, padding: 10, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, cursor: parts ? "pointer" : "default" }}>
+                    onClick={() => parts
+                      ? setSelected({ building: parts.building, floor: parts.floor, pos: parts.pos, code: p.loc, highlightSku: p.sku })
+                      : setAssignSku(p.sku)}
+                    title={parts ? "เปิดตำแหน่งนี้" : "เลือกตำแหน่งจัดเก็บให้สินค้านี้"}
+                    style={{ gap: 12, padding: 10, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, cursor: "pointer" }}>
                     {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={44} radius={8}/>}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
@@ -3726,6 +3870,26 @@ function Locations({ goTo }) {
         <Icons.Refresh size={16}/>
         <span>จำนวน SKU ของแต่ละตำแหน่งคำนวณจากสินค้าจริง — เปิดตำแหน่งแล้วกด “เพิ่มสินค้า” เพื่อจัดสินค้าเข้าตำแหน่งได้เลย</span>
       </div>
+
+      {assignSku && (
+        <AssignLocationModal
+          skus={[assignSku]}
+          products={PRODUCTS}
+          storedCodes={storedLocSet()}
+          onClose={() => setAssignSku(null)}
+          onApply={(code) => {
+            updateManyProducts([assignSku], { loc: code });
+            if (typeof recordChange === "function") {
+              recordChange({
+                entity: "product", entityId: assignSku, action: "update",
+                summary: `จัดเก็บ ${assignSku} เข้าตำแหน่ง ${code}`,
+                changes: [{ label: "ตำแหน่งจัดเก็บ", to: code }]
+              });
+            }
+            try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: `จัดเก็บ ${assignSku} เข้าตำแหน่ง ${code} แล้ว` })); } catch (e) {}
+            setAssignSku(null);
+          }}/>
+      )}
 
       {selected && <LocationDrawer loc={selected} highlightSku={selected.highlightSku} onClose={() => setSelected(null)}
         onDelete={allowDelete ? (() => { if (confirm(`ลบตำแหน่ง ${selected.pos}?`)) { removePosition(selected.building, selected.floor, selected.pos); setSelected(null); } }) : null}/>}
@@ -4824,7 +4988,7 @@ function StockTake({ pushToast }) {
    position (with the bin photo), confirm it's the right item, then sell it —
    the anti-mistake funnel for picking / deducting stock. Mobile fork: MFinder
    in handheld.jsx. */
-function ProductFinder({ pushToast, goTo }) {
+function ProductFinder({ pushToast, goTo, focus }) {
   const [q, setQ] = useState("");
   const [selectedSku, setSelectedSku] = useState(null);
   const [camOpen, setCamOpen] = useState(false);
@@ -4841,6 +5005,10 @@ function ProductFinder({ pushToast, goTo }) {
     evs.forEach(ev => window.addEventListener(ev, refresh));
     return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
   }, []);
+  // Arrived here with a specific SKU (goTo("finder", { sku })) → show its card.
+  useEffect(() => {
+    if (focus && focus.sku) { setQ(focus.sku); setSelectedSku(focus.sku); }
+  }, [focus && focus.n]);
 
   const effQty = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
   const res = useMemo(
@@ -4848,8 +5016,7 @@ function ProductFinder({ pushToast, goTo }) {
     [q, stockKey]
   );
 
-  const role = (window.__currentUser && window.__currentUser.role) || "viewer";
-  const canSell = role === "admin" || role === "manager" || role === "staff";
+  const canSell = canDo("sell");
 
   // Camera + keyboard-wedge funnel: exact SKU (= barcode) → jump straight to the
   // confirmation card; a miss beeps so the picker knows the scan didn't land.

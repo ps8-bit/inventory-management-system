@@ -77,8 +77,17 @@ The app is an installable PWA (`manifest.webmanifest` + PWA icons + `sw.js`, reg
 
 A desktop nav page needs **four** edits, and the mobile fork is **separate**:
 1. `app.jsx` — add to `ALL_NAV` (id/label/icon/group), add `CRUMB_MAP[id]`, and add the router line `{page === "id" && <Comp .../>}`.
-2. **`data.jsx` `ROLE_NAV`** — add the id to every role that should see it (admin/manager/staff/viewer). **This is the easy-to-miss one:** the sidebar is `navItems.filter(visible).map(ALL_NAV).filter(n => ROLE_NAV[role].has(n.id))` — a page absent from `ROLE_NAV` is hidden for everyone, even admin, with no error. (`ims_nav_layout` auto-merges new `ALL_NAV` ids, so that's not the blocker — `ROLE_NAV` is.)
+2. **`data.jsx` `ROLE_NAV`** — add the id to every role that should see it (admin/manager/staff/viewer). **This is the easy-to-miss one:** the sidebar is `navItems.filter(visible).map(ALL_NAV).filter(n => roleNav(role).includes(n.id))` — a page absent from `ROLE_NAV` is hidden for everyone, even admin, with no error. (`ims_nav_layout` auto-merges new `ALL_NAV` ids, so that's not the blocker — `ROLE_NAV` is.) A role the admin has already customized keeps its saved list, so a brand-new page won't appear for it until re-ticked — see the permissions section below.
 3. `screens.jsx` — define the desktop component and add it to the `Object.assign(window, {...})` export.
 4. **Mobile is a separate screen in `handheld.jsx`**: define `M<Name>`, add the router line in the view switch (`if (route.view === "id") return <M... ctx={ctx}/>`), and add an entry to the `MMore` items array (mobile menu is a static list, NOT role-gated by `ROLE_NAV`).
 
 Shared low-level helpers go in `data.jsx` (loads first) and are exposed via `Object.assign(window, {...})`; the stock-take feature's `loadStockTake`/`saveStockTake`/`applyStockCounts` follow this pattern.
+
+## Permissions: nav + capabilities (both admin-customizable)
+
+Two layers, both resolved in `data.jsx` and both overridable per role by an admin in ผู้ใช้งานและสิทธิ์ (desktop `RolePermissions` in `auth.jsx`, mobile `MRolePerms` in `handheld.jsx`):
+
+- **Pages** — `roleNav(role)` = admin override ?? `ROLE_NAV[role]`. **Always call `roleNav()`, never `ROLE_NAV[...]` directly** (the sidebar in `app.jsx`, the mobile `MMore` list, and the mobile `M_GATED_VIEWS` deep-link guard all do).
+- **Capabilities** — `canDo(capId, role?)` over the `CAPS` registry (`viewCost`, `viewSales`, `sell`, `adjustStock`, `addProduct`, `editProduct`, `deleteData`, `exportData`). `canDeleteData()`/`canAdjustStock()` are thin wrappers kept for their existing call sites. A cap carrying a `server` list can be *revoked* from a role but never *granted* beyond what RLS allows, so the UI can't offer a button the DB will reject.
+
+Defaults live in `ROLE_NAV` + `DEFAULT_ROLE_CAPS`; the override blob is app_state key `role_perms` (cloud-synced, admin-only to write — see §4b of `supabase/rls-policies.sql`), and `ims-perms-change` re-renders both shells. Staff default to **no `viewCost` / no `viewSales`**: ต้นทุน/กำไร/มาร์จิ้น are hidden in the product drawer, both product forms, the bundle profit tile, and are *dropped from the CSV and Excel exports* rather than merely hidden. When adding UI that shows cost, profit, revenue or per-day sales, gate it on the matching cap in **both** the desktop and `m-*` fork.

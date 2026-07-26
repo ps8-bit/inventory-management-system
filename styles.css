@@ -1964,3 +1964,26 @@ html, body {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* ============================================================
+   SCROLL CONTAINMENT — mobile lists that "stick" mid-scroll
+   html[data-mobile="1"] is overflow:hidden + overscroll-behavior:
+   none, so when a flick inside .m-content / a bottom sheet runs
+   past its end the gesture CHAINS to that locked shell, which
+   cannot move — the scroll dies there and the list appears frozen
+   until you lift and touch again. Containment keeps the gesture
+   inside the scroller that owns it, and stops a sheet's scroll
+   from dragging the screen behind it.
+   ============================================================ */
+.m-content,
+.m-sheet,
+.m-sheet-body,
+.m-list,
+.m-chips-scroll,
+.drawer-body,
+.modal-body {
+  overscroll-behavior: contain;
+}
+/* Flex children that own a scrollbar must be allowed to shrink, or a long
+   list pushes the sheet past its max-height and the tail is unreachable. */
+.m-content, .m-sheet-body { min-height: 0; }
