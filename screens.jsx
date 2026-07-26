@@ -1225,7 +1225,7 @@ function Inbound({ goTo, pushToast }) {
           </div>
         </div>
         <div className="row">
-          <button className="btn" onClick={() => goTo && goTo("history")}><Icons.History/> ประวัติการรับเข้า</button>
+          {canOpenPage("history") && <button className="btn" onClick={() => goTo && goTo("history")}><Icons.History/> ประวัติการรับเข้า</button>}
           <button
             className="btn btn-primary"
             disabled={received.length === 0 || closed}
@@ -1744,7 +1744,7 @@ function Outbound({ goTo, pushToast, focus }) {
             <h3>ยอดตัดสต็อกตามช่องทาง</h3>
             <div className="sub">วันนี้ • รวม {CHANNELS.reduce((s,c)=>s+c.today,0)} ออร์เดอร์</div>
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => goTo && goTo("analytics")}>ดูรายงาน <Icons.Chev size={14}/></button>
+          {canOpenPage("analytics") && <button className="btn btn-ghost btn-sm" onClick={() => goTo && goTo("analytics")}>ดูรายงาน <Icons.Chev size={14}/></button>}
         </div>
         <div style={{ padding: "12px 18px 18px", display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12 }}>
           {CHANNELS.map(c => {
@@ -1981,6 +1981,17 @@ function Outbound({ goTo, pushToast, focus }) {
                 </tr>
               );
             })}
+            {/* Without this an empty result renders a header over blank space —
+                and a filter set from a search hit looks like a broken screen. */}
+            {tabOrders.length === 0 && (
+              <tr><td colSpan="9" style={{ textAlign: "center", padding: 40, color: "var(--muted)", fontSize: 13 }}>
+                <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
+                <div>{(filterQ || filterCh !== "all" || TAB_STATUS[tab]) ? "ไม่พบออร์เดอร์ที่ตรงกับตัวกรอง" : "ยังไม่มีออร์เดอร์"}</div>
+                {(filterQ || filterCh !== "all") && (
+                  <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setFilterCh("all"); setFilterQ(""); }}>ล้างตัวกรอง</button>
+                )}
+              </td></tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -2516,7 +2527,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
             w.document.write(`<!DOCTYPE html><html><head><title>รายงานสินค้าคงคลัง</title><style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 4px}p{margin:0 0 16px;color:#555}button{padding:8px 18px;cursor:pointer;margin-bottom:16px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600}td{padding:7px 10px;border-bottom:1px solid #eee}.mono{font-family:monospace;font-size:12px}.r{text-align:right}@media print{button{display:none!important}}</style></head><body><h2>รายงานสินค้าคงคลัง</h2><p>${new Date().toLocaleDateString("th-TH",{dateStyle:"full"})} · ${filtered.length} รายการ</p><button onclick="window.print()">🖨 พิมพ์</button><table><thead><tr><th>SKU</th><th>ชื่อสินค้า</th><th>หมวด</th><th class="r">คงเหลือ</th><th class="r">จุดสั่ง</th><th>ตำแหน่ง</th><th>สถานะ</th></tr></thead><tbody>${rows}</tbody></table></body></html>`);
             w.document.close();
           }}><Icons.Print/> พิมพ์รายงาน</button>}
-          {canDo("addProduct") && <button className="btn" onClick={() => goTo && goTo("import")}><Icons.Pkg size={14}/> นำเข้า SKU จาก Excel</button>}
+          {canDo("addProduct") && canOpenPage("import") && <button className="btn" onClick={() => goTo && goTo("import")}><Icons.Pkg size={14}/> นำเข้า SKU จาก Excel</button>}
           {canAdjustStock() && <button className="btn" onClick={() => setAdjOpen(true)}><Icons.Refresh size={14}/> ปรับสต็อก</button>}
           {canDo("addProduct") && <button className="btn btn-accent" onClick={() => setAddOpen(true)}><Icons.Plus/> เพิ่ม SKU</button>}
         </div>
@@ -2791,9 +2802,11 @@ function BulkEditModal({ count, products, categories, onClose, onApply }) {
 
 /* จัดเก็บเข้าตำแหน่ง — assign the given skus to ONE real position from the live
    tree. Opened from the Inventory bulk bar or a row's "ยังไม่จัดเก็บ" badge. */
-function AssignLocationModal({ skus, products, storedCodes, onClose, onApply }) {
+function AssignLocationModal({ skus, products, storedCodes, onClose, onApply, onAddBuilding }) {
   const [code, setCode] = useState("");
-  const groups = useMemo(() => {
+  // Read the tree on every render (it is tiny) — a memo keyed on [] would keep
+  // showing "no positions" after one is added while this modal is open.
+  const groups = (() => {
     const by = new Map();
     allPositions().forEach(x => {
       const g = `${x.building} · ${x.floor}`;
@@ -2801,7 +2814,7 @@ function AssignLocationModal({ skus, products, storedCodes, onClose, onApply }) 
       by.get(g).push(x);
     });
     return [...by.entries()];
-  }, []);
+  })();
   const items = skus.map(s => products.find(p => p.sku === s)).filter(Boolean);
   const hasPositions = groups.length > 0;
   return (
@@ -2831,7 +2844,19 @@ function AssignLocationModal({ skus, products, storedCodes, onClose, onApply }) 
           ) : (
             <div className="row" style={{ gap: 10, padding: "12px 14px", background: "var(--warning-soft)", borderRadius: 10, fontSize: 13, color: "oklch(0.5 0.13 65)" }}>
               <Icons.Warn size={15} style={{ flexShrink: 0 }}/>
-              <span>ยังไม่มีตำแหน่งในระบบ — ไปที่หน้า “ตำแหน่งจัดเก็บ” เพื่อเพิ่มอาคาร / ชั้น / ตำแหน่งก่อน</span>
+              {/* onAddBuilding is passed when this modal is opened FROM the
+                  locations page — telling that user to "go to ตำแหน่งจัดเก็บ"
+                  would point at the page they are already on. */}
+              {onAddBuilding ? (
+                <>
+                  <span style={{ flex: 1 }}>ยังไม่มีตำแหน่งในระบบ — เพิ่มอาคาร / ชั้น / ตำแหน่งก่อน แล้วค่อยจัดเก็บสินค้า</span>
+                  <button className="btn btn-sm" style={{ flexShrink: 0 }} onClick={() => { onClose(); onAddBuilding(); }}>
+                    <Icons.Plus size={12}/> เพิ่มอาคาร
+                  </button>
+                </>
+              ) : (
+                <span>ยังไม่มีตำแหน่งในระบบ — ไปที่หน้า “ตำแหน่งจัดเก็บ” เพื่อเพิ่มอาคาร / ชั้น / ตำแหน่งก่อน</span>
+              )}
             </div>
           )}
 
@@ -3719,6 +3744,9 @@ function Locations({ goTo }) {
   const floorCount = buildings.reduce((s, b) => s + (b.floors || []).length, 0);
   const posCount = buildings.reduce((s, b) => s + (b.floors || []).reduce((t, f) => t + (f.positions || []).length, 0), 0);
   const allowDelete = typeof canDeleteData === "function" ? canDeleteData() : true;
+  // Writing p.loc IS the editProduct capability (and RLS enforces it server-side),
+  // so a role that can't edit products must not be offered the assign flow.
+  const canAssign = typeof canDo === "function" ? canDo("editProduct") : true;
   const locImages = useLocationImages();
   // tree state refreshes on both products- and locations-change, so this stays live
   const unstored = useMemo(() => countUnstoredProducts(), [tree]);
@@ -3776,9 +3804,9 @@ function Locations({ goTo }) {
                   <div key={p.sku} className="row"
                     onClick={() => parts
                       ? setSelected({ building: parts.building, floor: parts.floor, pos: parts.pos, code: p.loc, highlightSku: p.sku })
-                      : setAssignSku(p.sku)}
-                    title={parts ? "เปิดตำแหน่งนี้" : "เลือกตำแหน่งจัดเก็บให้สินค้านี้"}
-                    style={{ gap: 12, padding: 10, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, cursor: "pointer" }}>
+                      : (canAssign && setAssignSku(p.sku))}
+                    title={parts ? "เปิดตำแหน่งนี้" : (canAssign ? "เลือกตำแหน่งจัดเก็บให้สินค้านี้" : "บัญชีนี้ไม่มีสิทธิ์แก้ไขตำแหน่งจัดเก็บ")}
+                    style={{ gap: 12, padding: 10, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, cursor: (parts || canAssign) ? "pointer" : "default" }}>
                     {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={44} radius={8}/>}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
@@ -3877,6 +3905,7 @@ function Locations({ goTo }) {
           products={PRODUCTS}
           storedCodes={storedLocSet()}
           onClose={() => setAssignSku(null)}
+          onAddBuilding={askBuilding}
           onApply={(code) => {
             updateManyProducts([assignSku], { loc: code });
             if (typeof recordChange === "function") {

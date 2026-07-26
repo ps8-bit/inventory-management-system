@@ -418,11 +418,22 @@ function TrackingPage({ pushToast, store, focus }) {
   useEffectTrk(() => {
     if (!focus || !focus.orderId || focusDoneRef.current === focus.n) return;
     const hit = orders.find(o => o.id === focus.orderId);
-    if (!hit) return;
-    focusDoneRef.current = focus.n;
-    setQ("");
+    if (hit) {
+      focusDoneRef.current = focus.n;
+      setQ("");
+      setStatusFilter("all");
+      setEdit(hit);
+      return;
+    }
+    /* Not in THIS screen's list. The search overlay reads the synchronous
+       orders cache (buildOrders), while this page's useOrders only counts
+       orders-table rows once dbLoadOrders() succeeds — so a failed/pending
+       fetch makes a hit clickable here but unfindable. Never fall through
+       silently (that is the bug being fixed): search for the id so the user
+       sees the query and the table's honest "not found" state. The nonce is
+       NOT stamped, so the drawer still opens if the rows arrive later. */
     setStatusFilter("all");
-    setEdit(hit);
+    setQ(focus.orderId);
   }, [focus && focus.n, orders]);
 
   const filtered = orders.filter(o => {

@@ -256,8 +256,8 @@ function NotifPopover({ onClose, goTo, goToProduct, goToOrder }) {
       )}
 
       <div style={{ padding:"8px 16px 10px", borderTop:"1px solid var(--border)", display:"flex", justifyContent:"space-between", marginTop:4 }}>
-        <button className="btn btn-ghost btn-sm" onClick={() => { goTo("inventory"); onClose(); }}>ดูสินค้า →</button>
         {/* No id → plain navigation, but still routed to a page this role can open. */}
+        <button className="btn btn-ghost btn-sm" onClick={() => { goToProduct(null); onClose(); }}>ดูสินค้า →</button>
         <button className="btn btn-ghost btn-sm" onClick={() => { goToOrder(null); onClose(); }}>ดูออร์เดอร์ →</button>
       </div>
     </div>
@@ -844,11 +844,20 @@ function App({ user, onLogout, onSwitchUser }) {
   const navByGroup = {};
   visibleNav.forEach(n => { (navByGroup[n.group] ||= []).push(n); });
 
-  // If current page is not allowed for this role, redirect to dashboard.
-  // permTick re-runs this when an admin edits permissions (own tab or another
-  // device via realtime), so a page just revoked closes instead of lingering.
+  /* If the current page is not allowed for this role, bounce to the first page
+     that IS allowed — "dashboard" itself can be revoked, and hard-coding it as
+     the target parked the user on the very page just taken away.
+     permTick re-runs this when an admin edits permissions (own tab or another
+     device via realtime), so a page just revoked closes instead of lingering.
+     `page` is a dep so an in-app goTo() to a revoked page can't slip through —
+     every button that navigates to a page must therefore be nav-gated too. */
+  const firstAllowedPage = () => {
+    if (allowed.has("dashboard")) return "dashboard";
+    const first = visibleNav[0];
+    return first ? first.id : "dashboard";
+  };
   useEffectApp(() => {
-    if (!allowed.has(page)) setPage("dashboard");
+    if (!allowed.has(page)) setPage(firstAllowedPage());
   }, [user.role, permTick, page]);
 
   /* Open one specific record from the global search / notifications, on a page
@@ -859,7 +868,7 @@ function App({ user, onLogout, onSwitchUser }) {
      Orders   → ติดตามพัสดุ, the only screen with a per-order detail drawer
                 (Outbound has none), falling back to จัดส่งสินค้า. */
   const pickPage = (...candidates) => candidates.find(p => allowed.has(p)) || "dashboard";
-  const goToProduct = (sku) => goTo(pickPage("inventory", "finder"), { sku });
+  const goToProduct = (sku) => goTo(pickPage("inventory", "finder"), sku ? { sku } : undefined);
   const goToOrder   = (orderId) => goTo(pickPage("tracking", "outbound"), orderId ? { orderId } : undefined);
 
   // Capability check: only admins see users/layout
@@ -905,9 +914,11 @@ function App({ user, onLogout, onSwitchUser }) {
               <span style={{ fontSize:13, color:"var(--muted)", flex:1 }}>ค้นหา SKU, ออร์เดอร์, ลูกค้า...</span>
               <span className="kbd">⌘K</span>
             </div>
-            <button className="btn btn-primary" onClick={() => setSellOpen(true)} style={{ gap: 7 }}>
-              <Icons.Cart size={14}/> ขายสินค้า
-            </button>
+            {canDo("sell") && (
+              <button className="btn btn-primary" onClick={() => setSellOpen(true)} style={{ gap: 7 }}>
+                <Icons.Cart size={14}/> ขายสินค้า
+              </button>
+            )}
             <button className="btn btn-ghost btn-icon" title="ช่วยเหลือ" onClick={() => alert("สำหรับคำถามเพิ่มเติม ติดต่อ admin@bangkokfulfill.co")}><Icons.Help size={16}/></button>
             {pendingSync > 0 && (
               <div title={`${pendingSync} รายการรอซิงค์`} style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:"var(--warning)", cursor:"default", whiteSpace:"nowrap" }}>

@@ -906,6 +906,14 @@ function roleNav(role) {
   return Array.isArray(list) ? list : [];
 }
 
+/* Can the signed-in user open this page id? Any button that navigates to another
+   top-level page must check this — the desktop shell bounces a disallowed page
+   back to the first allowed one, so an ungated cross-page button would look like
+   a dead link. Mobile uses it for the tab bar and the M_GATED_VIEWS guard. */
+function canOpenPage(navId, role) {
+  return roleNav(role).indexOf(navId) !== -1;
+}
+
 /* Capability check — canDo("viewCost") tests the signed-in user; pass a role to
    test someone else (the permission editor previews every role this way). */
 function canDo(capId, role) {
@@ -1799,7 +1807,7 @@ Object.assign(window, {
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, todayIso, bangkokDateOf, isoToThai,
-  CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canDo, capServerLocked, currentRoleId,
+  CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canOpenPage, canDo, capServerLocked, currentRoleId,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
   applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock,

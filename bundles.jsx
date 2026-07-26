@@ -810,7 +810,12 @@ function BundlePage({ pushToast }) {
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingTop: 10, borderTop: "1px solid var(--border)" }}>
                   <div>
                     <div className="tnum" style={{ fontSize: 16, fontWeight: 700 }}>฿{bundle.price.toLocaleString()}</div>
-                    <div style={{ fontSize: 11, color: "var(--success)", marginTop: 1 }}>กำไร {margin}% · มีสต็อก {avail} ชุด</div>
+                    {/* margin is cost-derived (price × (1 − margin/100) recovers the
+                        component cost exactly), so it follows viewCost like the
+                        drawer's profit tile does. Stock count stays visible. */}
+                    <div style={{ fontSize: 11, color: "var(--success)", marginTop: 1 }}>
+                      {canDo("viewCost") ? `กำไร ${margin}% · ` : ""}มีสต็อก {avail} ชุด
+                    </div>
                   </div>
                   <button
                     className="btn btn-primary btn-sm"
