@@ -1,3 +1,24 @@
+-- ─── PRE-FLIGHT GUARD (prepended to rls-policies.sql at apply time) ───
+-- Step 3 of rls-policies.sql drops EVERY policy in schema public. If some
+-- RLS-enabled table is not recreated by that script it would be left with RLS
+-- on and no policy = deny-all for every signed-in user. Abort the whole
+-- transaction up-front if any table outside the known set is RLS-enabled.
+-- (The Supabase SQL editor runs a multi-statement script in ONE implicit
+-- transaction, so raising here leaves the existing policies untouched.)
+do $$
+declare missing text;
+begin
+  select string_agg(c.relname, ', ') into missing
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity
+    and c.relname <> all (array['products','orders','order_items','bundles',
+        'bundle_items','stock_adjustments','labels','app_state','product_locations',
+        'audit_log','store_settings']);
+  if missing is not null then
+    raise exception 'ABORT: RLS-enabled tables not covered by this script: %', missing;
+  end if;
+end $$;
+
 -- ════════════════════════════════════════════════════════════════════
 --  Role-based Row Level Security for คลังพร้อมส่ง IMS
 --  Applied 2026-05-30. Re-runnable (idempotent): drops all existing

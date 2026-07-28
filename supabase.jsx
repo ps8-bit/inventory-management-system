@@ -11,8 +11,15 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 /* ═══════════════════════════════════════════
    PRODUCTS
    ═══════════════════════════════════════════ */
+/* Reads go through products_v, NOT the products table: `authenticated` no
+   longer holds SELECT on the cost column, and the view hands cost back only to
+   admin/manager (NULL for everyone else) — so a role without viewCost never
+   receives the number at all, not even in devtools. See
+   supabase/protect-cost-column.sql. Writes still target the table; the
+   products_guard_cost trigger there keeps a cost-blind client from writing the
+   masked NULL over a real cost. */
 async function dbLoadProducts() {
-  const { data, error } = await sb.from('products').select('*').order('sku');
+  const { data, error } = await sb.from('products_v').select('*').order('sku');
   if (error) { console.error('[DB] load products:', error.message); return null; }
   return data;
 }
@@ -218,6 +225,64 @@ async function dbLoadStockAdjustments(sku, limit = 10) {
     .limit(limit);
   if (error) { console.error('[DB] load stock_adjustments:', error.message); return null; }
   return data || [];
+}
+
+/* ═══════════════════════════════════════════
+   PRODUCT LOCATIONS — quantity per storage position
+   products.loc holds ONE position (the primary / pick-first shelf); this table
+   holds the real distribution for stock kept in more than one place, so a
+   product split between zone A and an upstairs box stops reporting all of it
+   downstairs. See supabase/product-locations.sql.
+   Shape returned to the app: { [sku]: [{ loc, qty, note }] }
+   ═══════════════════════════════════════════ */
+async function dbLoadProductLocs() {
+  const { data, error } = await sb.from('product_locations').select('sku, loc, qty, note');
+  if (error) {
+    // Table not migrated yet → behave exactly as before rather than breaking boot.
+    if (error.code === '42P01' || /relation .* does not exist/i.test(error.message || '')) return null;
+    console.error('[DB] load product_locations:', error.message);
+    return null;
+  }
+  const map = {};
+  (data || []).forEach(r => {
+    if (!r || !r.sku || !r.loc) return;
+    (map[r.sku] = map[r.sku] || []).push({ loc: r.loc, qty: Number(r.qty) || 0, note: r.note || '' });
+  });
+  return map;
+}
+
+/* Replace the whole split for ONE sku: delete the rows it no longer occupies,
+   then upsert the rest. Deleting first (rather than upserting and pruning after)
+   keeps a failed second step from leaving stock double-counted across a position
+   the product has actually left.
+   RLS-aware like the rest of this file: an upsert that returns 0 rows without an
+   error means the policy silently refused the write, so surface it as an error
+   instead of reporting success. DELETE is admin/manager only — a staff user
+   moving stock OUT of a position hits that, so treat a blocked delete as fatal
+   too rather than leaving a phantom pile behind. */
+async function dbSaveProductLocs(sku, rows) {
+  if (!sku) return { error: 'NO_SKU' };
+  const keep = (rows || [])
+    .filter(r => r && r.loc && (Number(r.qty) || 0) > 0)
+    .map(r => ({ sku, loc: String(r.loc), qty: Math.max(0, Math.round(Number(r.qty) || 0)),
+                 note: r.note || '', updated_at: new Date().toISOString() }));
+  const keepLocs = keep.map(r => r.loc);
+
+  let del = sb.from('product_locations').delete().eq('sku', sku);
+  // .not('loc','in',()) is invalid PostgREST — only filter when there IS a keep set.
+  if (keepLocs.length) del = del.not('loc', 'in', '(' + keepLocs.map(l => '"' + String(l).replace(/"/g, '\\"') + '"').join(',') + ')');
+  const { error: delErr } = await del;
+  if (delErr) { console.error('[DB] delete product_locations:', delErr.message); return { error: delErr.message }; }
+
+  if (!keep.length) return { ok: true };
+  const { data, error } = await sb.from('product_locations')
+    .upsert(keep, { onConflict: 'sku,loc' }).select('sku');
+  if (error) { console.error('[DB] save product_locations:', error.message); return { error: error.message }; }
+  if (!data || data.length < keep.length) {
+    console.error('[DB] save product_locations blocked:', (data || []).length, 'of', keep.length, 'rows');
+    return { error: 'PERMISSION_OR_MISSING' };
+  }
+  return { ok: true };
 }
 
 /* ═══════════════════════════════════════════
@@ -551,6 +616,14 @@ function setupRealtimeSync() {
       if (fresh) window._DB_STORE = fresh;
       window.dispatchEvent(new CustomEvent('ims-store-change'));
     })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'product_locations' }, async () => {
+      const fresh = await dbLoadProductLocs();
+      if (fresh) {
+        window._DB_PRODUCT_LOCS = fresh;
+        try { localStorage.setItem('ims_product_locs', JSON.stringify(fresh)); } catch (e) {}
+      }
+      window.dispatchEvent(new CustomEvent('ims-product-locs-change'));
+    })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_log' }, async () => {
       const fresh = await dbLoadAuditLog();
       if (fresh) window._DB_AUDIT_LOG = fresh;
@@ -713,7 +786,7 @@ async function lineBotPreview(command) {
    ═══════════════════════════════════════════ */
 async function dbInit() {
   try {
-    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms] = await Promise.all([
+    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms, productLocs] = await Promise.all([
       dbLoadProducts(),
       dbLoadOrders(),
       dbLoadBundles(),
@@ -725,7 +798,8 @@ async function dbInit() {
       dbLoadState('stock_adj'),
       dbLoadState('order_overrides'),
       dbLoadState('woo_catalog'),
-      dbLoadState('role_perms')
+      dbLoadState('role_perms'),
+      dbLoadProductLocs()
     ]);
 
     /* Hydrate global PRODUCTS array (mutated in-place so existing
@@ -742,7 +816,21 @@ async function dbInit() {
     if (storeSettings) window._DB_STORE     = storeSettings;
     if (auditLog)      window._DB_AUDIT_LOG = auditLog;
     if (Array.isArray(categories)) window._DB_CATEGORIES = categories;
-    if (Array.isArray(locations))  window._DB_LOCATIONS  = locations;
+    /* Locations is an OBJECT ({ buildings: [...] }) since the Building→Floor→
+       Position model replaced the old flat array. The previous Array.isArray
+       guard here is a leftover from that array era and silently dropped the
+       cloud tree on every boot, so a device with no ims_loc_tree mirror fell
+       back to the empty seed and showed no positions at all. Accept whatever
+       the cloud has — loadLocTree() already validates the shape and ignores a
+       legacy array. (The realtime path never had this bug, which is why the
+       tree looked fine on any tab that stayed open.) */
+    if (locations != null) window._DB_LOCATIONS = locations;
+    if (productLocs && typeof productLocs === 'object') {
+      window._DB_PRODUCT_LOCS = productLocs;
+      // Mirror so an offline relaunch still knows which shelf holds what.
+      try { localStorage.setItem('ims_product_locs', JSON.stringify(productLocs)); } catch (e) {}
+      window.dispatchEvent(new CustomEvent('ims-product-locs-change'));
+    }
     if (stockAdj && typeof stockAdj === 'object') window._DB_STOCK_ADJ = stockAdj;
     if (orderOverrides && typeof orderOverrides === 'object') window._DB_ORDER_OVERRIDES = orderOverrides;
     if (wooCatalog && typeof wooCatalog === 'object') window._DB_WOO_CATALOG = wooCatalog;
@@ -953,6 +1041,7 @@ Object.assign(window, {
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,
   dbInsertStockAdjustment, dbLoadStockAdjustments,
+  dbLoadProductLocs,   dbSaveProductLocs,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,
   dbLoadLabels,        dbUpsertLabels,       dbDeleteLabel,

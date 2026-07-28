@@ -80,6 +80,19 @@ create table if not exists stock_adjustments (
   created_by text
 );
 
+-- ---------- 4b. ตำแหน่งจัดเก็บหลายที่ต่อ 1 SKU (Product locations) ----------
+-- จำนวนต่อตำแหน่ง 1 แถว = 1 SKU ต่อ 1 ตำแหน่ง (สินค้าที่เก็บทั้งโซน A และ
+-- กล่องสำรองชั้นบน). products.loc ยังใช้เป็น "ตำแหน่งหลัก" ต่อไป
+-- INVARIANT: sum(qty) ต่อ sku = products.qty — ดู supabase/product-locations.sql
+create table if not exists product_locations (
+  sku        text    not null references products(sku) on delete cascade,
+  loc        text    not null,
+  qty        integer not null default 0 check (qty >= 0),
+  note       text,
+  updated_at timestamptz default now(),
+  primary key (sku, loc)
+);
+
 -- ---------- 5. ประวัติการแก้ไข (Audit log) ----------
 create table if not exists audit_log (
   id         bigint generated always as identity primary key,
@@ -117,6 +130,7 @@ alter table bundle_items      enable row level security;
 alter table orders            enable row level security;
 alter table order_items       enable row level security;
 alter table stock_adjustments enable row level security;
+alter table product_locations enable row level security;
 alter table audit_log         enable row level security;
 alter table labels            enable row level security;
 alter table store_settings    enable row level security;
@@ -125,7 +139,8 @@ do $$
 declare t text;
 begin
   foreach t in array array['products','bundles','bundle_items','orders',
-                           'order_items','stock_adjustments','audit_log','labels','store_settings']
+                           'order_items','stock_adjustments','product_locations',
+                           'audit_log','labels','store_settings']
   loop
     execute format(
       'create policy "เปิดให้ใช้งานช่วงทดลอง" on %I for all using (true) with check (true);', t);
