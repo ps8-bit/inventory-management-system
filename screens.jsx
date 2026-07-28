@@ -4063,7 +4063,13 @@ function Locations({ goTo }) {
 }
 
 function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
-  const items = PRODUCTS.filter(p => (p.loc || "") === loc.code);
+  /* Everything physically here — primary loc OR split stock parked here. Filtering
+     on p.loc alone hid every item whose main shelf is elsewhere: the SKU-count badge
+     (skusInLocation) counts the split, so a box could read "10 SKU" and list 7, and
+     boxes that only ever hold split stock (กล่อง 3–6) looked empty. */
+  const items = (typeof productsInLocation === "function")
+    ? productsInLocation(loc.code)
+    : PRODUCTS.filter(p => (p.loc || "") === loc.code);
   // The product the user searched for floats to the top of the shelf list.
   if (highlightSku) items.sort((a, b) => (b.sku === highlightSku) - (a.sku === highlightSku));
 
@@ -4234,15 +4240,27 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
             {items.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)", padding: 12, textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้{canAssign ? " — กด “เพิ่มสินค้า” เพื่อเลือกสินค้าเข้าตำแหน่ง" : ""}</div>}
             {items.slice(0, 40).map(p => {
               const hl = p.sku === highlightSku;
+              // Pieces AT THIS POSITION, not the product's grand total — a picker
+              // sent here for 6 must not read the 12 that include another shelf.
+              const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, loc.code) : p.qty;
+              const isPrimary = (p.loc || "") === loc.code;
+              const main = !isPrimary && locIsStored(p.loc) ? locParts(p.loc) : null;
               return (
                 <div key={p.sku} className="row" style={{ gap: 10, padding: 10, background: hl ? "var(--accent-soft)" : "var(--surface-2)", border: hl ? "1.5px solid var(--accent)" : "1px solid transparent", borderRadius: 8 }}>
                   {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={40} radius={8}/>}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-                    <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</div>
+                    <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
+                      {p.sku}{main ? <span style={{ fontFamily: "inherit" }}> · หลักอยู่ {main.pos}</span> : null}
+                    </div>
                   </div>
-                  <div className="tnum" style={{ fontSize: 14, fontWeight: 500, flexShrink: 0 }}>{p.qty} ชิ้น</div>
-                  {canAssign && <button className="btn btn-ghost btn-icon" title="นำออกจากตำแหน่งนี้" style={{ flexShrink: 0 }} onClick={() => unassign(p)}><Icons.X size={13}/></button>}
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    <div className="tnum" style={{ fontSize: 14, fontWeight: 500 }}>{here} ชิ้น</div>
+                    {here !== p.qty && <div style={{ fontSize: 10, color: "var(--muted)" }}>รวมทุกที่ {p.qty}</div>}
+                  </div>
+                  {/* Only the product whose PRIMARY shelf is here can be "removed" from it —
+                      split stock is edited in the product's own per-position panel. */}
+                  {canAssign && isPrimary && <button className="btn btn-ghost btn-icon" title="นำออกจากตำแหน่งนี้" style={{ flexShrink: 0 }} onClick={() => unassign(p)}><Icons.X size={13}/></button>}
                 </div>
               );
             })}

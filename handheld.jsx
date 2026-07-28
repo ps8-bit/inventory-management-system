@@ -3449,7 +3449,11 @@ function MLocations({ ctx }) {
       </div>
 
       {selectedPos && (() => {
-        const items = PRODUCTS.filter(p => (p.loc || "") === selectedPos.code);
+        /* Everything physically here — primary loc OR split stock parked here
+           (same rule the SKU-count badge uses, so the count and the list agree). */
+        const items = (typeof productsInLocation === "function")
+          ? productsInLocation(selectedPos.code)
+          : PRODUCTS.filter(p => (p.loc || "") === selectedPos.code);
         // The product the user searched for floats to the top of the shelf list.
         if (selectedPos.highlightSku) items.sort((a, b) => (b.sku === selectedPos.highlightSku) - (a.sku === selectedPos.highlightSku));
         return (
@@ -3545,15 +3549,24 @@ function MLocations({ ctx }) {
                   ? <div style={{ padding: 16, textAlign: "center", color: "var(--muted)", fontSize: 12, border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้{canAssign ? " — แตะ “เพิ่มสินค้า” เพื่อเลือกสินค้าเข้าตำแหน่ง" : ""}</div>
                   : items.slice(0, showNItems).map(p => {
                     const hl = p.sku === selectedPos.highlightSku;
+                    // Pieces AT THIS POSITION, not the product's grand total.
+                    const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, selectedPos.code) : p.qty;
+                    const isPrimary = (p.loc || "") === selectedPos.code;
+                    const main = !isPrimary && locIsStored(p.loc) ? locParts(p.loc) : null;
                     return (
                       <div key={p.sku} className="row" style={{ gap: 10, padding: "8px 10px", background: hl ? "var(--accent-soft)" : "var(--surface-2)", border: hl ? "1.5px solid var(--accent)" : "1px solid transparent", borderRadius: 8, marginBottom: 6 }}>
                         <ProductImageThumb sku={p.sku} size={40} radius={8}/>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-                          <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</div>
+                          <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
+                            {p.sku}{main ? <span style={{ fontFamily: "inherit" }}> · หลักอยู่ {main.pos}</span> : null}
+                          </div>
                         </div>
-                        <div className="tnum" style={{ fontSize: 14, fontWeight: 500, flexShrink: 0 }}>{p.qty} ชิ้น</div>
-                        {canAssign && <button style={{ display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0, cursor: "pointer" }} title="นำออกจากตำแหน่งนี้" onClick={() => unassignFromPos(p)}><Icons.X size={14}/></button>}
+                        <div style={{ textAlign: "right", flexShrink: 0 }}>
+                          <div className="tnum" style={{ fontSize: 14, fontWeight: 500 }}>{here} ชิ้น</div>
+                          {here !== p.qty && <div style={{ fontSize: 10, color: "var(--muted)" }}>รวม {p.qty}</div>}
+                        </div>
+                        {canAssign && isPrimary && <button style={{ display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0, cursor: "pointer" }} title="นำออกจากตำแหน่งนี้" onClick={() => unassignFromPos(p)}><Icons.X size={14}/></button>}
                       </div>
                     );
                   })

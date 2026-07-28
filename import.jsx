@@ -22,6 +22,9 @@ const IMPORT_FIELDS = [
   { key: "name",     label: "ชื่อสินค้า", required: true, type: "text",
     kw: ["ชื่อสินค้า", "ชื่อ", "product name", "name", "title", "รายการ"],
     example: "หูฟัง In-Ear Pro รุ่น 2025", hint: "ชื่อที่แสดงในระบบ" },
+  { key: "size",     label: "ไซซ์", type: "text",
+    kw: ["ไซซ์", "ไซส์", "ขนาด", "size"],
+    example: "L", hint: "ถ้ามี จะถูกต่อท้าย SKU เป็น -L (รหัสที่ลงท้ายด้วยไซซ์อยู่แล้วจะไม่ต่อซ้ำ)" },
   { key: "cat",      label: "หมวดหมู่", type: "text",
     kw: ["หมวดหมู่", "หมวด", "ประเภทสินค้า", "ประเภท", "category", "categories", "cat"],
     example: "อิเล็กทรอนิกส์", hint: "ถ้าเว้นว่างสำหรับสินค้าใหม่จะเป็น “ทั่วไป”", default: "ทั่วไป" },
@@ -51,10 +54,13 @@ const IMPORT_FIELDS = [
     example: "https://example.com/p.jpg", hint: "ต้องเป็น http/https — จะถูกใส่เป็นรูปสินค้า" }
 ];
 
+/* Column order must track IMPORT_FIELDS exactly — the template writer zips the
+   two together. The middle row demonstrates the size column: it imports as
+   TH-NEW-102-L. */
 const SAMPLE_ROWS = [
-  ["TH-NEW-101", "หูฟัง In-Ear Pro รุ่น 2025",     "อิเล็กทรอนิกส์",     "SoundMax",  "ตึกพาณิชย์ › ชั้น 1 › A1", 1290, 800, 80,  25, "Tech Wave Co.",  ""],
-  ["TH-NEW-102", "เสื้อโปโล Cotton สีกรม Size L",  "เสื้อผ้า",           "BKK Wear",  "ตึกพาณิชย์ › ชั้น 1 › A2", 590,  310, 120, 40, "บางกอกแฟชั่น",   ""],
-  ["TH-NEW-103", "กล่องเก็บของพับได้ 30L",         "ของใช้ในบ้าน",       "HomeFit",   "ตึกพาณิชย์ › ชั้น 2 › B1", 390,  205, 60,  20, "Comfort Living", ""]
+  ["TH-NEW-101", "หูฟัง In-Ear Pro รุ่น 2025",     "",   "อิเล็กทรอนิกส์",     "SoundMax",  "ตึกพาณิชย์ › ชั้น 1 › A1", 1290, 800, 80,  25, "Tech Wave Co.",  ""],
+  ["TH-NEW-102", "เสื้อโปโล Cotton สีกรม",         "L",  "เสื้อผ้า",           "BKK Wear",  "ตึกพาณิชย์ › ชั้น 1 › A2", 590,  310, 120, 40, "บางกอกแฟชั่น",   ""],
+  ["TH-NEW-103", "กล่องเก็บของพับได้ 30L",         "",   "ของใช้ในบ้าน",       "HomeFit",   "ตึกพาณิชย์ › ชั้น 2 › B1", 390,  205, 60,  20, "Comfort Living", ""]
 ];
 
 /* How an existing SKU is treated. Default is keepQty: a re-import is nearly
@@ -122,6 +128,43 @@ function buildImportRaws(body, map, fields) {
   return out;
 }
 
+/* ── Size column → SKU suffix ──
+   The stock-count sheet keeps ไซซ์ in its own column while the catalogue (and
+   the webstore) encode it in the code itself: AFG-BT22-MCBK-S, TT-CX1-BK-L.
+   Importing without this collapses every size of a colour into ONE row — which
+   is exactly how BAT-BT01-BK ended up holding 32 belts across S and M with no
+   way to pick or sell by size.
+
+   IDEMPOTENT BY DESIGN. Some rows already carry the size in the code AND repeat
+   it in the ไซซ์ column (TT-CX1-BK-S with ไซซ์ = S); appending blindly there
+   would produce TT-CX1-BK-S-S. So append only when the code doesn't already end
+   in that token — which also makes re-importing the same file a no-op.
+
+   Only recognised size tokens are appended. A free-text size ("ยาว 120 ซม.")
+   must never become part of a primary key, so it is left off and the caller
+   warns instead. */
+const SIZE_TOKENS = /^(XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|4XL|\d{2,3})$/;
+function normSizeToken(size) {
+  const z = String(size == null ? "" : size).trim().toUpperCase().replace(/\s+/g, "");
+  return SIZE_TOKENS.test(z) ? z : "";
+}
+function composeSkuWithSize(sku, size) {
+  const s = String(sku == null ? "" : sku).trim();
+  const z = normSizeToken(size);
+  if (!s || !z) return s;
+  const tail = s.toUpperCase().split("-").pop();
+  return tail === z ? s : s + "-" + z;
+}
+/* Mirror the suffix into the display name, since products has no size column
+   and a picking list would otherwise show several identical rows. Skipped when
+   the name already carries the marker, so re-imports don't stack "[L] [L]". */
+function applySizeToName(name, size) {
+  const n = String(name == null ? "" : name).trim();
+  const z = normSizeToken(size);
+  if (!n || !z) return n;
+  return n.toUpperCase().indexOf("[" + z + "]") >= 0 ? n : n + " [" + z + "]";
+}
+
 /* Validate + classify every row against the live catalog.
    Errors block a row; warnings never do. `_state` is what will actually happen:
      "new" | "update" | "skip" | "error"
@@ -138,15 +181,26 @@ function validateImportRows(raws, opt) {
 
   return raws.map(r => {
     const errors = [], warns = [];
-    let sku = String(r.sku || "").trim();
+    const has  = (k) => mapped.has(k) && String(r[k] == null ? "" : r[k]).trim() !== "";
+
+    /* Fold the size column into the SKU BEFORE anything keys off it — the
+       composed code is the row's identity, so the duplicate check, the
+       existing-product lookup and the new/update decision must all see it. */
+    const rawSku  = String(r.sku || "").trim();
+    const sizeRaw = has("size") ? String(r.size).trim() : "";
+    const sizeTok = normSizeToken(sizeRaw);
+    let sku = composeSkuWithSize(rawSku, sizeRaw);
     if (opt.normSku) sku = sku.toUpperCase();
     const key  = sku.toLowerCase();
-    const name = String(r.name || "").trim();
-    const has  = (k) => mapped.has(k) && String(r[k] == null ? "" : r[k]).trim() !== "";
+    const name = applySizeToName(String(r.name || "").trim(), sizeRaw);
 
     if (!sku)  errors.push("ไม่มี SKU");
     if (!name) errors.push("ไม่มีชื่อสินค้า");
     if (sku && /\s/.test(sku)) warns.push("SKU มีช่องว่าง — ตรวจว่าถูกต้อง");
+    // A size we can't turn into a token is dropped rather than pasted into a
+    // primary key — say so, or the row silently merges with its siblings.
+    if (sizeRaw && !sizeTok) warns.push("ไซซ์ “" + sizeRaw + "” ไม่เข้ารูปแบบมาตรฐาน — ไม่ได้ต่อท้าย SKU");
+    else if (sizeTok && sku !== rawSku) warns.push("ต่อไซซ์ท้าย SKU: " + rawSku + " → " + sku);
 
     // Numbers: strip thousands separators / ฿ before parsing; blank = "not provided".
     const num = (k, label, int) => {
