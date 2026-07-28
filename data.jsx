@@ -12,6 +12,19 @@ if (typeof window !== "undefined" && !window.__IMS_INIT) {
 
 const PRODUCTS = [];
 
+/* ── omit(obj, ...keys) — ALWAYS use this instead of `const {a, ...rest} = obj` ──
+   Object-rest destructuring is unsafe in this project. Babel-standalone compiles
+   it to a top-level `var _excluded = ["a"]` and every .jsx file runs as a classic
+   script in ONE global scope, so the LAST-loaded file's `_excluded` silently
+   overwrites every earlier file's — and the rest-object then keeps keys it was
+   supposed to drop. It fails quietly, at runtime, in whichever file loads first.
+   Verified 2026-07-26 (qty leaking through updateManyProducts / importProductsBulk). */
+function omit(obj, ...keys) {
+  const out = {};
+  Object.keys(obj || {}).forEach(k => { if (keys.indexOf(k) === -1) out[k] = obj[k]; });
+  return out;
+}
+
 const stockStatus = (p) => {
   if (p.qty === 0) return { key: "out", label: "หมดสต็อก", cls: "badge-danger" };
   if (p.qty <= p.reorder) return { key: "low", label: "ต่ำกว่าจุดสั่งซื้อ", cls: "badge-warning" };
@@ -173,11 +186,76 @@ function updateManyProducts(skus, changes) {
   PRODUCTS.forEach(p => { if (set.has(p.sku)) { Object.assign(p, changes); affected.push(p.sku); } });
   if (!affected.length) return;
   _persistProductsLocal();
-  const { qty, ...fields } = changes;
+  const fields = omit(changes, "qty");
   if (Object.keys(fields).length) _syncManyFields(affected, fields);
   // A bulk qty set (rare) is absolute → scoped row writes, not a per-sku delta.
   if ('qty' in changes) _syncProductRows(affected);
 }
+/* ── Bulk product import (CSV / Excel) ──
+   Applies MANY rows in one pass: mutate PRODUCTS locally, then persist only the
+   touched skus with a chunked, SCOPED upsert. Deliberately NOT saveProductStore()
+   (which rewrites the whole catalog and can clobber another device's stock on
+   unrelated skus) and NOT one request per row (a 500-row file would fire 500).
+
+   Each item: { sku, values, mode }
+     "add"     — create a new product (values absolute, reserved starts at 0)
+     "set"     — existing sku, overwrite everything INCLUDING qty (file is truth)
+     "keepQty" — existing sku, overwrite every field EXCEPT qty/reserved
+     "addQty"  — existing sku, overwrite fields and ADD values.qty to current stock
+     "skip"    — ignored entirely
+   A "set"/"keepQty"/"addQty" item whose sku doesn't exist is created instead, and
+   an "add" whose sku DOES exist is treated as "keepQty" — the caller classified
+   against a snapshot, so a row can't silently vanish if the catalog moved under it.
+
+   Note on qty: every mode persists via a full-row upsert, so even "keepQty" writes
+   the qty this device currently holds. That's the same "spreadsheet is truth"
+   semantic as a stock-take — do not call this from an incremental edit path.
+
+   onProgress(done, total) is called per chunk. Async: resolves after the DB write
+   settles, with { added, updated, skipped, skus, error? }. */
+async function importProductsBulk(items, onProgress) {
+  const list = Array.isArray(items) ? items : [];
+  const touched = [];
+  let added = 0, updated = 0, skipped = 0;
+
+  list.forEach(it => {
+    const sku = String((it && it.sku) || "").trim();
+    if (!sku || !it || it.mode === "skip") { skipped++; return; }
+    const v = it.values || {};
+    const rawQty = v.qty;
+    const fields = omit(v, "qty", "reserved");   // stock is applied per-mode below
+    const cur = PRODUCTS.find(p => p.sku === sku);
+
+    if (!cur) {
+      PRODUCTS.unshift({ reserved: 0, ...fields, sku, qty: Math.max(0, Number(rawQty) || 0) });
+      added++; touched.push(sku);
+      return;
+    }
+    Object.assign(cur, fields);
+    if (it.mode === "set")          cur.qty = Math.max(0, Number(rawQty) || 0);
+    else if (it.mode === "addQty")  cur.qty = Math.max(0, (Number(cur.qty) || 0) + (Number(rawQty) || 0));
+    // "add" on an existing sku and "keepQty" both leave cur.qty untouched.
+    updated++; touched.push(sku);
+  });
+
+  if (!touched.length) { if (onProgress) onProgress(0, 0); return { added: 0, updated: 0, skipped, skus: [] }; }
+
+  _persistProductsLocal();
+  if (!window.dbUpsertProducts) return { added, updated, skipped, skus: touched, offline: true };
+
+  const set = new Set(touched);
+  const rows = PRODUCTS.filter(p => set.has(p.sku));
+  const CHUNK = 200;
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    let res;
+    try { res = await dbUpsertProducts(rows.slice(i, i + CHUNK)); }
+    catch (e) { _productWriteToast(); return { added, updated, skipped, skus: touched, error: (e && e.message) || String(e) }; }
+    if (res && res.error) { _onProductWriteResult(res); return { added, updated, skipped, skus: touched, error: res.error }; }
+    if (onProgress) onProgress(Math.min(i + CHUNK, rows.length), rows.length);
+  }
+  return { added, updated, skipped, skus: touched };
+}
+
 async function removeProductsFromStore(skus) {
   const set = new Set(Array.isArray(skus) ? skus : [skus]);
   // Optimistic local removal (instant UI). Note: we deliberately do NOT call
@@ -675,9 +753,125 @@ function removePosition(building, floor, name) {
   return true;
 }
 
-// Live SKU count for a position code = products whose loc matches.
+/* ── Per-position stock split (table public.product_locations) ──────────
+   p.loc holds exactly ONE position path, so a product physically kept in two
+   places (zone A downstairs + a backup box upstairs) could only ever record
+   one of them — the box quantity was invisible, and 102 pieces were filed on
+   the wrong floor. The real distribution therefore lives in a side table,
+   mirrored here as { [sku]: [{ loc, qty, note }] }.
+
+   p.loc SURVIVES as the *primary* position (pick from here first), so every
+   existing `p.loc` reader keeps working untouched. This map is additive:
+   a sku with no rows returns [] and callers fall back to p.loc + p.qty.
+   INVARIANT: the rows for a sku sum to p.qty (view product_location_audit
+   reports any drift; only genuinely unstored products may be absent). */
+function loadProductLocs() {
+  const cloud = window._DB_PRODUCT_LOCS;
+  if (cloud && typeof cloud === "object") return cloud;
+  try { const s = localStorage.getItem("ims_product_locs"); if (s) { const o = JSON.parse(s); if (o && typeof o === "object") return o; } } catch (e) {}
+  return {};
+}
+function _mirrorProductLocs(map) {
+  window._DB_PRODUCT_LOCS = map;
+  try { localStorage.setItem("ims_product_locs", JSON.stringify(map)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-product-locs-change"));
+}
+/* Rows for one sku, biggest pile first so "where do I actually go" reads top-down.
+   The primary position (p.loc) is pinned first regardless of size. */
+function locSplitFor(sku, primaryLoc) {
+  const rows = loadProductLocs()[sku];
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const out = rows.map(r => ({ loc: r.loc, qty: Number(r.qty) || 0, note: r.note || "" }));
+  out.sort((a, b) => (a.loc === primaryLoc ? -1 : b.loc === primaryLoc ? 1 : b.qty - a.qty));
+  return out;
+}
+// True only when the product really is in more than one place.
+function hasLocSplit(sku) { return locSplitFor(sku).length > 1; }
+function locSplitTotal(sku) { return locSplitFor(sku).reduce((n, r) => n + r.qty, 0); }
+/* Display list for any product: the recorded split when there is one, otherwise
+   a single synthetic row from p.loc/p.qty. Always safe to map over. */
+function productPositions(p) {
+  if (!p) return [];
+  const rows = locSplitFor(p.sku, p.loc);
+  if (rows.length) return rows;
+  return p.loc ? [{ loc: p.loc, qty: Number(p.qty) || 0, note: "" }] : [];
+}
+/* Pieces of this sku at one position — used by pick lists so staff are sent to
+   the shelf that can actually fill the order. Falls back to the whole qty when
+   no split is recorded and the position is the product's own loc. */
+function qtyAtLocation(sku, code) {
+  const rows = loadProductLocs()[sku];
+  if (Array.isArray(rows) && rows.length) {
+    const hit = rows.find(r => r.loc === code);
+    return hit ? Number(hit.qty) || 0 : 0;
+  }
+  const p = PRODUCTS.find(x => x.sku === sku);
+  return p && (p.loc || "") === code ? Number(p.qty) || 0 : 0;
+}
+
+/* Live SKU count for a position code. Counts a product when EITHER its primary
+   loc matches or it has split stock parked there — otherwise the four boxes that
+   only ever appear in the split (กล่อง 3–6) would render as empty shelves. */
 function skusInLocation(code) {
-  return PRODUCTS.filter(p => (p.loc || "") === code).length;
+  const map = loadProductLocs();
+  return PRODUCTS.filter(p => {
+    if ((p.loc || "") === code) return true;
+    const rows = map[p.sku];
+    return Array.isArray(rows) && rows.some(r => r.loc === code && (Number(r.qty) || 0) > 0);
+  }).length;
+}
+// Products physically present at a position (primary or split), for the drill-down.
+function productsInLocation(code) {
+  const map = loadProductLocs();
+  return PRODUCTS.filter(p => {
+    if ((p.loc || "") === code) return true;
+    const rows = map[p.sku];
+    return Array.isArray(rows) && rows.some(r => r.loc === code && (Number(r.qty) || 0) > 0);
+  });
+}
+
+/* Record the real distribution for one sku. rows = [{ loc, qty }].
+   Enforces the invariant HERE rather than trusting callers: the pieces you place
+   must add up to the stock you have, or the split would quietly contradict
+   p.qty and every downstream total. Positions at 0 are dropped, not stored.
+   Optimistic — mirrors locally first, rolls back if the DB rejects the write
+   (RLS: staff and up inside working hours). Returns { ok, error }. */
+async function saveLocSplit(sku, rows) {
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return { ok: false, error: "ไม่พบสินค้า " + sku };
+  const clean = (Array.isArray(rows) ? rows : [])
+    .map(r => ({ loc: String(r.loc || "").trim(), qty: Math.max(0, Math.round(Number(r.qty) || 0)) }))
+    .filter(r => r.loc && r.qty > 0);
+  const seen = new Set();
+  for (const r of clean) {
+    if (seen.has(r.loc)) return { ok: false, error: "ตำแหน่งซ้ำ: " + r.loc };
+    seen.add(r.loc);
+  }
+  const sum = clean.reduce((n, r) => n + r.qty, 0);
+  const have = Number(p.qty) || 0;
+  if (clean.length && sum !== have) {
+    return { ok: false, error: `จำนวนรวมทุกตำแหน่ง (${sum}) ไม่เท่ากับสต็อกของ ${sku} (${have}) — แก้ให้ตรงกันก่อนบันทึก` };
+  }
+  const map = loadProductLocs();
+  const prev = map[sku];
+  const next = { ...map };
+  if (clean.length) next[sku] = clean; else delete next[sku];
+  _mirrorProductLocs(next);
+  // Keep the primary position pointing at somewhere the stock actually is.
+  const primaryStillValid = !clean.length || clean.some(r => r.loc === p.loc);
+  const newPrimary = primaryStillValid ? p.loc : clean[0].loc;
+  if (typeof dbSaveProductLocs !== "function") return { ok: true, error: "" };
+  const res = await dbSaveProductLocs(sku, clean);
+  if (res && res.error) {
+    const back = { ...loadProductLocs() };
+    if (prev) back[sku] = prev; else delete back[sku];
+    _mirrorProductLocs(back);
+    return { ok: false, error: res.error };
+  }
+  if (newPrimary !== p.loc && typeof updateProductInStore === "function") {
+    updateProductInStore(sku, { loc: newPrimary });
+  }
+  return { ok: true, error: "" };
 }
 
 /* Product-finder search (ตำแหน่งสินค้า): match by SKU or name — the SKU doubles
@@ -1827,15 +2021,17 @@ Object.assign(window, {
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem,
   loadStockTake, saveStockTake, applyStockCounts,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
+  omit,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, todayIso, bangkokDateOf, isoToThai,
   CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canOpenPage, canDo, capServerLocked, currentRoleId,
-  saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, removeProductsFromStore, resetProductStore,
+  saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, importProductsBulk, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,
   applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock,
   loadOrders, saveOrders, appendOrder,
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
   storedLocSet, locIsStored, countUnstoredProducts,
+  loadProductLocs, locSplitFor, hasLocSplit, locSplitTotal, productPositions, qtyAtLocation, productsInLocation, saveLocSplit,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   loadInboundDraft, saveInboundDraft,

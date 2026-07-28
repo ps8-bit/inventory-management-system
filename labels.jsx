@@ -715,8 +715,8 @@ function saveLabels(labels) {
     const now = new Date().toISOString();
     labels = labels.map(l => {
       const before = prevById[l.id];
-      const { updatedAt: _a, ...lRest } = l;
-      const { updatedAt: _b, ...beforeRest } = before || {};
+      const lRest = omit(l, "updatedAt");
+      const beforeRest = omit(before || {}, "updatedAt");
       const changed = !before || JSON.stringify(lRest) !== JSON.stringify(beforeRest);
       return changed ? { ...l, updatedAt: now } : l;
     });

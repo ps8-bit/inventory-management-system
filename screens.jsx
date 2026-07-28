@@ -2321,7 +2321,7 @@ function IssueModal({ onClose, onSubmit }) {
 }
 
 function SmallStat({ label, value, hint, tone }) {
-  const map = { warning: "var(--warning)", info: "var(--info)", success: "var(--success)" };
+  const map = { warning: "var(--warning)", info: "var(--info)", success: "var(--success)", danger: "var(--danger)" };
   return (
     <div className="card">
       <div className="row" style={{ justifyContent: "space-between" }}>
@@ -3144,6 +3144,131 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
   );
 }
 
+/* ตำแหน่งจัดเก็บแยกจำนวน — one SKU, several shelves.
+   product.loc names only the PRIMARY position, so stock kept in a second place
+   (zone A downstairs + a backup box upstairs) had nowhere to be recorded and
+   was silently reported as all-downstairs. The real distribution lives in
+   product_locations; this panel shows it and lets an editor record it.
+
+   Stays quiet for the ordinary single-position product — an inventory where
+   every drawer sprouts a location table teaches staff to ignore it. It appears
+   only when a split actually exists, or behind one small button for editors. */
+function LocationSplitPanel({ product, pushToast }) {
+  const [tick, setTick] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const toast = pushToast || (() => {});
+
+  useEffect(() => {
+    const h = () => setTick(n => n + 1);
+    window.addEventListener("ims-product-locs-change", h);
+    return () => window.removeEventListener("ims-product-locs-change", h);
+  }, []);
+  // Never carry an open editor across to a different product.
+  useEffect(() => { setEditing(false); }, [product.sku]);
+
+  const split = typeof productPositions === "function" ? productPositions(product) : [];
+  const isSplit = split.length > 1;
+  const canEdit = typeof canDo === "function" ? canDo("editProduct") : false;
+  const codes = typeof allLocationCodes === "function" ? allLocationCodes() : [];
+  const qty = Number(product.qty) || 0;
+
+  const startEdit = () => {
+    setRows(split.length ? split.map(r => ({ loc: r.loc, qty: r.qty }))
+                         : [{ loc: product.loc || "", qty }]);
+    setEditing(true);
+  };
+  const sum = rows.reduce((n, r) => n + (Number(r.qty) || 0), 0);
+  const balanced = sum === qty;
+  const setRow = (i, patch) => setRows(rs => rs.map((r, n) => (n === i ? { ...r, ...patch } : r)));
+
+  const save = async () => {
+    if (typeof saveLocSplit !== "function") { toast("ยังไม่พร้อมใช้งาน"); return; }
+    setBusy(true);
+    const res = await saveLocSplit(product.sku, rows);
+    setBusy(false);
+    if (!res || !res.ok) { toast((res && res.error) || "บันทึกไม่สำเร็จ"); return; }
+    toast("บันทึกตำแหน่งแยกจำนวนแล้ว");
+    setEditing(false);
+  };
+
+  if (!isSplit && !editing) {
+    if (!canEdit) return null;
+    return (
+      <button className="btn btn-sm btn-ghost" style={{ marginTop: 10 }} onClick={startEdit}>
+        <Icons.Plus size={13}/> แยกจำนวนตามตำแหน่ง
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 14, padding: 14, background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
+      <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
+        <div className="eyebrow">เก็บไว้ {split.length} ตำแหน่ง</div>
+        {!editing && canEdit && (
+          <button className="btn btn-sm btn-ghost" onClick={startEdit}><Icons.Edit size={13}/> แก้ไข</button>
+        )}
+      </div>
+
+      {!editing && split.map((r, i) => {
+        const lp = typeof locParts === "function" ? locParts(r.loc) : null;
+        const primary = r.loc === product.loc;
+        return (
+          <div key={r.loc + i} className="row" style={{ justifyContent: "space-between", padding: "7px 0", borderTop: i ? "1px solid var(--border)" : "none" }}>
+            <div style={{ minWidth: 0 }}>
+              <div className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{lp ? lp.pos : r.loc}</div>
+              <div style={{ fontSize: 10.5, color: "var(--muted)" }}>
+                {lp ? lp.building + (lp.floor ? " · " + lp.floor : "") : ""}
+                {primary && <span style={{ marginLeft: 6, color: "var(--accent)" }}>· หยิบก่อน</span>}
+              </div>
+            </div>
+            <div className="tnum" style={{ fontSize: 15, fontWeight: 600 }}>{r.qty}</div>
+          </div>
+        );
+      })}
+
+      {editing && (
+        <>
+          {rows.map((r, i) => (
+            <div key={i} className="row" style={{ gap: 8, marginBottom: 8 }}>
+              <input className="input" style={{ flex: 1, fontSize: 12 }} value={r.loc} list="loc-positions-split"
+                     placeholder="เลือกตำแหน่ง" onChange={e => setRow(i, { loc: e.target.value })}/>
+              <input className="input tnum" type="number" min="0" style={{ width: 86, textAlign: "right" }}
+                     value={r.qty} onChange={e => setRow(i, { qty: e.target.value })}/>
+              <button className="btn btn-sm btn-ghost btn-icon" title="ลบตำแหน่งนี้"
+                      onClick={() => setRows(rs => rs.filter((_, n) => n !== i))}><Icons.X size={13}/></button>
+            </div>
+          ))}
+          <datalist id="loc-positions-split">{codes.map(c => <option key={c} value={c}/>)}</datalist>
+          <button className="btn btn-sm btn-ghost" onClick={() => setRows(rs => rs.concat([{ loc: "", qty: 0 }]))}>
+            <Icons.Plus size={13}/> เพิ่มตำแหน่ง
+          </button>
+          {/* The invariant, shown live: you cannot place more pieces than you own.
+              saveLocSplit() re-checks server-side of this component, so a stale
+              qty from another device still can't write a contradictory split. */}
+          <div className="row" style={{ justifyContent: "space-between", marginTop: 12, fontSize: 12,
+                                        color: balanced ? "var(--muted)" : "var(--danger)" }}>
+            <span>รวมทุกตำแหน่ง</span>
+            <span className="tnum" style={{ fontWeight: 600 }}>{sum} / {qty} ชิ้น</span>
+          </div>
+          {!balanced && (
+            <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>
+              ต้องเท่ากับสต็อกทั้งหมด ({qty} ชิ้น) จึงจะบันทึกได้
+            </div>
+          )}
+          <div className="row" style={{ gap: 8, marginTop: 12 }}>
+            <button className="btn btn-sm btn-primary" disabled={!balanced || busy} onClick={save}>
+              {busy ? "กำลังบันทึก..." : "บันทึก"}
+            </button>
+            <button className="btn btn-sm btn-ghost" disabled={busy} onClick={() => setEditing(false)}>ยกเลิก</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ProductDrawer({ product, onClose, pushToast }) {
   const [editOpen, setEditOpen] = useState(false);
   const [adjOpen, setAdjOpen] = useState(false);
@@ -3204,7 +3329,16 @@ function ProductDrawer({ product, onClose, pushToast }) {
             <Stat label="SKU" value={<span className="mono">{product.sku}</span>}/>
             <Stat label="หมวดหมู่" value={product.cat}/>
             <Stat label="ตำแหน่ง" value={locIsStored(product.loc)
-              ? <span className="mono">{product.loc}</span>
+              ? <span>
+                  <span className="mono">{product.loc}</span>
+                  {/* A split product's loc is only where you pick FIRST — say so,
+                      or the drawer reads as "all 83 are in A" like it used to. */}
+                  {typeof hasLocSplit === "function" && hasLocSplit(product.sku) && (
+                    <span className="badge badge-neutral" style={{ fontSize: 9.5, marginLeft: 6 }}>
+                      +{productPositions(product).length - 1} ที่
+                    </span>
+                  )}
+                </span>
               : <span className="badge badge-warning" style={{ fontSize: 10 }} title={product.loc ? `ค่าเดิม: ${product.loc}` : undefined}><Icons.Warn size={10}/> ยังไม่จัดเก็บ</span>}/>
             <Stat label="แบรนด์" value={product.brand || "—"}/>
             <Stat label="ผู้จัดส่ง" value={product.supplier}/>
@@ -3213,6 +3347,8 @@ function ProductDrawer({ product, onClose, pushToast }) {
             {canDo("viewCost") && <Stat label="กำไรต่อชิ้น" value={`฿${(product.price - (product.cost ?? Math.round(product.price * 0.6))).toLocaleString()} · ${Math.round((1 - (product.cost ?? product.price * 0.6) / product.price) * 100)}%`}/>}
             <Stat label="จุดสั่งซื้อใหม่" value={product.reorder + " ชิ้น"}/>
           </div>
+
+          <LocationSplitPanel product={product} pushToast={pushToast}/>
 
           <div style={{ marginTop: 18, padding: 16, background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
             <div className="row" style={{ justifyContent: "space-between" }}>
@@ -5275,4 +5411,4 @@ function ProductFinder({ pushToast, goTo, focus }) {
   );
 }
 
-Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField });
+Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel });

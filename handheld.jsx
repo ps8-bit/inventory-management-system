@@ -1359,7 +1359,8 @@ function MProductDetail({ ctx }) {
   const cats = typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(x => x.cat))];
 
   const doEdit = (changes) => {
-    const { _qtyDelta, ...fields } = changes;
+    const _qtyDelta = changes._qtyDelta;
+    const fields = omit(changes, "_qtyDelta");
     updateProductInStore(p.sku, fields);                 // catalog fields — scoped, no qty
     if (_qtyDelta) adjustProductQty(p.sku, _qtyDelta);   // qty edit → atomic delta, never an absolute clobber
     ctx.pushToast(`บันทึกการแก้ไข ${p.sku} แล้ว`);
@@ -1425,7 +1426,14 @@ function MProductDetail({ ctx }) {
               </div>
             );
             const photo = typeof getLocationImage === "function" ? getLocationImage(p.loc, locImages) : "";
+            /* Stock kept in more than one place: p.loc is only the FIRST shelf to
+               try. Showing it alone sent pickers to zone A for 83 pieces when 51
+               of them were upstairs — so list every position with its own count. */
+            const split = typeof productPositions === "function" ? productPositions(p) : [];
+            const isSplit = split.length > 1;
+            const here = isSplit ? (split.find(r => r.loc === p.loc) || {}).qty : null;
             return (
+              <>
               <div className="row" style={{ gap: 12 }}>
                 {photo ? (
                   <img src={photo} alt="" style={{ width: 76, height: 76, borderRadius: 10, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}/>
@@ -1437,8 +1445,36 @@ function MProductDetail({ ctx }) {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="mono" style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.01em" }}>{parts.pos}</div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{parts.building}{parts.floor ? " · " + parts.floor : ""}</div>
+                  {isSplit && here != null && (
+                    <div style={{ fontSize: 12, marginTop: 4 }}>
+                      <strong className="tnum" style={{ fontSize: 15 }}>{here}</strong>
+                      <span style={{ color: "var(--muted)" }}> ชิ้นที่นี่ · หยิบก่อน</span>
+                    </div>
+                  )}
                 </div>
               </div>
+              {isSplit && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>
+                    อีก {split.length - 1} ตำแหน่ง (รวม {p.qty} ชิ้น)
+                  </div>
+                  {split.filter(r => r.loc !== p.loc).map((r, i) => {
+                    const lp = typeof locParts === "function" ? locParts(r.loc) : null;
+                    return (
+                      <div key={r.loc + i} className="row" style={{ justifyContent: "space-between", padding: "5px 0" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{lp ? lp.pos : r.loc}</span>
+                          <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 6 }}>
+                            {lp ? lp.building + (lp.floor ? " · " + lp.floor : "") : ""}
+                          </span>
+                        </div>
+                        <span className="tnum" style={{ fontSize: 14, fontWeight: 600 }}>{r.qty}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              </>
             );
           })()}
         </div>
@@ -2952,6 +2988,13 @@ function MFinder({ ctx }) {
                         <Icons.Map size={13} style={{ color: "var(--accent)", flexShrink: 0 }}/>
                         <span className="mono" style={{ fontSize: 14, fontWeight: 700, flexShrink: 0 }}>{parts.pos}</span>
                         <span style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{parts.building}{parts.floor ? " · " + parts.floor : ""}</span>
+                        {/* This is the "where do I find it" screen — if the rest of
+                            the stock is upstairs, say so HERE, not one tap deeper. */}
+                        {typeof hasLocSplit === "function" && hasLocSplit(p.sku) && (
+                          <span className="badge badge-neutral" style={{ fontSize: 9.5, flexShrink: 0 }}>
+                            +{productPositions(p).length - 1} ที่
+                          </span>
+                        )}
                       </div>
                     ) : (
                       <span className="badge badge-warning" style={{ fontSize: 10, alignSelf: "flex-start", marginTop: 6 }}><Icons.Warn size={10}/> ยังไม่จัดเก็บ</span>
@@ -2984,7 +3027,7 @@ function MMore({ ctx }) {
     { id: "tracking",  icon: Icons.Truck, label: "ติดตามพัสดุ",     sub: "เลขพัสดุ ขนส่ง และสถานะ" },
     { id: "locations", icon: Icons.Map,   label: "ตำแหน่งจัดเก็บ",  sub: "แผนผังคลังและการใช้พื้นที่" },
     { id: "labels",    icon: Icons.Tag,   label: "พิมพ์ฉลากจัดส่ง", sub: "สร้าง แก้ไข และพิมพ์ฉลาก" },
-    { id: "import",    icon: Icons.Pkg,   label: "นำเข้า SKU",      sub: "อัปโหลดจาก Excel/CSV" },
+    { id: "import",    icon: Icons.Pkg,   label: "นำเข้าสินค้า",    sub: "อัปโหลด CSV / Excel เพิ่มหรืออัปเดต" },
     { id: "catalog",   icon: Icons.Scan,  label: "แคตตาล็อกอ้างอิง", sub: "ดูสินค้าทั้งหมด แยกตามแบรนด์" },
     { id: "history",   icon: Icons.History, label: "ประวัติการแก้ไข", sub: "บันทึกการเปลี่ยนแปลงทั้งหมด" },
     { id: "users",     icon: Icons.Help,  label: "ผู้ใช้งานและสิทธิ์", sub: "จัดการบัญชีผู้ใช้และบทบาท" },
@@ -4262,180 +4305,397 @@ function MLabelEdit({ ctx }) {
 
 /* =============== IMPORT =============== */
 
+/* Mobile product import — same parsing/validation engine as the desktop wizard
+   (IMPORT_FIELDS / autoMapColumns / validateImportRows / importProductsBulk, all
+   exported from import.jsx). That file loads AFTER this one, so every reference
+   goes through window at render time and falls back gracefully. */
 function MImport({ ctx }) {
   const fileRef = useRefM(null);
-  const [preview, setPreview] = useStateM(null); // null | { fileName, rows:[{sku,name,...,_existing}] }
+  const [stage, setStage]       = useStateM("idle");    // idle | map | review | done
+  const [fileName, setFileName] = useStateM("");
+  const [headers, setHeaders]   = useStateM([]);
+  const [body, setBody]         = useStateM([]);
+  const [map, setMap]           = useStateM({});
+  const [raws, setRaws]         = useStateM([]);
+  const [dupMode, setDupMode]   = useStateM("keepQty");
+  const [filter, setFilter]     = useStateM("all");
+  const [showN, setShowN]       = useStateM(40);
+  const [busy, setBusy]         = useStateM(false);
+  const [prog, setProg]         = useStateM({ done: 0, total: 0 });
+  const [result, setResult]     = useStateM(null);
 
-  // field → keywords used to fuzzy-match the spreadsheet header (mirrors desktop IMPORT_FIELDS)
-  const FIELDS = [
-    { key: "sku",      kw: ["sku", "รหัส"] },
-    { key: "name",     kw: ["ชื่อสินค้า", "ชื่อ", "name"] },
-    { key: "cat",      kw: ["หมวดหมู่", "หมวด", "cat"] },
-    { key: "loc",      kw: ["ตำแหน่ง", "loc"] },
-    { key: "price",    kw: ["ราคาขาย", "ราคา", "price"] },
-    { key: "qty",      kw: ["จำนวน", "qty"] },
-    { key: "reorder",  kw: ["จุดสั่งซื้อ", "reorder"] },
-    { key: "supplier", kw: ["ผู้จัดส่ง", "supplier"] },
-    { key: "cost",     kw: ["ต้นทุน", "cost"] }
-  ];
+  const cap     = (id) => (typeof canDo === "function" ? canDo(id) : true);
+  const canAdd  = cap("addProduct");
+  const canEdit = cap("editProduct");
+  const fields  = (window.IMPORT_FIELDS || []).filter(f => !f.cap || cap(f.cap));
+  const dupModes = window.DUP_MODES || [];
+  const maxRows = window.IMPORT_MAX_ROWS || 5000;
+
+  const mappedKeys = fields.filter(f => map[f.key] != null && map[f.key] >= 0).map(f => f.key);
+  const mappedSig  = mappedKeys.join(",");
+
+  const rows = useMemoM(() => {
+    if (typeof window.validateImportRows !== "function") return [];
+    return window.validateImportRows(raws, { mapped: new Set(mappedKeys), dupMode, canAdd, canEdit, normSku: true });
+  }, [raws, mappedSig, dupMode, canAdd, canEdit]);
+
+  const nNew  = rows.filter(r => r._state === "new").length;
+  const nUpd  = rows.filter(r => r._state === "update").length;
+  const nSkip = rows.filter(r => r._state === "skip").length;
+  const nErr  = rows.filter(r => r._state === "error").length;
+  const importable = rows.filter(r => r._state === "new" || r._state === "update");
+
+  const reset = () => {
+    setStage("idle"); setFileName(""); setHeaders([]); setBody([]); setRaws([]);
+    setMap({}); setResult(null); setFilter("all"); setShowN(40); setProg({ done: 0, total: 0 });
+  };
 
   const onFile = (e) => {
-    const f = e.target.files?.[0];
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";                                  // allow re-picking the same file
     if (!f) return;
     if (typeof XLSX === "undefined") { ctx.pushToast("ไลบรารี Excel ยังไม่พร้อม"); return; }
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const data = new Uint8Array(ev.target.result);
-        const wb = XLSX.read(data, { type: "array" });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const json = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
-        if (json.length < 2) { ctx.pushToast("ไฟล์ว่างเปล่าหรือไม่มีข้อมูล"); return; }
-        const hdrs = json[0].map(h => String(h).trim().toLowerCase());
-        const map = {};
-        FIELDS.forEach(field => {
-          const idx = hdrs.findIndex(h => field.kw.some(k => h.includes(k.toLowerCase())));
-          if (idx >= 0) map[field.key] = idx;
-        });
-        if (map.sku === undefined || map.name === undefined) {
-          ctx.pushToast("ไม่พบคอลัมน์ SKU หรือชื่อสินค้า"); return;
-        }
-        const rows = json.slice(1)
-          .filter(r => r.some(c => String(c).trim() !== ""))
-          .map(r => {
-            const o = {};
-            FIELDS.forEach(field => { if (map[field.key] !== undefined) o[field.key] = r[map[field.key]]; });
-            return o;
-          })
-          .filter(o => String(o.sku || "").trim() && String(o.name || "").trim())
-          .map(o => {
-            const sku = String(o.sku).trim().toUpperCase();
-            return {
-              sku, name: String(o.name).trim(),
-              cat: String(o.cat || "ทั่วไป").trim(),
-              loc: String(o.loc || "").trim().toUpperCase(),
-              price: parseFloat(o.price) || 0,
-              qty: parseInt(o.qty) || 0,
-              reorder: parseInt(o.reorder) || 0,
-              supplier: String(o.supplier || "").trim(),
-              cost: parseFloat(o.cost) || 0,
-              _existing: PRODUCTS.some(p => p.sku.toUpperCase() === sku)
-            };
-          });
-        if (!rows.length) { ctx.pushToast("ไม่พบแถวที่นำเข้าได้"); return; }
-        setPreview({ fileName: f.name, rows });
-      } catch (err) {
-        ctx.pushToast("อ่านไฟล์ไม่สำเร็จ: " + err.message);
+    if (typeof window.readSheetToAoA !== "function") { ctx.pushToast("ระบบนำเข้ายังไม่พร้อม ลองรีเฟรชหน้า"); return; }
+    if (f.size > 8 * 1024 * 1024) { ctx.pushToast("ไฟล์ใหญ่เกิน 8 MB — แบ่งไฟล์ก่อนนำเข้า"); return; }
+
+    window.readSheetToAoA(f).then(aoa => {
+      const head = (aoa[0] || []).map(h => String(h == null ? "" : h).trim());
+      if (!head.some(h => h)) { ctx.pushToast("แถวแรกของไฟล์ต้องเป็นชื่อคอลัมน์"); return; }
+      const rest = aoa.slice(1).filter(r => r && r.some(c => c !== "" && c != null));
+      if (!rest.length) { ctx.pushToast("ไม่พบข้อมูลในไฟล์ (มีแต่หัวตาราง)"); return; }
+
+      const m = typeof window.autoMapColumns === "function" ? window.autoMapColumns(head, fields) : {};
+      setFileName(f.name); setHeaders(head); setBody(rest); setMap(m);
+
+      // On a phone, skip the mapping step when both required columns were found —
+      // it's still reachable from the review screen.
+      if (m.sku != null && m.name != null) {
+        setRaws(window.buildImportRaws(rest, m, fields));
+        setStage("review");
+        ctx.pushToast("อ่านไฟล์สำเร็จ " + rest.length.toLocaleString() + " แถว");
+      } else {
+        setStage("map");
+        ctx.pushToast("จับคู่คอลัมน์ SKU และชื่อสินค้าก่อน");
       }
-    };
-    reader.readAsArrayBuffer(f);
-    e.target.value = ""; // allow re-selecting the same file
-  };
-
-  const doImport = () => {
-    if (!preview) return;
-    let added = 0, updated = 0;
-    preview.rows.forEach(r => {
-      const { _existing, ...product } = r;
-      if (_existing) { setProductAbsolute(product.sku, product); updated++; } // spreadsheet qty is the truth (absolute), not a delta
-      else { addProductToStore({ ...product, reserved: 0 }); added++; }
+    }).catch(err => {
+      console.error(err);
+      ctx.pushToast("อ่านไฟล์ไม่ได้ — ตรวจสอบว่าเป็น .csv หรือ .xlsx ที่ไม่เสียหาย");
     });
-    if (typeof recordChange === "function") {
-      recordChange({
-        entity: "product", action: "import",
-        summary: `นำเข้าสินค้าจากไฟล์ ${preview.fileName} (มือถือ) — เพิ่ม ${added}, อัปเดต ${updated}`,
-      });
-    }
-    ctx.pushToast(`นำเข้าสำเร็จ — เพิ่ม ${added}, อัปเดต ${updated} รายการ`);
-    setPreview(null);
   };
 
-  const downloadTemplate = () => {
-    if (typeof XLSX === "undefined") { ctx.pushToast("ไลบรารี Excel ยังไม่พร้อม"); return; }
-    const wb = XLSX.utils.book_new();
-    const aoa = [
-      ["SKU *", "ชื่อสินค้า *", "หมวดหมู่", "ตำแหน่ง", "ราคา", "จำนวน", "จุดสั่งซื้อ", "ผู้จัดส่ง"],
-      ["TH-NEW-101", "ตัวอย่างสินค้า", "เสื้อผ้า", "A-01-01", 290, 100, 30, "ผู้จัดส่ง A"]
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    XLSX.utils.book_append_sheet(wb, ws, "สินค้า");
-    XLSX.writeFile(wb, "เทมเพลตนำเข้าสินค้า.xlsx");
+  const goReview = () => {
+    if (map.sku == null || map.sku < 0)   { ctx.pushToast("ต้องจับคู่คอลัมน์ SKU ก่อน"); return; }
+    if (map.name == null || map.name < 0) { ctx.pushToast("ต้องจับคู่คอลัมน์ชื่อสินค้าก่อน"); return; }
+    setRaws(window.buildImportRaws(body, map, fields));
+    setFilter("all"); setShowN(40);
+    setStage("review");
+  };
+
+  const downloadTemplate = (kind) => {
+    const head = fields.map(f => f.label + (f.required ? " *" : ""));
+    const idx = fields.map(f => (window.IMPORT_FIELDS || []).findIndex(x => x.key === f.key));
+    const aoa = [head, ...(window.SAMPLE_ROWS || []).map(sr => idx.map(i => sr[i]))];
+    if (kind === "csv") {
+      if (typeof window.downloadCsvFile !== "function") { ctx.pushToast("ระบบยังไม่พร้อม ลองรีเฟรชหน้า"); return; }
+      window.downloadCsvFile(aoa, "เทมเพลตนำเข้าสินค้า.csv");
+    } else {
+      if (typeof XLSX === "undefined") { ctx.pushToast("ไลบรารี Excel ยังไม่พร้อม"); return; }
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "สินค้า");
+      XLSX.writeFile(wb, "เทมเพลตนำเข้าสินค้า.xlsx");
+    }
     ctx.pushToast("ดาวน์โหลดเทมเพลตแล้ว");
   };
 
+  const runImport = async () => {
+    if (busy || !importable.length) return;
+    if (typeof importProductsBulk !== "function") { ctx.pushToast("ระบบนำเข้ายังไม่พร้อม ลองรีเฟรชหน้า"); return; }
+    setBusy(true); setProg({ done: 0, total: importable.length });
+
+    const defaults = typeof window.importRowDefaults === "function" ? window.importRowDefaults(fields) : {};
+    const items = importable.map(r => ({
+      sku: r._sku,
+      mode: r._exists ? dupMode : "add",
+      values: r._exists ? r._values : { ...defaults, ...r._values }
+    }));
+
+    let res;
+    try { res = await importProductsBulk(items, (done, total) => setProg({ done, total })); }
+    catch (err) { res = { added: 0, updated: 0, error: (err && err.message) || String(err) }; }
+
+    let imgN = 0;
+    if (!res.error && typeof setProductImagesBulk === "function") {
+      const m = {};
+      importable.forEach(r => { if (r._image && /^https?:\/\//i.test(r._image)) m[r._sku] = r._image; });
+      imgN = setProductImagesBulk(m);
+    }
+    if (!res.error && typeof addCategory === "function") {
+      const known = new Set(typeof loadCategories === "function" ? loadCategories() : []);
+      importable.forEach(r => { const c = r._values.cat; if (c && !known.has(c)) { addCategory(c); known.add(c); } });
+    }
+    if (!res.error && typeof recordChange === "function" && (res.added || res.updated)) {
+      recordChange({
+        entity: "product", action: "import",
+        summary: "นำเข้าสินค้าจากไฟล์ " + fileName + " (มือถือ) — เพิ่ม " + res.added + ", อัปเดต " + res.updated,
+        count: res.added + res.updated
+      });
+    }
+
+    setResult({ ...res, images: imgN, skipped: nSkip, errors: nErr });
+    setBusy(false);
+    setStage("done");
+    if (res.error) ctx.pushToast("นำเข้าไม่สำเร็จ: " + (res.error === "PERMISSION_OR_MISSING" ? "ไม่มีสิทธิ์บันทึกสินค้า" : res.error));
+    else ctx.pushToast("นำเข้าสำเร็จ — เพิ่ม " + res.added + ", อัปเดต " + res.updated);
+  };
+
+  const head = (
+    <div className="m-topbar">
+      <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+      <div className="m-title-sub">นำเข้าสินค้า</div>
+      {stage === "idle"
+        ? <div style={{ width: 30 }}/>
+        : <button className="m-action" onClick={reset} title="เริ่มใหม่"><Icons.Refresh size={15}/></button>}
+    </div>
+  );
+
+  if (!canAdd && !canEdit) {
+    return (
+      <>
+        {head}
+        <div className="m-content">
+          <div className="m-card" style={{ textAlign: "center", padding: 28 }}>
+            <Icons.Lock size={26} style={{ color: "var(--muted)", marginBottom: 10 }}/>
+            <div style={{ fontWeight: 600, fontSize: 14 }}>บัญชีนี้ไม่มีสิทธิ์นำเข้าสินค้า</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.6 }}>
+              ต้องมีสิทธิ์ “เพิ่มสินค้าใหม่” หรือ “แก้ไขข้อมูลสินค้า” — ติดต่อผู้ดูแลระบบ
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  const stepDot = (n, label, on) => (
+    <div className="row" style={{ gap: 10, marginBottom: 8 }}>
+      <div style={{ width: 30, height: 30, borderRadius: 999, background: on ? "var(--accent)" : "var(--fg)", color: on ? "#fff" : "var(--bg)", display: "grid", placeItems: "center", fontWeight: 600, fontSize: 13 }}>{n}</div>
+      <div style={{ fontWeight: 600, fontSize: 14 }}>{label}</div>
+    </div>
+  );
+
   return (
     <>
-      <div className="m-topbar">
-        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
-        <div className="m-title-sub">นำเข้า SKU</div>
-        <div style={{ width: 30 }}/>
-      </div>
+      {head}
       <div className="m-content">
-        <div className="m-card">
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-            <div style={{ width: 32, height: 32, borderRadius: 999, background: "var(--fg)", color: "var(--bg)", display: "grid", placeItems: "center", fontWeight: 600, fontSize: 13 }}>1</div>
-            <div style={{ fontWeight: 600, fontSize: 14 }}>ดาวน์โหลดเทมเพลต</div>
-          </div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>เทมเพลต Excel มาพร้อมแถวตัวอย่าง</div>
-          <button className="m-btn-big dark" onClick={downloadTemplate}>
-            <Icons.Pkg size={16}/> ดาวน์โหลด .xlsx
-          </button>
-        </div>
 
-        <div className="m-card">
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-            <div style={{ width: 32, height: 32, borderRadius: 999, background: "var(--fg)", color: "var(--bg)", display: "grid", placeItems: "center", fontWeight: 600, fontSize: 13 }}>2</div>
-            <div style={{ fontWeight: 600, fontSize: 14 }}>อัปโหลดไฟล์</div>
-          </div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>รองรับ .xlsx และ .csv</div>
-          <div onClick={() => fileRef.current?.click()} style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 12, padding: 20, textAlign: "center", cursor: "pointer", background: "var(--surface-2)" }}>
-            <Icons.Pkg size={28} style={{ color: "var(--muted)", marginBottom: 8 }}/>
-            <div style={{ fontSize: 13, fontWeight: 500 }}>คลิกเพื่อเลือกไฟล์</div>
-            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>หรือถ่ายรูปบันทึก SKU ใหม่</div>
-          </div>
-          <input ref={fileRef} type="file" accept=".xlsx,.csv" onChange={onFile} style={{ display: "none" }}/>
-        </div>
-
-        {preview && (
-          <div className="m-card" style={{ borderColor: "var(--accent)" }}>
-            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
-              <div className="row" style={{ gap: 10 }}>
-                <div style={{ width: 32, height: 32, borderRadius: 999, background: "var(--accent)", color: "white", display: "grid", placeItems: "center", fontWeight: 600, fontSize: 13 }}>3</div>
-                <div style={{ fontWeight: 600, fontSize: 14 }}>ตรวจสอบและยืนยัน</div>
+        {stage === "idle" && (
+          <>
+            <div className="m-card">
+              {stepDot(1, "ดาวน์โหลดเทมเพลต")}
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
+                ไม่ใช้เทมเพลตก็ได้ — ไฟล์เรียงคอลัมน์อย่างไรก็ได้ ระบบจับคู่ให้เอง
               </div>
-              <button className="m-action" onClick={() => setPreview(null)}><Icons.X size={14}/></button>
+              <div className="row" style={{ gap: 8 }}>
+                <button className="m-btn-big dark" style={{ flex: 1 }} onClick={() => downloadTemplate("csv")}><Icons.Down size={15}/> .csv</button>
+                <button className="m-btn-big" style={{ flex: 1 }} onClick={() => downloadTemplate("xlsx")}><Icons.Down size={15}/> .xlsx</button>
+              </div>
             </div>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
-              {preview.fileName} · พบ {preview.rows.length} รายการ ·
-              เพิ่มใหม่ {preview.rows.filter(r => !r._existing).length} · อัปเดต {preview.rows.filter(r => r._existing).length}
+
+            <div className="m-card">
+              {stepDot(2, "เลือกไฟล์")}
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>รองรับ .csv (ภาษาไทยทุกการเข้ารหัส) และ .xlsx</div>
+              <div onClick={() => fileRef.current && fileRef.current.click()}
+                style={{ border: "1.5px dashed var(--border-strong)", borderRadius: 12, padding: 20, textAlign: "center", cursor: "pointer", background: "var(--surface-2)" }}>
+                <Icons.Pkg size={28} style={{ color: "var(--muted)", marginBottom: 8 }}/>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>แตะเพื่อเลือกไฟล์</div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>สูงสุด {maxRows.toLocaleString()} แถวต่อครั้ง</div>
+              </div>
+              <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={onFile} style={{ display: "none" }}/>
             </div>
-            <div className="m-list" style={{ maxHeight: 220, overflowY: "auto", marginBottom: 12 }}>
-              {preview.rows.slice(0, 30).map((r, i) => (
-                <div key={i} className="m-row" style={{ cursor: "default" }}>
-                  <div className="m-row-main">
-                    <div className="m-row-title" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
-                    <div className="m-row-sub mono">{r.sku} · {r.qty} ชิ้น · ฿{r.price}</div>
-                  </div>
-                  <span className={"badge " + (r._existing ? "badge-info" : "badge-success")} style={{ fontSize: 9 }}><span className="dot"/>{r._existing ? "อัปเดต" : "ใหม่"}</span>
-                </div>
-              ))}
-              {preview.rows.length > 30 && <div style={{ padding: "8px 4px", textAlign: "center", color: "var(--muted)", fontSize: 11 }}>และอีก {preview.rows.length - 30} รายการ</div>}
+
+            <div style={{ padding: 14, background: "var(--info-soft)", borderRadius: 12, fontSize: 12, lineHeight: 1.6, color: "var(--fg-2)" }}>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4, color: "var(--info)" }}>💡 เคล็ดลับ</div>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                <li>เว้นช่องว่างไว้ = ไม่แก้ค่าเดิมของสินค้านั้น</li>
+                <li>SKU ที่มีอยู่แล้วจะถูกอัปเดต ไม่ใช่ปฏิเสธ</li>
+                <li>ระบบตรวจทุกแถวให้ก่อน แล้วค่อยยืนยัน</li>
+              </ul>
             </div>
-            <button className="m-btn-big" onClick={doImport}>
-              <Icons.Check size={16}/> นำเข้า {preview.rows.length} รายการ
-            </button>
-          </div>
+          </>
         )}
 
-        <div style={{ padding: 14, background: "var(--info-soft)", color: "var(--info)", borderRadius: 12, fontSize: 12, lineHeight: 1.5 }}>
-          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 4 }}>💡 เคล็ดลับ</div>
-          <ul style={{ margin: 0, paddingLeft: 18, color: "var(--fg-2)" }}>
-            <li>ใช้เทมเพลตเพื่อความถูกต้อง</li>
-            <li>SKU ห้ามซ้ำกับที่มีอยู่</li>
-            <li>นำเข้าครั้งละไม่เกิน 5,000 แถว</li>
-          </ul>
-        </div>
+        {stage === "map" && (
+          <>
+            <div className="m-card">
+              {stepDot(3, "จับคู่คอลัมน์", true)}
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+                {fileName} · {body.length.toLocaleString()} แถว · {headers.length} คอลัมน์
+              </div>
+              <div className="stack" style={{ gap: 10 }}>
+                {fields.map(f => {
+                  const ci = map[f.key];
+                  const on = ci != null && ci >= 0;
+                  return (
+                    <div key={f.key}>
+                      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                        {f.label}{f.required && <span style={{ color: "var(--danger)" }}> *</span>}
+                        {f.required && !on && <span className="badge badge-danger" style={{ marginLeft: 6, fontSize: 9 }}>ต้องจับคู่</span>}
+                      </div>
+                      <select className="input" value={on ? ci : -1} style={{ fontSize: 13, padding: "8px 10px" }}
+                        onChange={e => {
+                          const v = parseInt(e.target.value, 10);
+                          setMap(prev => {
+                            const next = { ...prev };
+                            if (v >= 0) Object.keys(next).forEach(k => { if (k !== f.key && next[k] === v) delete next[k]; });
+                            if (v < 0) delete next[f.key]; else next[f.key] = v;
+                            return next;
+                          });
+                        }}>
+                        <option value={-1}>— ไม่ใช้ —</option>
+                        {headers.map((h, i) => <option key={i} value={i}>{h || "(คอลัมน์ที่ " + (i + 1) + ")"}</option>)}
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <button className="m-btn-big dark" onClick={goReview}>ตรวจสอบข้อมูล <Icons.ArrowRight size={15}/></button>
+          </>
+        )}
+
+        {stage === "review" && (
+          <>
+            <div className="m-card">
+              {stepDot(3, "ตรวจสอบและยืนยัน", true)}
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>{fileName} · {rows.length.toLocaleString()} แถว</div>
+              <div className="row" style={{ gap: 6, marginBottom: 12 }}>
+                {[["เพิ่มใหม่", nNew, "var(--success)"], ["อัปเดต", nUpd, "var(--info)"], ["ผิดพลาด", nErr, nErr ? "var(--danger)" : "var(--muted)"]].map(([l, v, c]) => (
+                  <div key={l} style={{ flex: 1, padding: "8px 6px", borderRadius: 10, background: "var(--surface-2)", textAlign: "center" }}>
+                    <div className="tnum" style={{ fontSize: 17, fontWeight: 700, color: c }}>{v.toLocaleString()}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{l}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>SKU ที่มีอยู่แล้ว</div>
+              <div className="stack" style={{ gap: 6 }}>
+                {dupModes.map(m => {
+                  const on = dupMode === m.id;
+                  const locked = !canEdit && m.id !== "skip";
+                  return (
+                    <button key={m.id} disabled={locked} onClick={() => setDupMode(m.id)}
+                      style={{
+                        textAlign: "left", padding: "9px 11px", borderRadius: 10, cursor: locked ? "not-allowed" : "pointer",
+                        border: "1.5px solid " + (on ? "var(--accent)" : "var(--border)"),
+                        background: on ? "var(--accent-soft)" : "var(--surface)", opacity: locked ? 0.5 : 1
+                      }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 600, color: on ? "var(--accent)" : "var(--fg)" }}>{m.label}</div>
+                      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 }}>{m.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <button className="m-action" style={{ width: "100%", marginTop: 10, fontSize: 12 }} onClick={() => setStage("map")}>
+                <Icons.Edit size={13}/> แก้การจับคู่คอลัมน์
+              </button>
+            </div>
+
+            <div className="m-card">
+              <div className="row" style={{ gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                {[["all", "ทั้งหมด", rows.length], ["new", "ใหม่", nNew], ["update", "อัปเดต", nUpd], ["skip", "ข้าม", nSkip], ["error", "ผิดพลาด", nErr]].map(([id, label, n]) => {
+                  const on = filter === id;
+                  return (
+                    <button key={id} onClick={() => { setFilter(id); setShowN(40); }}
+                      style={{
+                        fontSize: 11.5, padding: "4px 10px", borderRadius: 999, cursor: "pointer",
+                        border: "1px solid " + (on ? "var(--accent)" : "var(--border)"),
+                        background: on ? "var(--accent)" : "var(--surface-2)",
+                        color: on ? "#fff" : "var(--fg-2)", fontWeight: on ? 600 : 500
+                      }}>{label} ({n.toLocaleString()})</button>
+                  );
+                })}
+              </div>
+              <MImportRows rows={rows} filter={filter} showN={showN} onMore={() => setShowN(n => n + 40)}/>
+            </div>
+
+            <button className="m-btn-big dark" disabled={busy || !importable.length}
+              style={(busy || !importable.length) ? { opacity: 0.5 } : {}} onClick={runImport}>
+              <Icons.Check size={16}/> {busy
+                ? "กำลังนำเข้า… " + prog.done.toLocaleString() + "/" + prog.total.toLocaleString()
+                : "ยืนยันนำเข้า " + importable.length.toLocaleString() + " รายการ"}
+            </button>
+            {nErr > 0 && (
+              <div style={{ fontSize: 11.5, color: "var(--danger)", textAlign: "center", marginTop: -4 }}>
+                {nErr.toLocaleString()} แถวมีข้อผิดพลาดและจะไม่ถูกนำเข้า — แก้ในไฟล์ต้นทางแล้วอัปโหลดใหม่
+              </div>
+            )}
+          </>
+        )}
+
+        {stage === "done" && result && (
+          <div className="m-card" style={{ textAlign: "center", padding: 26 }}>
+            <div style={{
+              width: 54, height: 54, borderRadius: 999, margin: "0 auto 12px", display: "grid", placeItems: "center",
+              background: result.error ? "var(--danger-soft)" : "var(--success-soft)",
+              color: result.error ? "var(--danger)" : "var(--success)"
+            }}>{result.error ? <Icons.Warn size={24}/> : <Icons.Check size={24} stroke={2}/>}</div>
+            <div style={{ fontSize: 16, fontWeight: 600 }}>{result.error ? "นำเข้าไม่สำเร็จ" : "นำเข้าสำเร็จ"}</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.7 }}>
+              {result.error
+                ? (result.error === "PERMISSION_OR_MISSING" ? "บัญชีนี้ไม่มีสิทธิ์บันทึกสินค้าลงฐานข้อมูล" : result.error)
+                : <>
+                    เพิ่มใหม่ <strong style={{ color: "var(--fg)" }}>{(result.added || 0).toLocaleString()}</strong> ·
+                    อัปเดต <strong style={{ color: "var(--fg)" }}>{(result.updated || 0).toLocaleString()}</strong>
+                    {result.images > 0 && <><br/>ใส่รูปจากลิงก์ {result.images} รายการ</>}
+                    {(result.skipped > 0 || result.errors > 0) && <><br/>ข้าม {result.skipped.toLocaleString()} แถว{result.errors > 0 && <> · ไม่ผ่านการตรวจ {result.errors.toLocaleString()} แถว</>}</>}
+                  </>}
+            </div>
+            <button className="m-btn-big dark" style={{ marginTop: 18 }} onClick={reset}>นำเข้าไฟล์อื่นต่อ</button>
+          </div>
+        )}
       </div>
+    </>
+  );
+}
+
+function MImportRows({ rows, filter, showN, onMore }) {
+  const shown = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (filter === "all" || r._state === filter) shown.push(r);
+  }
+  if (!shown.length) return <div style={{ padding: 18, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>ไม่มีแถวที่ตรงกับตัวกรองนี้</div>;
+
+  const BADGE = { new: ["badge-success", "ใหม่"], update: ["badge-info", "อัปเดต"], skip: ["badge-neutral", "ข้าม"], error: ["badge-danger", "ผิดพลาด"] };
+  return (
+    <>
+      <div className="m-list" style={{ maxHeight: 300, overflowY: "auto" }}>
+        {shown.slice(0, showN).map((r, i) => {
+          const b = BADGE[r._state] || BADGE.skip;
+          return (
+            <div key={i} className="m-row" style={{ cursor: "default", alignItems: "flex-start" }}>
+              <div className="m-row-main">
+                <div className="m-row-title" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {r.name || <span style={{ color: "var(--faint)" }}>(ไม่มีชื่อ)</span>}
+                </div>
+                <div className="m-row-sub mono">
+                  แถว {r._row} · {r._sku || "—"}
+                  {r._values.qty != null && <> · {r._values.qty} ชิ้น</>}
+                  {r._values.price != null && <> · ฿{r._values.price.toLocaleString()}</>}
+                </div>
+                {r._errors.map((e, k) => <div key={"e" + k} style={{ fontSize: 10.5, color: "var(--danger)", marginTop: 2 }}>{e}</div>)}
+                {r._warns.map((w, k)  => <div key={"w" + k} style={{ fontSize: 10.5, color: "var(--warning)", marginTop: 2 }}>{w}</div>)}
+              </div>
+              <span className={"badge " + b[0]} style={{ fontSize: 9, flexShrink: 0 }}><span className="dot"/>{b[1]}</span>
+            </div>
+          );
+        })}
+      </div>
+      {shown.length > showN && (
+        <button className="m-action" style={{ width: "100%", marginTop: 8, fontSize: 12 }} onClick={onMore}>
+          ดูเพิ่ม — แสดง {showN.toLocaleString()} จาก {shown.length.toLocaleString()} แถว
+        </button>
+      )}
     </>
   );
 }
