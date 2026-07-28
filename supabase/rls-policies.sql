@@ -128,6 +128,15 @@ create policy "delete" on public.app_state for delete using (
   and (key <> 'role_perms' or public.auth_role() = 'admin')
 );
 
+-- 4c. product_locations DELETE must include staff. Emptying a shelf deletes its
+--     row (saveLocSplit drops qty=0 rows), and staff is the role that picks
+--     stock — without this a staff sale leaves a phantom pile behind while
+--     products.qty has already moved. Re-created after the §4 loop, which would
+--     otherwise reset this table to the admin/manager default.
+drop policy if exists "delete" on public.product_locations;
+create policy "delete" on public.product_locations for delete
+  using (public.auth_role() in ('admin','manager','staff') and public.within_work_hours());
+
 -- 5. audit_log — append-only: anyone signed in can read + insert; only admin can delete; no updates.
 create policy "read"   on public.audit_log for select using (auth.role() = 'authenticated');
 create policy "insert" on public.audit_log for insert with check (auth.role() = 'authenticated');

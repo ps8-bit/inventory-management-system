@@ -1002,13 +1002,23 @@ function MInventory({ ctx }) {
   };
 
   const addProduct = (p) => {
-    addProductToStore({ ...p, reserved: 0 });
+    // _locRows = the multi-position split from the sheet. Strip with omit() —
+    // object-rest would collide with another file's Babel temp (see CLAUDE.md).
+    const rows = p._locRows;
+    const clean = (typeof omit === "function") ? omit(p, "_locRows") : p;
+    addProductToStore({ ...clean, reserved: 0 });
+    if (rows && rows.length > 1 && typeof saveLocSplit === "function") {
+      saveLocSplit(p.sku, rows).then(res => {
+        if (res && res.ok === false) ctx.pushToast(res.error || "บันทึกการแบ่งตำแหน่งไม่สำเร็จ");
+      }).catch(() => {});
+    }
     ctx.pushToast(`เพิ่ม SKU ${p.sku} แล้ว`);
     if (typeof recordChange === "function") {
       recordChange({
         entity: "product", entityId: p.sku, action: "create",
         summary: `เพิ่มสินค้าใหม่ ${p.name} (${p.sku}) (มือถือ)`,
-        changes: [{ label: "จำนวนเริ่มต้น", to: String(p.qty) }, { label: "ตำแหน่ง", to: p.loc }]
+        changes: [{ label: "จำนวนเริ่มต้น", to: String(p.qty) },
+                  { label: "ตำแหน่ง", to: rows && rows.length > 1 ? rows.map(r => `${locParts(r.loc).pos} ×${r.qty}`).join(" · ") : p.loc }]
       });
     }
     setAddOpen(false);
@@ -1086,6 +1096,22 @@ function MInventory({ ctx }) {
                     <span className={"badge " + s.cls} style={{ fontSize: 9, padding: "1px 6px" }}><span className="dot"/>{s.label}</span>
                     {!locIsStored(p.loc, storedCodes) && <span className="badge badge-warning" style={{ fontSize: 9, padding: "1px 6px", flexShrink: 0 }}><Icons.Warn size={9}/> ยังไม่จัดเก็บ</span>}
                   </div>
+                  {/* Every shelf this SKU sits on, with the pieces at each — the list
+                      used to name only the primary one, hiding split stock entirely. */}
+                  {locIsStored(p.loc, storedCodes) && (() => {
+                    const spots = (typeof productPositions === "function") ? productPositions(p) : [];
+                    if (!spots.length) return null;
+                    const label = spots.map(s2 => {
+                      const lp = locParts(s2.loc);
+                      return (lp && lp.pos ? lp.pos : s2.loc) + (spots.length > 1 ? " ×" + s2.qty : "");
+                    }).join(" · ");
+                    return (
+                      <div className="row" style={{ gap: 4, marginTop: 2, minWidth: 0 }}>
+                        <Icons.Map size={10} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                        <span className="mono" style={{ fontSize: 10, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div style={{ textAlign: "right", flexShrink: 0 }}>
                   <div className="tnum" style={{ fontSize: 15, fontWeight: 600 }}>{p.qty}</div>
@@ -1137,6 +1163,12 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
   });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const [pickedImage, setPickedImage] = useStateM("");
+  /* Storage positions (add mode). Row 0 = primary/pick-first = products.loc;
+     2+ rows become the product_locations split and must sum to the opening qty. */
+  const [locRows, setLocRows] = useStateM(() => [{ loc: editing ? (editing.loc || "") : "", qty: "" }]);
+  const filledLocRows = locRows.filter(r => (r.loc || "").trim());
+  const multiLoc = !editing && filledLocRows.length > 1;
+  const splitSum = filledLocRows.reduce((n, r) => n + (parseInt(r.qty, 10) || 0), 0);
   // Picked a stock/catalog match from the name search → auto-fill the rest.
   const pickCandidate = (c) => {
     setF(prev => ({
@@ -1161,8 +1193,9 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
   const cost = showCost ? num(f.cost)
     : (editing && Number.isFinite(Number(editing.cost)) ? Number(editing.cost)
       : (price === null ? null : Math.round(price * 0.6)));
+  const splitOk = !multiLoc || (qty !== null && splitSum === Math.round(qty));
   const canSave = skuTrim && !dupe && f.name.trim() &&
-    cost !== null && price !== null && qty !== null && reorder !== null;
+    cost !== null && price !== null && qty !== null && reorder !== null && splitOk;
 
   const save = () => {
     if (!canSave) return;
@@ -1173,12 +1206,20 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
     if (!editing && pickedImage && typeof setProductImage === "function") {
       try { setProductImage(skuTrim, pickedImage); } catch (e) {}
     }
+    const rows = filledLocRows.map(r => ({
+      loc: r.loc.trim(),
+      qty: multiLoc ? (parseInt(r.qty, 10) || 0) : Math.round(qty)
+    }));
     const common = {
       sku: skuTrim, name: f.name.trim(), cat: catVal,
       brand: (f.brand || "").trim(),
       supplier: (f.supplier || "").trim(), cost, price,
-      reorder: Math.round(reorder), loc: f.loc.trim()
+      reorder: Math.round(reorder),
+      loc: rows.length ? rows[0].loc : ""
     };
+    // Only ever attach on ADD, and only when there IS a split — an unknown key
+    // reaching updateProductInStore would be sent to the DB as a column.
+    if (!editing && rows.length > 1) common._locRows = rows;
     // Edit mode: send qty as a CHANGE relative to what the sheet was opened
     // showing (editing.qty), not an absolute value. So an untouched qty writes
     // nothing, and a real edit becomes an atomic ±delta that can't clobber a sale
@@ -1257,13 +1298,47 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
                 {Array.from({ length: 20 }, (_, i) => (i + 1) * 5).map(n => <option key={n} value={n}/>)}
               </datalist>
             </div>
-            <div>
-              <div className="m-section-label" style={{ padding: "0 2px 4px" }}>ตำแหน่ง</div>
-              <input className="m-input" value={f.loc} onChange={e => set("loc", e.target.value)} list="m-loc-positions" placeholder="เลือกตำแหน่ง (ไม่บังคับ)"/>
-              <datalist id="m-loc-positions">
-                {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
-              </datalist>
+          </div>
+
+          {/* ── Storage positions — mirrors the desktop add form: row 0 is the
+                pick-first shelf, extra rows split the opening stock. Editing keeps
+                the single field (quantities move through ปรับสต็อก). ── */}
+          <div>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", padding: "0 2px 4px" }}>
+              <div className="m-section-label" style={{ padding: 0 }}>ตำแหน่งจัดเก็บ</div>
+              {!editing && (
+                <button type="button" onClick={() => setLocRows(rs => [...rs, { loc: "", qty: "" }])}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, padding: "4px 9px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--accent)", fontWeight: 600, fontFamily: "inherit" }}>
+                  <Icons.Plus size={11}/> เพิ่มตำแหน่ง
+                </button>
+              )}
             </div>
+            <datalist id="m-loc-positions">
+              {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
+            </datalist>
+            {locRows.map((r, i) => (
+              <div key={i} className="row" style={{ gap: 6, marginBottom: 6 }}>
+                <input className="m-input" style={{ flex: 1 }} value={r.loc} list="m-loc-positions"
+                  placeholder={i === 0 ? "เลือกตำแหน่ง (ไม่บังคับ)" : "เลือกตำแหน่งเพิ่ม"}
+                  onChange={e => { const v = e.target.value; setLocRows(rs => rs.map((x, j) => j === i ? { ...x, loc: v } : x)); }}/>
+                {multiLoc && (
+                  <input className="m-input tnum" type="number" min="0" style={{ width: 72, textAlign: "right" }}
+                    value={r.qty} placeholder="0"
+                    onChange={e => { const v = e.target.value; setLocRows(rs => rs.map((x, j) => j === i ? { ...x, qty: v } : x)); }}/>
+                )}
+                {i > 0 && (
+                  <button type="button" onClick={() => setLocRows(rs => rs.filter((_, j) => j !== i))}
+                    style={{ display: "grid", placeItems: "center", width: 34, height: 34, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--muted)", flexShrink: 0 }}>
+                    <Icons.X size={13}/>
+                  </button>
+                )}
+              </div>
+            ))}
+            {multiLoc && (
+              <div style={{ fontSize: 11, color: splitOk ? "var(--muted)" : "var(--danger)", padding: "0 2px" }}>
+                {splitOk ? `แบ่งครบ ${splitSum} ชิ้น (ตำแหน่งแรก = หยิบก่อน)` : `รวม ${splitSum} ชิ้น — ต้องเท่ากับจำนวนเริ่มต้น ${qty === null ? 0 : Math.round(qty)} ชิ้น`}
+              </div>
+            )}
           </div>
           {editing && <div style={{ fontSize: 11, color: "var(--muted)" }}>หมายเหตุ: รหัส SKU และจำนวนคงเหลือแก้ไขที่นี่ไม่ได้ — ใช้ "ปรับสต็อก" สำหรับจำนวน</div>}
         </div>
@@ -1574,11 +1649,14 @@ function MAdjust({ ctx }) {
     ? getEffectiveQty(sku)
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
 
+  // Each row carries its own shelf — two SKUs in one batch live in different places.
+  const newRow = (sku) => ({ sku, amount: "", loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === sku)) : "" });
   const picked = (sku) => rows.some(r => r.sku === sku);
-  const addSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs : [...rs, { sku, amount: "" }]));
+  const addSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs : [...rs, newRow(sku)]));
   const removeSku = (sku) => setRows(rs => rs.filter(r => r.sku !== sku));
-  const toggleSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs.filter(r => r.sku !== sku) : [...rs, { sku, amount: "" }]));
+  const toggleSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs.filter(r => r.sku !== sku) : [...rs, newRow(sku)]));
   const setAmount = (sku, v) => setRows(rs => rs.map(r => (r.sku === sku ? { ...r, amount: v } : r)));
+  const setRowLoc = (sku, loc) => setRows(rs => rs.map(r => (r.sku === sku ? { ...r, loc } : r)));
   const fillAll = (v) => setRows(rs => rs.map(r => ({ ...r, amount: v })));
 
   // Per-row delta from the shared mode — identical rules to the desktop modal.
@@ -1607,12 +1685,20 @@ function MAdjust({ ctx }) {
     ctx.pushToast(`เพิ่ม ${p.name}`);
   };
 
-  const submit = () => {
+  const submit = async () => {
     if (!canSubmit) return;
     const res = (typeof applyStockAdjustmentBatch === "function")
       ? applyStockAdjustmentBatch(changes, { reason, note, source: "mobile" })
       : { applied: 0, net: 0 };
     if (!res.applied) { ctx.pushToast("ปรับสต็อกไม่สำเร็จ"); return; }
+    // Re-balance the split from the applied results (a clamped row contributes nothing).
+    if (typeof applyLocPicks === "function") {
+      const locBySku = {};
+      rows.forEach(r => { locBySku[r.sku] = r.loc; });
+      const picks = (res.results || changes).filter(r => r.ok !== false).map(r => ({ sku: r.sku, loc: locBySku[r.sku] }));
+      const locRes = await applyLocPicks(picks);
+      if (locRes && locRes.errors && locRes.errors.length) ctx.pushToast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ — แก้ที่หน้าสินค้าบนเดสก์ท็อป");
+    }
     ctx.pushToast(changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
       : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น)`);
@@ -1716,6 +1802,8 @@ function MAdjust({ ctx }) {
                           {d === 0 ? `คงเหลือ ${cur}` : `${cur} → ${Math.max(0, cur + d)}`}
                         </span>
                       </div>
+                      {/* Neutral label — the delta can be positive. */}
+                      <MLocPickChips sku={r.sku} value={r.loc} need={d < 0 ? -d : 0} label="ตำแหน่ง" onChange={loc => setRowLoc(r.sku, loc)}/>
                     </div>
                     <input className="m-input" type="number" min="0" inputMode="numeric" value={r.amount} placeholder="0"
                       onChange={e => setAmount(r.sku, e.target.value)}
@@ -1861,14 +1949,31 @@ function MIssue({ ctx }) {
   const overStock = total > stockCap;
   const canSubmit = total > 0 && !overStock && !noBundles && (isBundle ? !!bundle : true);
 
+  // Shelf to take from — reset whenever the chosen product changes.
+  const [pickLoc, setPickLoc] = useStateM("");
+  useEffectM(() => {
+    setPickLoc((typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === skuId)) : "");
+  }, [skuId]);
+
   const submit = async () => {
     if (!canSubmit || submitting) return;
     if (!navigator.onLine) { ctx.pushToast("ไม่มีการเชื่อมต่ออินเทอร์เน็ต — กรุณาตรวจสอบเครือข่าย"); return; }
     setSubmitting(true);
+    let locPicks = [];
     if (isBundle) {
       deductManyAndPersist(bundle.items.map(it => ({ sku: it.sku, qty: it.qty * total })));
+      locPicks = bundle.items.map(it => {
+        const cp = PRODUCTS.find(x => x.sku === it.sku);
+        return { sku: it.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" };
+      });
     } else {
       deductStockAndPersist(skuId, total);
+      locPicks = [{ sku: skuId, loc: pickLoc }];
+    }
+    // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
+    if (typeof applyLocPicks === "function") {
+      const r = await applyLocPicks(locPicks);
+      if (r && r.errors && r.errors.length) ctx.pushToast("ตัดสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ — แก้ที่หน้าสินค้าบนเดสก์ท็อป");
     }
 
     const id = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
@@ -1951,6 +2056,10 @@ function MIssue({ ctx }) {
             <div style={{ fontSize: 11, color: "var(--muted)", margin: "8px 4px 0" }}>
               คงเหลือ <strong style={{ color: "var(--fg)" }}>{effQty(skuId)}</strong> ชิ้น · ตำแหน่ง <span className="mono">{locIsStored(product.loc) ? product.loc : "—"}</span> · ราคา ฿{product.price.toLocaleString()}
             </div>
+            {/* That line names only the primary shelf — let the picker override it. */}
+            <div style={{ margin: "0 4px" }}>
+              <MLocPickChips sku={skuId} value={pickLoc} need={total} onChange={setPickLoc}/>
+            </div>
           </>
         )}
 
@@ -2032,6 +2141,48 @@ function MIssue({ ctx }) {
   );
 }
 
+/* Mobile twin of LocPickSelect — chips instead of a select, because a phone
+   picker inside a cart row must be one tap. Hidden for single-position products. */
+function MLocPickChips({ sku, value, onChange, need, label }) {
+  const [, setTick] = useStateM(0);
+  useEffectM(() => {
+    const h = () => setTick(n => n + 1);
+    window.addEventListener("ims-product-locs-change", h);
+    return () => window.removeEventListener("ims-product-locs-change", h);
+  }, []);
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return null;
+  const spots = (typeof productPositions === "function") ? productPositions(p) : [];
+  if (spots.length <= 1) return null;
+  const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(sku, value) : 0;
+  const short = Number(need) > 0 && here < Number(need);
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div className="row" style={{ gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+        <Icons.Map size={10} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+        <span style={{ fontSize: 10, color: "var(--muted)" }}>{label || "ตัดจากตำแหน่ง"}</span>
+        {spots.map(s => {
+          const on = (value || "") === s.loc;
+          return (
+            <button key={s.loc} disabled={s.qty <= 0}
+              onClick={e => { e.stopPropagation(); onChange(s.loc); }}
+              style={{
+                border: "1px solid " + (on ? "var(--accent)" : "var(--border)"),
+                background: on ? "var(--accent-soft)" : "transparent",
+                color: on ? "var(--accent)" : "var(--muted)",
+                borderRadius: 999, padding: "2px 8px", fontSize: 10.5,
+                fontFamily: "inherit", opacity: s.qty <= 0 ? 0.4 : 1
+              }}>
+              <span className="mono">{locParts(s.loc).pos}</span> ×{s.qty}{s.loc === p.loc ? " · หยิบก่อน" : ""}
+            </button>
+          );
+        })}
+      </div>
+      {short && <div style={{ fontSize: 10, color: "var(--warning)", marginTop: 2 }}>ตำแหน่งนี้มีแค่ {here} ชิ้น — ที่เหลือหยิบจากตำแหน่งถัดไป</div>}
+    </div>
+  );
+}
+
 /* =============== SELL PRODUCT (3-step POS wizard) =============== */
 
 function MSell({ ctx }) {
@@ -2040,7 +2191,7 @@ function MSell({ ctx }) {
     // Pre-add a product when opened from the product detail page ("ขาย")
     const presetSku = ctx.route.params?.sku;
     const p = presetSku && PRODUCTS.find(x => x.sku === presetSku);
-    return p ? [{ type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: p.loc, qty: 1 }] : [];
+    return p ? [{ type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: defaultPickLoc(p), qty: 1 }] : [];
   });
   const [q, setQ] = useStateM("");
   // Paging for the product list — it used to render a hard .slice(0, 60) with no
@@ -2145,7 +2296,7 @@ function MSell({ ctx }) {
   const addProduct = (p) => setCart(prev => {
     const idx = prev.findIndex(i => i.type === "product" && i.sku === p.sku);
     if (idx > -1) { const n = [...prev]; n[idx] = { ...n[idx], qty: n[idx].qty + 1 }; return n; }
-    return [...prev, { type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: p.loc, qty: 1 }];
+    return [...prev, { type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: defaultPickLoc(p), qty: 1 }];
   });
   const addBundle = (b) => setCart(prev => {
     const idx = prev.findIndex(i => i.type === "bundle" && i.id === b.id);
@@ -2157,6 +2308,9 @@ function MSell({ ctx }) {
     if (qty <= 0) { removeItem(idx); return; }
     setCart(prev => { const n = [...prev]; n[idx] = { ...n[idx], qty }; return n; });
   };
+  // Which shelf this line is taken from (split products only). Editable from the
+  // cart row because a scanned line is added with the default and never asks.
+  const updateLoc = (idx, loc) => setCart(prev => { const n = [...prev]; n[idx] = { ...n[idx], loc }; return n; });
 
   // Scan a barcode/SKU → add the matching product to the cart (same beep feedback as Inbound)
   const [camOpen, setCamOpen] = useStateM(false);
@@ -2196,11 +2350,29 @@ function MSell({ ctx }) {
     }).filter(Boolean);
     if (cart.length === 0 || liveErrors.length > 0) { setSubmitting(false); ctx.pushToast("สต็อกไม่พอ — ตรวจสอบรายการอีกครั้ง"); return; }
     const allDeductions = [];
+    // Shelf per sku, carried beside the deduction (never inside it — the offline
+    // queue replays {sku,qty} only).
+    const locPicks = [];
     cart.forEach(item => {
-      if (item.type === "product") allDeductions.push({ sku: item.sku, qty: item.qty });
-      else item.items.forEach(ci => allDeductions.push({ sku: ci.sku, qty: ci.qty * item.qty }));
+      if (item.type === "product") {
+        allDeductions.push({ sku: item.sku, qty: item.qty });
+        locPicks.push({ sku: item.sku, loc: item.loc });
+      } else {
+        item.items.forEach(ci => {
+          allDeductions.push({ sku: ci.sku, qty: ci.qty * item.qty });
+          const cp = PRODUCTS.find(x => x.sku === ci.sku);
+          locPicks.push({ sku: ci.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" });
+        });
+      }
     });
     if (typeof deductManyAndPersist === "function") deductManyAndPersist(allDeductions);
+    // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
+    if (typeof applyLocPicks === "function") {
+      const locRes = await applyLocPicks(locPicks);
+      if (locRes && locRes.errors && locRes.errors.length) {
+        ctx.pushToast("ตัดสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ — แก้ที่หน้าสินค้าบนเดสก์ท็อป");
+      }
+    }
 
     const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
 
@@ -2218,7 +2390,7 @@ function MSell({ ctx }) {
     }
 
     const lineItems = cart.flatMap(item => item.type === "product"
-      ? [snapLineItem(item.sku, item.name, item.qty)]
+      ? [snapLineItem(item.sku, item.name, item.qty, item.loc)]
       : item.items.map(ci => snapLineItem(ci.sku, null, ci.qty * item.qty))
     );
 
@@ -2340,6 +2512,9 @@ function MSell({ ctx }) {
                           <div className="m-row-sub" style={{ color: over ? "var(--danger)" : "var(--muted)" }}>
                             {over ? `มีเพียง ${avail} ${item.type === "bundle" ? "ชุด" : "ชิ้น"}` : `฿${(item.price * item.qty).toLocaleString()}`}
                           </div>
+                          {item.type === "product" && (
+                            <MLocPickChips sku={item.sku} value={item.loc} need={item.qty} onChange={loc => updateLoc(idx, loc)}/>
+                          )}
                         </div>
                         <div className="qty-stepper">
                           <button onClick={() => updateQty(idx, item.qty - 1)}>−</button>

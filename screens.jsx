@@ -1596,8 +1596,16 @@ function Outbound({ goTo, pushToast, focus }) {
   const STATUS_LABEL = { picking: "กำลังหยิบ", packed: "พร้อมส่ง", shipped: "ส่งแล้ว", delivered: "จัดส่งสำเร็จ" };
   const STATUS_CLS   = { picking: "badge-warning", packed: "badge-info", shipped: "badge-success", delivered: "badge-neutral" };
 
-  const submitIssue = (data) => {
+  const submitIssue = async (data) => {
     const id = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
+    // Re-balance the per-position split against the shelves the user picked.
+    // Must run in the same tick as the qty write, before any other await.
+    const applyPicks = async () => {
+      if (typeof applyLocPicks !== "function") return;
+      const r = await applyLocPicks(data.locPicks);
+      if (r && r.offline) pushToast("ตัดสต็อกแล้ว — จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์");
+      else if (r && r.errors && r.errors.length) pushToast("ตัดสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + r.errors[0].error);
+    };
     const totalQty = data.deductions.reduce((s, d) => s + d.qty, 0);
     const primary = data.deductions[0];
     const channelLabel = data.deductions.length === 1 ? primary.name : `${data.deductions.length} ช่องทาง`;
@@ -1605,8 +1613,9 @@ function Outbound({ goTo, pushToast, focus }) {
     const dateIso = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
 
     if (data.mode === "bundle") {
-      const { bundle } = data;
+      const bundle = data.bundle;
       deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * totalQty })));
+      await applyPicks();
       if (typeof recordChange === "function") {
         recordChange({
           entity: "bundle", entityId: bundle.id, action: "update",
@@ -1630,6 +1639,7 @@ function Outbound({ goTo, pushToast, focus }) {
     }
 
     deductStockAndPersist(data.sku, totalQty);
+    await applyPicks();
     if (typeof recordChange === "function") {
       recordChange({
         entity: "product", entityId: data.sku, action: "deduct",
@@ -1642,7 +1652,7 @@ function Outbound({ goTo, pushToast, focus }) {
       id, channel: channelLabel, customer: data.customer || "ลูกค้าใหม่",
       items: data.deductions.length, status: "picking", carrier: "", tracking: "",
       ts, dateIso, deductions: data.deductions, sku: data.sku,
-      lineItems: [snapLineItem(data.sku, null, totalQty)]
+      lineItems: [snapLineItem(data.sku, null, totalQty, data.locPicks && data.locPicks[0] && data.locPicks[0].loc)]
     });
     pushToast(`ตัดสต็อก ${data.sku} จำนวน ${totalQty} ชิ้น (${data.deductions.length} ช่องทาง)`);
     setIssueOpen(false);
@@ -2174,6 +2184,12 @@ function IssueModal({ onClose, onSubmit }) {
   const toggleCh = (id) => setChannels(c => ({ ...c, [id]: { ...c[id], on: !c[id].on, qty: !c[id].on && c[id].qty === 0 ? 1 : c[id].qty } }));
   const setQty = (id, q) => setChannels(c => ({ ...c, [id]: { ...c[id], qty: Math.max(0, q), on: q > 0 ? true : c[id].on } }));
 
+  // Shelf to take from — reset whenever the chosen product changes.
+  const [pickLoc, setPickLoc] = useState("");
+  useEffect(() => {
+    setPickLoc((typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === skuId)) : "");
+  }, [skuId]);
+
   const submit = () => {
     if (selectedCount === 0 || total === 0 || overStock) return;
     const deductions = CHANNEL_LIST.filter(c => channels[c.id].on && channels[c.id].qty > 0).map(c => ({
@@ -2181,9 +2197,14 @@ function IssueModal({ onClose, onSubmit }) {
     }));
     if (isBundle) {
       if (!bundle) return;
-      onSubmit({ mode: "bundle", bundle, customer, deductions, total });
+      // Bundle components take their own default shelf — no per-component picker.
+      const locPicks = bundle.items.map(it => {
+        const cp = PRODUCTS.find(x => x.sku === it.sku);
+        return { sku: it.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" };
+      });
+      onSubmit({ mode: "bundle", bundle, customer, deductions, total, locPicks });
     } else {
-      onSubmit({ mode: "single", sku: skuId, customer, deductions, total });
+      onSubmit({ mode: "single", sku: skuId, customer, deductions, total, locPicks: [{ sku: skuId, loc: pickLoc }] });
     }
   };
 
@@ -2220,6 +2241,8 @@ function IssueModal({ onClose, onSubmit }) {
                 <span>คงเหลือ <strong className="tnum" style={{ color: "var(--fg)" }}>{product.qty}</strong> ชิ้น · ตำแหน่ง <span className="mono">{locIsStored(product.loc) ? product.loc : "—"}</span></span>
                 <span>ราคา ฿{product.price.toLocaleString()}</span>
               </div>
+              {/* Split product → choose the shelf; that line above names only the primary. */}
+              <LocPickSelect sku={skuId} value={pickLoc} need={total} onChange={setPickLoc}/>
             </div>
           )}
 
@@ -2380,7 +2403,17 @@ function Inventory({ pushToast, density, goTo, focus }) {
   }, [products, stockKey]);
 
   const addProduct = (p) => {
-    addProductToStore({ ...p, reserved: 0 });
+    // _locRows carries the multi-position split from the form. Strip it with omit()
+    // — object-rest would collide with another file's Babel temp (see CLAUDE.md).
+    const rows = p._locRows;
+    const clean = (typeof omit === "function") ? omit(p, "_locRows") : p;
+    addProductToStore({ ...clean, reserved: 0 });
+    // The product must exist before its split can reference it.
+    if (rows && rows.length > 1 && typeof saveLocSplit === "function") {
+      saveLocSplit(p.sku, rows).then(res => {
+        if (res && res.ok === false) pushToast(res.error || "บันทึกการแบ่งตำแหน่งไม่สำเร็จ");
+      }).catch(() => {});
+    }
     pushToast(`เพิ่ม SKU ${p.sku} แล้ว`);
     if (typeof recordChange === "function") {
       recordChange({
@@ -2388,7 +2421,9 @@ function Inventory({ pushToast, density, goTo, focus }) {
         summary: `เพิ่มสินค้าใหม่ ${p.name} (${p.sku})`,
         changes: [
           { label: "จำนวนเริ่มต้น", to: String(p.qty) },
-          { label: "ตำแหน่งจัดเก็บ", to: p.loc }
+          { label: "ตำแหน่งจัดเก็บ", to: rows && rows.length > 1
+            ? rows.map(r => `${locParts(r.loc).pos} ×${r.qty}`).join(" · ")
+            : p.loc }
         ]
       });
     }
@@ -2648,12 +2683,30 @@ function Inventory({ pushToast, density, goTo, focus }) {
                   </td>
                   <td onClick={() => setOpen(p.sku)}><span className="badge badge-neutral">{p.cat}</span></td>
                   <td onClick={() => setOpen(p.sku)}>
-                    {locIsStored(p.loc, storedCodes) ? (() => { const lp = locParts(p.loc); return (
-                      <div style={{ lineHeight: 1.3 }}>
-                        <span className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{lp.pos}</span>
-                        <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{lp.building}{lp.floor ? " · " + lp.floor : ""}</div>
-                      </div>
-                    ); })() : (
+                    {locIsStored(p.loc, storedCodes) ? (() => {
+                      /* Every place this SKU physically sits, not just the primary
+                         shelf — a split product read as if all of it were on one. */
+                      const spots = (typeof productPositions === "function") ? productPositions(p) : [];
+                      const extra = spots.filter(s => s.loc !== p.loc);
+                      const lp = locParts(p.loc);
+                      const primaryQty = spots.length > 1 ? qtyAtLocation(p.sku, p.loc) : null;
+                      return (
+                        <div style={{ lineHeight: 1.3 }}>
+                          <span className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{lp.pos}</span>
+                          {primaryQty !== null && <span className="tnum" style={{ fontSize: 11, color: "var(--muted)" }}> ×{primaryQty}</span>}
+                          <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{lp.building}{lp.floor ? " · " + lp.floor : ""}</div>
+                          {extra.map(s => {
+                            const ep = locParts(s.loc);
+                            return (
+                              <div key={s.loc} style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 1 }}>
+                                <span className="mono" style={{ fontWeight: 600, color: "var(--fg-2)" }}>{ep.pos}</span>
+                                <span className="tnum"> ×{s.qty}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })() : (
                       <span
                         className="badge badge-warning"
                         title={"ยังไม่ได้จัดเก็บเข้าตำแหน่ง — คลิกเพื่อเลือกตำแหน่ง" + (p.loc ? ` (ค่าเดิม: ${p.loc})` : "")}
@@ -2977,6 +3030,14 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
   });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const [pickedImage, setPickedImage] = useState("");
+  /* Storage positions. Row 0 is the primary (pick-first) shelf = products.loc;
+     extra rows become the product_locations split, which must sum to the opening
+     quantity — the same invariant saveLocSplit enforces. */
+  const [locRows, setLocRows] = useState([{ loc: "", qty: "" }]);
+  const locOptions = typeof allLocationCodes === "function" ? allLocationCodes() : [];
+  const filledLocRows = locRows.filter(r => (r.loc || "").trim());
+  const multiLoc = filledLocRows.length > 1;
+  const splitSum = filledLocRows.reduce((n, r) => n + (parseInt(r.qty, 10) || 0), 0);
 
   // Picked a stock/catalog match from the name search → auto-fill the rest.
   const pickCandidate = (c) => {
@@ -3001,8 +3062,10 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
   const showCost = canDo("viewCost");
   const price = num(f.price), qty = num(f.qty), reorder = num(f.reorder);
   const cost = showCost ? num(f.cost) : (price === null ? null : Math.round(price * 0.6));
+  // A split that doesn't add up to the opening stock would contradict p.qty.
+  const splitOk = !multiLoc || (qty !== null && splitSum === Math.round(qty));
   const canSave = skuTrim && !dupe && f.name.trim() &&
-    cost !== null && price !== null && qty !== null && reorder !== null;
+    cost !== null && price !== null && qty !== null && reorder !== null && splitOk;
 
   const margin = (showCost && cost !== null && price !== null && price > 0)
     ? Math.round((1 - cost / price) * 100) : null;
@@ -3013,12 +3076,18 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
     if (pickedImage && typeof setProductImage === "function") {
       try { setProductImage(skuTrim, pickedImage); } catch (e) {}
     }
+    // Row 0 is the primary shelf; the whole set becomes the split when there are 2+.
+    const rows = filledLocRows.map(r => ({
+      loc: r.loc.trim(),
+      qty: multiLoc ? (parseInt(r.qty, 10) || 0) : Math.round(qty)
+    }));
     onAdd({
       sku: skuTrim, name: f.name.trim(), cat: f.cat,
       brand: (f.brand || "").trim(),
       supplier: f.supplier, cost, price,
       qty: Math.round(qty), reorder: Math.round(reorder),
-      loc: f.loc.trim()
+      loc: rows.length ? rows[0].loc : "",
+      _locRows: rows.length > 1 ? rows : null
     });
   };
 
@@ -3110,17 +3179,50 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
                 {Array.from({ length: 20 }, (_, i) => (i + 1) * 5).map(n => <option key={n} value={n}/>)}
               </datalist>
             </div>
-            <div className="field">
-              <label>ตำแหน่ง</label>
-              <input className="input" value={f.loc} onChange={e => set("loc", e.target.value)} list="loc-positions" placeholder="เลือกตำแหน่ง (ไม่บังคับ)"/>
-              <datalist id="loc-positions">
-                {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
-              </datalist>
+          </div>
+
+          {/* ── Storage positions — one row per place the stock physically sits.
+                One row behaves exactly like the old single field (no qty to type);
+                add a second and the pieces must be split across them. ── */}
+          <div className="field">
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <label style={{ marginBottom: 0 }}>ตำแหน่งจัดเก็บ</label>
+              <button type="button" className="btn btn-sm" onClick={() => setLocRows(rs => [...rs, { loc: "", qty: "" }])}>
+                <Icons.Plus size={12}/> เพิ่มตำแหน่ง
+              </button>
             </div>
+            <datalist id="loc-positions">
+              {locOptions.map(c => <option key={c} value={c}/>)}
+            </datalist>
+            <div className="stack" style={{ gap: 6, marginTop: 6 }}>
+              {locRows.map((r, i) => (
+                <div key={i} className="row" style={{ gap: 8 }}>
+                  <input className="input" style={{ flex: 1 }} value={r.loc} list="loc-positions"
+                    placeholder={i === 0 ? "เลือกตำแหน่ง (ไม่บังคับ)" : "เลือกตำแหน่งเพิ่ม"}
+                    onChange={e => { const v = e.target.value; setLocRows(rs => rs.map((x, j) => j === i ? { ...x, loc: v } : x)); }}/>
+                  {multiLoc && (
+                    <input className="input tnum" type="number" min="0" style={{ width: 90, textAlign: "right" }}
+                      value={r.qty} placeholder="0"
+                      onChange={e => { const v = e.target.value; setLocRows(rs => rs.map((x, j) => j === i ? { ...x, qty: v } : x)); }}/>
+                  )}
+                  {i === 0
+                    ? <span className="badge badge-neutral" style={{ fontSize: 10, flexShrink: 0 }}>หยิบก่อน</span>
+                    : <button type="button" className="btn btn-ghost btn-icon" title="เอาตำแหน่งนี้ออก" style={{ flexShrink: 0 }}
+                        onClick={() => setLocRows(rs => rs.filter((_, j) => j !== i))}><Icons.X size={13}/></button>}
+                </div>
+              ))}
+            </div>
+            {multiLoc && (
+              <span className="hint" style={{ color: splitOk ? "var(--muted)" : "var(--danger)" }}>
+                {splitOk
+                  ? `แบ่งครบ ${splitSum} ชิ้นตามจำนวนเริ่มต้น`
+                  : `รวมทุกตำแหน่ง ${splitSum} ชิ้น — ต้องเท่ากับจำนวนเริ่มต้น ${qty === null ? 0 : Math.round(qty)} ชิ้น`}
+              </span>
+            )}
           </div>
 
           {(() => {
-            const locTrim = (f.loc || "").trim();
+            const locTrim = (locRows[0] && locRows[0].loc || "").trim();
             return (
               <div className="field">
                 <label>ภาพตำแหน่ง{locTrim ? <span style={{ fontWeight: 400, color: "var(--muted)" }}> · {locTrim}</span> : null}</label>
@@ -3621,11 +3723,14 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
     ? getEffectiveQty(sku)
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
 
+  // Each row carries its own shelf — two SKUs in one batch live in different places.
+  const newRow = (sku) => ({ sku, amount: "", loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === sku)) : "" });
   const picked = (sku) => rows.some(r => r.sku === sku);
-  const addSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs : [...rs, { sku, amount: "" }]));
+  const addSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs : [...rs, newRow(sku)]));
   const removeSku = (sku) => setRows(rs => rs.filter(r => r.sku !== sku));
-  const toggleSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs.filter(r => r.sku !== sku) : [...rs, { sku, amount: "" }]));
+  const toggleSku = (sku) => setRows(rs => (rs.some(r => r.sku === sku) ? rs.filter(r => r.sku !== sku) : [...rs, newRow(sku)]));
   const setAmount = (sku, v) => setRows(rs => rs.map(r => (r.sku === sku ? { ...r, amount: v } : r)));
+  const setRowLoc = (sku, loc) => setRows(rs => rs.map(r => (r.sku === sku ? { ...r, loc } : r)));
   const fillAll = (v) => setRows(rs => rs.map(r => ({ ...r, amount: v })));
 
   // Scan/typed-SKU selection — same exact-match funnel as StockTake.submitScan
@@ -3671,12 +3776,23 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
     setTimeout(() => scanRef.current?.focus(), 60);
   };
 
-  const confirm = () => {
+  const confirm = async () => {
     if (!canConfirm) return;
     const res = (typeof applyStockAdjustmentBatch === "function")
       ? applyStockAdjustmentBatch(changes, { reason, note })
       : { applied: 0, net: 0 };
     if (!res.applied) { toast("ปรับสต็อกไม่สำเร็จ"); return; }
+    /* Re-balance the split from the ACTUAL applied results — a row the clamp ate
+       contributes nothing. Works for both signs: a positive delta lands on the
+       chosen shelf, a negative one comes off it and cascades. */
+    if (typeof applyLocPicks === "function") {
+      const locBySku = {};
+      rows.forEach(r => { locBySku[r.sku] = r.loc; });
+      const picks = (res.results || changes).filter(r => r.ok !== false).map(r => ({ sku: r.sku, loc: locBySku[r.sku] }));
+      const locRes = await applyLocPicks(picks);
+      if (locRes && locRes.offline) toast("ปรับสต็อกแล้ว — จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์");
+      else if (locRes && locRes.errors && locRes.errors.length) toast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + locRes.errors[0].error);
+    }
     toast(changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
       : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น) — ${reason.label}`);
@@ -3796,6 +3912,8 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p ? p.name : r.sku}</div>
                           <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{r.sku} · คงเหลือ {cur}</div>
+                          {/* Neutral label here — the delta can be positive. */}
+                          <LocPickSelect sku={r.sku} value={r.loc} need={d < 0 ? -d : 0} label="ตำแหน่ง" onChange={loc => setRowLoc(r.sku, loc)}/>
                         </div>
                         <input className="input" type="number" min="0" value={r.amount} placeholder="0"
                           onChange={e => setAmount(r.sku, e.target.value)}
@@ -4415,6 +4533,47 @@ function ThaiAddrAutocomplete({ value, onChange }) {
   );
 }
 
+/* Which shelf to take this sku from. Renders nothing for the ordinary
+   single-position product, so 90% of the catalogue gains no friction; options
+   come from the product's OWN positions (never the whole tree) so staff can't
+   pick a shelf the stock isn't on. */
+function LocPickSelect({ sku, value, onChange, need, label }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const h = () => setTick(n => n + 1);
+    window.addEventListener("ims-product-locs-change", h);
+    return () => window.removeEventListener("ims-product-locs-change", h);
+  }, []);
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return null;
+  const spots = (typeof productPositions === "function") ? productPositions(p) : [];
+  if (spots.length <= 1) return null;
+  const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(sku, value) : 0;
+  const short = Number(need) > 0 && here < Number(need);
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div className="row" style={{ gap: 6, alignItems: "center" }}>
+        <Icons.Map size={12} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+        <span style={{ fontSize: 11, color: "var(--muted)", flexShrink: 0 }}>{label || "ตัดจากตำแหน่ง"}</span>
+        <select className="input" style={{ height: 30, fontSize: 12, padding: "2px 8px", flex: 1 }}
+          value={value || ""} onChange={e => onChange(e.target.value)}>
+          {!value && <option value="">— เลือกตำแหน่ง —</option>}
+          {spots.map(s => (
+            <option key={s.loc} value={s.loc} disabled={s.qty <= 0}>
+              {locParts(s.loc).pos} ×{s.qty}{s.loc === p.loc ? " · หยิบก่อน" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+      {short && (
+        <div style={{ fontSize: 10.5, color: "var(--warning)", marginTop: 2 }}>
+          ตำแหน่งนี้มีแค่ {here} ชิ้น — ที่เหลือหยิบจากตำแหน่งถัดไป
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ========= SELL PRODUCT MODAL (3-step wizard) ========= */
 function SellProductModal({ onClose, onSellComplete, presetSku }) {
   const [step, setStep] = useState(1);
@@ -4422,7 +4581,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
   // start the cart with it so staff never re-search (and can't re-pick the wrong SKU).
   const [cart, setCart] = useState(() => {
     const p = presetSku && PRODUCTS.find(x => x.sku === presetSku);
-    return p ? [{ type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: p.loc, qty: 1 }] : [];
+    return p ? [{ type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: defaultPickLoc(p), qty: 1 }] : [];
   });
   const [q, setQ] = useState("");
   const [ship, setShipState] = useState({
@@ -4473,7 +4632,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
         next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
         return next;
       }
-      return [...prev, { type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: p.loc, qty: 1 }];
+      return [...prev, { type: "product", sku: p.sku, name: p.name, price: p.price, cat: p.cat, loc: defaultPickLoc(p), qty: 1 }];
     });
   };
 
@@ -4494,6 +4653,8 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
     if (qty <= 0) { removeItem(idx); return; }
     setCart(prev => { const n = [...prev]; n[idx] = { ...n[idx], qty }; return n; });
   };
+  // Which shelf this line is taken from (split products only).
+  const updateLoc = (idx, loc) => setCart(prev => { const n = [...prev]; n[idx] = { ...n[idx], loc }; return n; });
 
   const cartErrors = cart.map(item => {
     const avail = item.type === "product" ? effQty(item.sku) : bMax(item);
@@ -4503,16 +4664,31 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
 
   const shipValid = ship.name.trim() && ship.phone.trim() && ship.addr1.trim();
 
-  const submitOrder = () => {
+  const submitOrder = async () => {
     const allDeductions = [];
+    // Which shelf each sku comes off. Kept BESIDE the deduction, never inside it:
+    // dbDeductStock rebuilds entries as {sku,qty} and the offline queue replays that.
+    const locPicks = [];
     cart.forEach(item => {
       if (item.type === "product") {
         allDeductions.push({ sku: item.sku, qty: item.qty });
+        locPicks.push({ sku: item.sku, loc: item.loc });
       } else {
-        item.items.forEach(ci => { allDeductions.push({ sku: ci.sku, qty: ci.qty * item.qty }); });
+        item.items.forEach(ci => {
+          allDeductions.push({ sku: ci.sku, qty: ci.qty * item.qty });
+          const cp = PRODUCTS.find(x => x.sku === ci.sku);
+          locPicks.push({ sku: ci.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" });
+        });
       }
     });
     deductManyAndPersist(allDeductions);
+    // Same tick, before any other await: applyLocPicks re-reads the just-written qty.
+    if (typeof applyLocPicks === "function") {
+      const locRes = await applyLocPicks(locPicks);
+      const toast = (m) => { try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })); } catch (e) {} };
+      if (locRes && locRes.offline) toast("ตัดสต็อกแล้ว — จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์");
+      else if (locRes && locRes.errors && locRes.errors.length) toast("ตัดสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + locRes.errors[0].error);
+    }
 
     const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
     const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
@@ -4714,6 +4890,9 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
                           <div style={{ fontSize: 11, color: over ? "var(--danger)" : "var(--muted)", marginTop: 1 }}>
                             {over ? `มีเพียง ${avail} ${item.type === "bundle" ? "ชุด" : "ชิ้น"}` : `฿${(item.price * item.qty).toLocaleString()}`}
                           </div>
+                          {item.type === "product" && (
+                            <LocPickSelect sku={item.sku} value={item.loc} need={item.qty} onChange={loc => updateLoc(idx, loc)}/>
+                          )}
                         </div>
                         <div className="qty-stepper">
                           <button onClick={() => updateQty(idx, item.qty - 1)}>−</button>

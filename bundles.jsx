@@ -401,11 +401,24 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
   const selectedChannels = CHANNEL_LIST.filter(c => channels[c.id].on && channels[c.id].qty > 0)
     .map(c => ({ ...c, qty: channels[c.id].qty }));
 
-  const confirmSell = () => {
+  const confirmSell = async () => {
     // Capture before-qtys BEFORE deducting so the audit shows the true from→to
     // (the old code read qty AFTER deduction, which is wrong when a deduct clamps at 0).
     const before = Object.fromEntries(bundle.items.map(it => [it.sku, getEffectiveQty(it.sku)]));
     deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })));
+    /* Third sell path (shared by both forks) — without this every component of a
+       bundle sale drifts its per-position split. No per-component picker: each
+       takes its own pick-first shelf, the SAME default the other flows use. */
+    if (typeof applyLocPicks === "function") {
+      const picks = bundle.items.map(it => {
+        const cp = PRODUCTS.find(x => x.sku === it.sku);
+        return { sku: it.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" };
+      });
+      const r = await applyLocPicks(picks);
+      if (r && r.errors && r.errors.length && typeof pushToast === "function") {
+        pushToast("ขายชุดสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + r.errors[0].error);
+      }
+    }
 
     // A bundle sale is a stock-out → it MUST become an order, or it vanishes from
     // จัดส่ง (Outbound) / ติดตามพัสดุ (Tracking) / Analytics and the customer

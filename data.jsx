@@ -874,6 +874,90 @@ async function saveLocSplit(sku, rows) {
   return { ok: true, error: "" };
 }
 
+/* ── Position-aware stock movement (ตัดจากตำแหน่ง) ──────────────────────
+   The qty writers (deductStockAndPersist / applyStockAdjustment / …) move
+   products.qty and know nothing about the split. This re-balances
+   product_locations so it sums to the NEW p.qty again, taking from — or adding
+   to — the position the user picked first, then cascading in pick order.
+
+   Difference-based ON PURPOSE: it reads p.qty as it stands NOW rather than
+   taking a quantity, so (a) one helper serves sales, ตัดสต็อก and both signs of
+   ปรับสต็อก, (b) it needs no requested-vs-clamped reconciliation, and (c) drift
+   left by an older position-blind write is absorbed at the next pick instead of
+   locking the split editor behind a mismatch error forever.
+
+   MUST be called in the same tick as the qty writer, before any other await:
+   saveLocSplit re-validates against the live p.qty. */
+function _planLocRows(sku, preferLocs) {
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return { skip: true };
+  const rows = locSplitFor(sku, p.loc);        // [] when no split is recorded
+  if (!rows.length) return { skip: true };     // unsplit sku: products.qty is the whole truth
+  const have = Math.max(0, Number(p.qty) || 0);
+  const sum = rows.reduce((n, r) => n + r.qty, 0);
+  const diff = have - sum;
+  if (!diff) return { skip: true };
+  const order = [];
+  (preferLocs || []).forEach(l => { if (l && order.indexOf(l) < 0) order.push(l); });
+  rows.forEach(r => { if (order.indexOf(r.loc) < 0) order.push(r.loc); });
+  const out = rows.map(r => ({ loc: r.loc, qty: r.qty }));
+  if (diff > 0) {
+    const target = order[0];
+    const hit = out.find(r => r.loc === target);
+    if (hit) hit.qty += diff; else out.push({ loc: target, qty: diff });
+  } else {
+    let need = -diff;
+    for (const loc of order) {
+      if (need <= 0) break;
+      const hit = out.find(r => r.loc === loc);
+      if (!hit) continue;
+      const take = Math.min(need, hit.qty);
+      hit.qty -= take; need -= take;
+    }
+  }
+  return { skip: false, rows: out.filter(r => r.qty > 0) };
+}
+
+/* picks = [{ sku, loc }] — the position each sku should be taken from (or added
+   to). Returns { ok, offline, errors:[{sku,error}] }. Plans every sku BEFORE the
+   first await so nothing can move p.qty underneath us. */
+async function applyLocPicks(picks) {
+  const list = Array.isArray(picks) ? picks : [];
+  if (!list.length) return { ok: true, offline: false, errors: [] };
+  const bySku = new Map();
+  list.forEach(it => {
+    if (!it || !it.sku) return;
+    if (!bySku.has(it.sku)) bySku.set(it.sku, []);
+    if (it.loc) bySku.get(it.sku).push(String(it.loc));
+  });
+  const plans = [];
+  bySku.forEach((prefer, sku) => {
+    const plan = _planLocRows(sku, prefer);
+    if (!plan.skip) plans.push({ sku: sku, rows: plan.rows });
+  });
+  if (!plans.length) return { ok: true, offline: false, errors: [] };
+  /* Offline: the qty write is already queued and will replay, but a split payload
+     computed now would be stale by then — skip it and let the next pick's
+     difference-based reconcile heal this sku. */
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    return { ok: false, offline: true, errors: [] };
+  }
+  const errors = [];
+  // Sequential: each saveLocSplit re-reads the shared mirror.
+  for (const pl of plans) {
+    const res = await saveLocSplit(pl.sku, pl.rows);
+    if (res && res.ok === false) errors.push({ sku: pl.sku, error: res.error });
+  }
+  return { ok: errors.length === 0, offline: false, errors: errors };
+}
+
+/* Default shelf for a sku — the pick-first position, used to seed every picker. */
+function defaultPickLoc(p) {
+  if (!p) return "";
+  const spots = productPositions(p);
+  return (spots.length && spots[0].loc) || p.loc || "";
+}
+
 /* Product-finder search (ตำแหน่งสินค้า): match by SKU or name — the SKU doubles
    as the barcode, so a keyboard-wedge scan into the input resolves too.
    Ranked exact SKU → prefix → substring. Returns { hits, total }. */
@@ -1339,11 +1423,15 @@ function genOrderId() {
 // Snapshot a sold line item with the product's price/cost AT SALE TIME, so
 // revenue analytics stay accurate even if the catalog price changes later or
 // the SKU is removed. Shape stays backward-compatible: {sku,name,qty} + price,cost.
-function snapLineItem(sku, name, qty) {
+function snapLineItem(sku, name, qty, loc) {
   const p = PRODUCTS.find(x => x.sku === sku);
   const price = p ? (Number(p.price) || 0) : 0;
   const cost  = p ? (p.cost ?? Math.round(price * 0.6)) : 0;
-  return { sku, name: name || (p ? p.name : sku), qty, price, cost };
+  // loc = the shelf this line was picked from; optional so every existing
+  // 3-arg caller is unaffected, and line_items is JSONB so no schema change.
+  const row = { sku, name: name || (p ? p.name : sku), qty, price, cost };
+  if (loc) row.loc = loc;
+  return row;
 }
 
 /* ── Stock take / cycle count ───────────────────────────────────────────
@@ -2032,6 +2120,7 @@ Object.assign(window, {
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
   storedLocSet, locIsStored, countUnstoredProducts,
   loadProductLocs, locSplitFor, hasLocSplit, locSplitTotal, productPositions, qtyAtLocation, productsInLocation, saveLocSplit,
+  applyLocPicks, defaultPickLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   loadInboundDraft, saveInboundDraft,

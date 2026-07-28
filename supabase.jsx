@@ -268,11 +268,22 @@ async function dbSaveProductLocs(sku, rows) {
                  note: r.note || '', updated_at: new Date().toISOString() }));
   const keepLocs = keep.map(r => r.loc);
 
-  let del = sb.from('product_locations').delete().eq('sku', sku);
-  // .not('loc','in',()) is invalid PostgREST — only filter when there IS a keep set.
-  if (keepLocs.length) del = del.not('loc', 'in', '(' + keepLocs.map(l => '"' + String(l).replace(/"/g, '\\"') + '"').join(',') + ')');
-  const { error: delErr } = await del;
-  if (delErr) { console.error('[DB] delete product_locations:', delErr.message); return { error: delErr.message }; }
+  /* Read first, then delete exactly the rows that should go, WITH .select() —
+     a delete without it returns no rows and no error when RLS refuses, so a
+     staff user emptying a shelf used to look like success while the row lived
+     on and the next realtime refetch resurrected it. */
+  const { data: cur, error: curErr } = await sb.from('product_locations').select('loc').eq('sku', sku);
+  if (curErr) { console.error('[DB] read product_locations:', curErr.message); return { error: curErr.message }; }
+  const toDelete = (cur || []).map(r => r.loc).filter(l => keepLocs.indexOf(l) < 0);
+  if (toDelete.length) {
+    const { data: del, error: delErr } = await sb.from('product_locations')
+      .delete().eq('sku', sku).in('loc', toDelete).select('loc');
+    if (delErr) { console.error('[DB] delete product_locations:', delErr.message); return { error: delErr.message }; }
+    if (!del || del.length < toDelete.length) {
+      console.error('[DB] delete product_locations blocked:', (del || []).length, 'of', toDelete.length, 'rows');
+      return { error: 'PERMISSION_OR_MISSING' };
+    }
+  }
 
   if (!keep.length) return { ok: true };
   const { data, error } = await sb.from('product_locations')
