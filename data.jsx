@@ -958,6 +958,96 @@ function defaultPickLoc(p) {
   return (spots.length && spots[0].loc) || p.loc || "";
 }
 
+/* Move `pieces` of a sku TO one position — the write behind "เพิ่มสินค้า / สแกน
+   เข้าตำแหน่ง". Writing p.loc alone is only correct for a sku with NO recorded
+   split; since the 2026-07-26 seed every stored sku HAS rows, so a bare p.loc
+   write left the pieces filed at the old shelf and the new box showed the
+   product with 0 ชิ้น (and the next saveLocSplit snapped p.loc right back).
+   Here the rows move too: take from the other positions in pick order
+   (primary first, then biggest pile — same convention as _planLocRows),
+   healing any recorded-vs-p.qty drift on the way. Async like saveLocSplit;
+   returns { ok, moved, all, error }. */
+async function moveStockToLocation(sku, code, pieces) {
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return { ok: false, error: "ไม่พบสินค้า " + sku };
+  const target = String(code || "").trim();
+  if (!target) return { ok: false, error: "ไม่มีรหัสตำแหน่ง" };
+  const total = Math.max(0, Number(p.qty) || 0);
+  const rows = locSplitFor(sku, p.loc);
+  if (!rows.length) {
+    // No split recorded: p.loc IS the whole truth, keep the legacy whole-move.
+    updateProductInStore(sku, { loc: target });
+    return { ok: true, moved: total, all: true };
+  }
+  let need = Math.min(total, Math.max(0, Math.round(Number(pieces) || 0)));
+  if (!need) return { ok: false, error: "" };
+  const out = rows.map(r => ({ loc: r.loc, qty: Math.max(0, Number(r.qty) || 0) }));
+  let tgt = out.find(r => r.loc === target);
+  if (!tgt) { tgt = { loc: target, qty: 0 }; out.push(tgt); }
+  // Absorb drift BEFORE the transfer so the rows we save satisfy the
+  // sum == p.qty invariant saveLocSplit enforces.
+  const sum = out.reduce((n, r) => n + r.qty, 0);
+  const diff = total - sum;
+  if (diff > 0) tgt.qty += diff;
+  else if (diff < 0) {
+    let cut = -diff;
+    for (const r of out) {
+      if (cut <= 0) break;
+      const t = Math.min(cut, r.qty);
+      r.qty -= t; cut -= t;
+    }
+  }
+  let moved = 0;
+  for (const r of out) {
+    if (need <= 0) break;
+    if (r === tgt) continue;
+    const take = Math.min(need, r.qty);
+    r.qty -= take; tgt.qty += take; need -= take; moved += take;
+  }
+  const res = await saveLocSplit(sku, out.filter(r => r.qty > 0));
+  if (!res || !res.ok) return { ok: false, error: (res && res.error) || "บันทึกตำแหน่งไม่สำเร็จ" };
+  return { ok: true, moved, all: tgt.qty >= total };
+}
+
+/* File a receiving batch into positions. lines = [{ sku, loc, qty }] — the
+   position each received line should land on. MUST be called in the same tick
+   as the adjustProductQty(+qty) writes (the _planLocRows contract): for a sku
+   with split rows the received pieces surface as p.qty-vs-rows drift, and
+   applyLocPicks absorbs that drift into the picked position. A sku without
+   rows keeps p.loc as the whole truth — receiving to a NEW position while
+   stock sits elsewhere opens a real split instead of overwriting p.loc.
+   Returns { ok, offline, errors: [{ sku, error }] }. */
+async function applyReceiveLocs(lines) {
+  const picks = [];   // skus with split rows → difference-based reconcile
+  const jobs = [];    // no-row skus that need a split created / primary set
+  (Array.isArray(lines) ? lines : []).forEach(l => {
+    if (!l || !l.sku || !l.loc || l.loc === "—") return;
+    const p = PRODUCTS.find(x => x.sku === l.sku);
+    if (!p) return;
+    const rows = locSplitFor(l.sku, p.loc);
+    if (rows.length) { picks.push({ sku: l.sku, loc: l.loc }); return; }
+    const n = Math.max(0, Number(l.qty) || 0);
+    const oldQty = Math.max(0, (Number(p.qty) || 0) - n);
+    if (!p.loc || p.loc === l.loc || !locIsStored(p.loc) || oldQty === 0) {
+      if ((p.loc || "") !== l.loc) updateProductInStore(l.sku, { loc: l.loc });
+      return;
+    }
+    // Stock recorded elsewhere and this batch lands somewhere new → real split.
+    jobs.push([l.sku, [{ loc: p.loc, qty: oldQty }, { loc: l.loc, qty: n }].filter(r => r.qty > 0)]);
+  });
+  const out = { ok: true, offline: false, errors: [] };
+  if (picks.length) {
+    const r = await applyLocPicks(picks);
+    if (r && r.offline) out.offline = true;
+    if (r && r.errors && r.errors.length) { out.ok = false; out.errors.push(...r.errors); }
+  }
+  for (const job of jobs) {
+    const r = await saveLocSplit(job[0], job[1]);
+    if (r && r.ok === false) { out.ok = false; out.errors.push({ sku: job[0], error: r.error }); }
+  }
+  return out;
+}
+
 /* Product-finder search (ตำแหน่งสินค้า): match by SKU or name — the SKU doubles
    as the barcode, so a keyboard-wedge scan into the input resolves too.
    Ranked exact SKU → prefix → substring. Returns { hits, total }. */
@@ -2120,7 +2210,7 @@ Object.assign(window, {
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
   storedLocSet, locIsStored, countUnstoredProducts,
   loadProductLocs, locSplitFor, hasLocSplit, locSplitTotal, productPositions, qtyAtLocation, productsInLocation, saveLocSplit,
-  applyLocPicks, defaultPickLoc,
+  applyLocPicks, defaultPickLoc, moveStockToLocation, applyReceiveLocs,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   loadInboundDraft, saveInboundDraft,

@@ -672,6 +672,70 @@ function OcrNameButton({ onResult, mobile }) {
   );
 }
 
+/* ── Position dropdown fed by the live location tree (อาคาร → ชั้น → ตำแหน่ง) ──
+   Replaces free-typed loc fields in the add/receive forms so a product can only
+   land on a REAL position — or create one right here (＋ เพิ่มตำแหน่งใหม่…)
+   without a trip to the ตำแหน่งจัดเก็บ page. Values are full loc codes;
+   "" = unstored. A legacy/unknown current value stays selectable (ค่าเดิม)
+   so opening an old record never silently rewrites it. Shared by desktop and
+   the m-* fork (mobile prop only switches the input class). */
+function LocationSelect({ value, onChange, mobile, noneLabel, allowNone = true, disabled, className, style }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    // Another tab / device can grow the tree while this form is open.
+    const h = () => setTick(n => n + 1);
+    window.addEventListener("ims-locations-change", h);
+    return () => window.removeEventListener("ims-locations-change", h);
+  }, []);
+  const tree = (typeof loadLocTree === "function") ? loadLocTree() : { buildings: [] };
+  const buildings = tree.buildings || [];
+  const known = new Set(typeof allLocationCodes === "function" ? allLocationCodes() : []);
+  const val = value || "";
+
+  // prompt() chain matching the Locations page (อาคาร → ชั้น → ตำแหน่ง); every
+  // step accepts an existing name (add* no-ops on duplicates) or a new one.
+  const createNew = () => {
+    const bNames = buildings.map(b => b.name);
+    const b = prompt("อาคาร / โซน (พิมพ์ชื่อใหม่เพื่อสร้าง)" + (bNames.length ? "\nที่มีอยู่: " + bNames.join(" · ") : ""), bNames[0] || "");
+    if (!b || !b.trim()) return;
+    const bn = b.trim();
+    if (typeof addBuilding === "function") addBuilding(bn);
+    const bld = (loadLocTree().buildings || []).find(x => x.name === bn);
+    const fNames = bld ? (bld.floors || []).map(f => f.name) : [];
+    const f = prompt(`ชั้น ใน "${bn}" (พิมพ์ชื่อใหม่เพื่อสร้าง)` + (fNames.length ? "\nที่มีอยู่: " + fNames.join(" · ") : ""), fNames[0] || "ชั้น 1");
+    if (!f || !f.trim()) return;
+    const fn = f.trim();
+    if (typeof addFloor === "function") addFloor(bn, fn);
+    const ps = prompt(`ชื่อตำแหน่งใหม่ใน ${bn} · ${fn} (เช่น A1, กล่อง 12)`);
+    if (!ps || !ps.trim()) return;
+    const pn = ps.trim();
+    if (typeof addPosition === "function") addPosition(bn, fn, pn);
+    onChange(locCode(bn, fn, pn));
+  };
+
+  const handle = (e) => {
+    const v = e.target.value;
+    if (v === "__new__") { e.target.value = val; createNew(); return; }
+    onChange(v);
+  };
+
+  return (
+    <select className={className || (mobile ? "m-input" : "input")} value={val} onChange={handle} disabled={disabled} style={style}>
+      {allowNone && <option value="">{noneLabel || "— ยังไม่จัดเก็บ —"}</option>}
+      {val && !known.has(val) && <option value={val}>ค่าเดิม: {val}</option>}
+      {buildings.map(b => (b.floors || []).map(f => (
+        <optgroup key={b.name + "|" + f.name} label={`${b.name} · ${f.name}`}>
+          {(f.positions || []).map(p => {
+            const code = locCode(b.name, f.name, p);
+            return <option key={code} value={code}>{p}</option>;
+          })}
+        </optgroup>
+      )))}
+      <option value="__new__">＋ เพิ่มตำแหน่งใหม่…</option>
+    </select>
+  );
+}
+
 function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
   const cats      = useMemo(() => typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(p => p.cat))].filter(Boolean).sort(), []);
   const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))].filter(Boolean).sort(), []);
@@ -703,7 +767,9 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
       name:     name.trim(),
       cat:      catVal,
       brand:    brand.trim() || "",
-      loc:      loc.trim().toUpperCase() || "—",
+      // A real tree code from LocationSelect — never case-mangle it. "—" keeps
+      // the established not-stored sentinel.
+      loc:      (loc || "").trim() || "—",
       price:    parseFloat(price) || 0,
       cost:     Math.round((parseFloat(price) || 0) * 0.6),
       qty:      0,          // start at 0; receiving adds on top
@@ -767,8 +833,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
         </div>
         <div className="field">
           <label>ตำแหน่งจัดเก็บ</label>
-          <input className={mobile ? "m-input mono" : "input mono"} value={loc}
-            onChange={e => setLoc(e.target.value.toUpperCase())} placeholder="เช่น A-01-01"/>
+          <LocationSelect value={loc} onChange={setLoc} noneLabel="— เลือกตำแหน่ง (ไม่บังคับ) —"/>
         </div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -849,8 +914,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
               </div>
               <div className="field" style={{ marginBottom: 0 }}>
                 <label style={{ fontSize: 11 }}>ตำแหน่งจัดเก็บ</label>
-                <input className="m-input mono" value={loc}
-                  onChange={e => setLoc(e.target.value.toUpperCase())} placeholder="A-01-01"/>
+                <LocationSelect mobile value={loc} onChange={setLoc} noneLabel="— เลือก (ไม่บังคับ) —"/>
               </div>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -1159,6 +1223,9 @@ function Inbound({ goTo, pushToast }) {
       return [{ sku, name, qty, loc, t }, ...prev];
     });
   };
+  // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
+  const setReceivedLoc = (idx, locV) =>
+    setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
 
   const submitScan = (override) => {
     const code = (override ?? scan).trim();
@@ -1419,7 +1486,12 @@ function Inbound({ goTo, pushToast }) {
                 <td className="t-mono">{r.t}</td>
                 <td className="t-mono" style={{ color: "var(--fg)" }}>{r.sku}</td>
                 <td>{r.name}</td>
-                <td><span className="badge badge-neutral"><Icons.Map size={11}/>{r.loc}</span></td>
+                <td style={{ minWidth: 170 }}>
+                  {closed
+                    ? <span className="badge badge-neutral"><Icons.Map size={11}/>{r.loc || "—"}</span>
+                    : <LocationSelect value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
+                        noneLabel="— ยังไม่ระบุ —" style={{ padding: "6px 8px", fontSize: 12, width: "100%" }}/>}
+                </td>
                 <td className="t-num tnum"><span style={{ fontWeight: 500 }}>{r.qty}</span></td>
                 <td><button className="btn btn-ghost btn-icon" title={`แก้ไข ${r.sku}`} onClick={() => pushToast(`แก้ไข ${r.sku} — ใช้หน้า สินค้าคงคลัง เพื่อปรับจำนวน`)}><Icons.Edit size={14}/></button></td>
               </tr>
@@ -1484,6 +1556,15 @@ function Inbound({ goTo, pushToast }) {
             if (!p) return;
             adjustProductQty(r.sku, r.qty); // atomic +delta (concurrent-safe)
           });
+          // Same tick as the qty writes (see applyReceiveLocs): file each batch
+          // at its picked position so the split rows follow the new stock.
+          if (typeof applyReceiveLocs === "function") {
+            applyReceiveLocs(received).then(res => {
+              if (res && res.errors && res.errors.length) {
+                pushToast(`รับเข้าแล้ว แต่บันทึกตำแหน่งไม่สำเร็จ ${res.errors.length} SKU — แก้ได้ที่หน้าสินค้า`);
+              }
+            }).catch(() => {});
+          }
           if (typeof recordChange === "function") {
             recordChange({
               entity: "inbound", action: "close",
@@ -3034,7 +3115,6 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
      extra rows become the product_locations split, which must sum to the opening
      quantity — the same invariant saveLocSplit enforces. */
   const [locRows, setLocRows] = useState([{ loc: "", qty: "" }]);
-  const locOptions = typeof allLocationCodes === "function" ? allLocationCodes() : [];
   const filledLocRows = locRows.filter(r => (r.loc || "").trim());
   const multiLoc = filledLocRows.length > 1;
   const splitSum = filledLocRows.reduce((n, r) => n + (parseInt(r.qty, 10) || 0), 0);
@@ -3191,15 +3271,12 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
                 <Icons.Plus size={12}/> เพิ่มตำแหน่ง
               </button>
             </div>
-            <datalist id="loc-positions">
-              {locOptions.map(c => <option key={c} value={c}/>)}
-            </datalist>
             <div className="stack" style={{ gap: 6, marginTop: 6 }}>
               {locRows.map((r, i) => (
                 <div key={i} className="row" style={{ gap: 8 }}>
-                  <input className="input" style={{ flex: 1 }} value={r.loc} list="loc-positions"
-                    placeholder={i === 0 ? "เลือกตำแหน่ง (ไม่บังคับ)" : "เลือกตำแหน่งเพิ่ม"}
-                    onChange={e => { const v = e.target.value; setLocRows(rs => rs.map((x, j) => j === i ? { ...x, loc: v } : x)); }}/>
+                  <LocationSelect style={{ flex: 1 }} value={r.loc}
+                    noneLabel={i === 0 ? "— เลือกตำแหน่ง (ไม่บังคับ) —" : "— เลือกตำแหน่งเพิ่ม —"}
+                    onChange={v => setLocRows(rs => rs.map((x, j) => j === i ? { ...x, loc: v } : x))}/>
                   {multiLoc && (
                     <input className="input tnum" type="number" min="0" style={{ width: 90, textAlign: "right" }}
                       value={r.qty} placeholder="0"
@@ -3680,10 +3757,7 @@ function ProductEditModal({ product, onClose, onSave }) {
             </div>
             <div className="field">
               <label>ตำแหน่ง</label>
-              <input className="input" value={f.loc} onChange={e => set("loc", e.target.value)} list="loc-positions-edit" placeholder="เลือกตำแหน่ง (ไม่บังคับ)"/>
-              <datalist id="loc-positions-edit">
-                {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
-              </datalist>
+              <LocationSelect value={f.loc} onChange={v => set("loc", v)} noneLabel="— เลือกตำแหน่ง (ไม่บังคับ) —"/>
             </div>
           </div>
         </div>
@@ -3988,9 +4062,13 @@ function Locations({ goTo }) {
     const h = () => setTree({ ...loadLocTree() });
     window.addEventListener("ims-locations-change", h);
     window.addEventListener("ims-products-change", h);
+    // Split rows move without touching products (partial ย้าย/แก้การแบ่ง) —
+    // the SKU badges and the open drawer must follow those too.
+    window.addEventListener("ims-product-locs-change", h);
     return () => {
       window.removeEventListener("ims-locations-change", h);
       window.removeEventListener("ims-products-change", h);
+      window.removeEventListener("ims-product-locs-change", h);
     };
   }, []);
 
@@ -4198,13 +4276,49 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
   const [addQ, setAddQ] = useState("");
   const [camOpen, setCamOpen] = useState(false);
   const [showN, setShowN] = useState(8);
+  // The shelf list itself is windowed too — โซน A holds 200+ SKUs, and a hard
+  // .slice(0, 40) ended the list silently with no way to reach the rest.
+  const [showItems, setShowItems] = useState(40);
+  // Tap a row → full product drawer (per-position split panel lives there).
+  const [viewSku, setViewSku] = useState(null);
+  useEffect(() => { setShowItems(40); setViewSku(null); }, [loc.code]);
   const toast = (m) => window.dispatchEvent(new CustomEvent("ims-toast", { detail: m }));
-  const assign = (p) => {
+  const assign = async (p) => {
     const from = p.loc && p.loc !== loc.code ? locParts(p.loc) : null;
+    const rows = (typeof locSplitFor === "function") ? locSplitFor(p.sku, p.loc) : [];
+    if (rows.length && typeof moveStockToLocation === "function") {
+      /* Recorded split → the rows must move, not just p.loc (a bare p.loc write
+         showed 0 ชิ้น here and the pieces stayed filed at the old shelf).
+         Multi-position sku: ask how many pieces come here (default = the
+         primary pile); single-position sku moves whole, no question. */
+      let pieces = Number(p.qty) || 0;
+      if (rows.length > 1) {
+        const atPrimary = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, p.loc) : 0;
+        const ans = prompt(
+          `“${p.name}” แยกเก็บ ${rows.length} ตำแหน่ง (รวม ${pieces} ชิ้น)\nย้ายมา ${loc.pos} กี่ชิ้น?`,
+          String(atPrimary > 0 ? atPrimary : pieces)
+        );
+        if (ans === null) return;
+        pieces = Math.round(Number(ans));
+        if (!pieces || pieces <= 0 || isNaN(pieces)) return;
+      }
+      const res = await moveStockToLocation(p.sku, loc.code, pieces);
+      if (!res || !res.ok) { if (res && res.error) toast(res.error); return; }
+      toast(res.all
+        ? (from ? `ย้าย “${p.name}” จาก ${from.pos} มา ${loc.pos} แล้ว` : `เพิ่ม “${p.name}” เข้า ${loc.pos} แล้ว`)
+        : `ย้าย “${p.name}” มา ${loc.pos} ${res.moved} ชิ้นแล้ว`);
+      return;
+    }
     updateProductInStore(p.sku, { loc: loc.code });
     toast(from ? `ย้าย “${p.name}” จาก ${from.pos} มา ${loc.pos} แล้ว` : `เพิ่ม “${p.name}” เข้า ${loc.pos} แล้ว`);
   };
-  const unassign = (p) => {
+  const unassign = async (p) => {
+    const rows = (typeof locSplitFor === "function") ? locSplitFor(p.sku, p.loc) : [];
+    if (rows.length > 1) { toast(`“${p.name}” แยกเก็บหลายตำแหน่ง — กดที่สินค้าเพื่อแก้การแบ่งตำแหน่ง`); return; }
+    if (rows.length === 1 && typeof saveLocSplit === "function") {
+      const res = await saveLocSplit(p.sku, []);
+      if (!res || !res.ok) { toast((res && res.error) || "นำออกไม่สำเร็จ"); return; }
+    }
     updateProductInStore(p.sku, { loc: "" });
     toast(`นำ “${p.name}” ออกจาก ${loc.pos} แล้ว`);
   };
@@ -4221,15 +4335,23 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
     if ((hit.loc || "") !== loc.code) assign(hit);
     setAddQ("");
   };
-  // Camera scan → exact-SKU resolve → assign here. Continuous mode: the scanner
-  // stays open between decodes so a whole shelf can be filled in one session.
+  // Camera scan → assign here. Resolves exactly like the wedge path (exact SKU,
+  // else a single search hit) so a code that types-to-a-match also scans-to-it.
+  // Continuous mode: the scanner stays open between decodes so a whole shelf
+  // can be filled in one session.
   const onCamScan = (code) => {
     const q = String(code || "").trim();
     if (!q) return;
-    const p = PRODUCTS.find(x => String(x.sku || "").toLowerCase() === q.toLowerCase());
+    const exact = PRODUCTS.find(x => String(x.sku || "").toLowerCase() === q.toLowerCase());
+    const res = searchProductsForLocation(q, 2);
+    const p = exact || (res.hits.length === 1 ? res.hits[0] : null);
     if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast("ไม่พบ SKU: " + q); return; }
     if (typeof playScanBeep === "function") playScanBeep();
-    if ((p.loc || "") === loc.code) { toast(`“${p.name}” อยู่ใน ${loc.pos} อยู่แล้ว`); return; }
+    const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, loc.code) : 0;
+    if ((p.loc || "") === loc.code && !(typeof hasLocSplit === "function" && hasLocSplit(p.sku))) {
+      toast(`“${p.name}” อยู่ใน ${loc.pos} อยู่แล้ว (${here || p.qty} ชิ้น)`);
+      return;
+    }
     assign(p);
   };
   // One row of the picker — used by both the search results and the browse list.
@@ -4356,15 +4478,17 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
 
           <div className="stack" style={{ gap: 6 }}>
             {items.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)", padding: 12, textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8 }}>ยังไม่มีสินค้าในตำแหน่งนี้{canAssign ? " — กด “เพิ่มสินค้า” เพื่อเลือกสินค้าเข้าตำแหน่ง" : ""}</div>}
-            {items.slice(0, 40).map(p => {
+            {items.slice(0, showItems).map(p => {
               const hl = p.sku === highlightSku;
               // Pieces AT THIS POSITION, not the product's grand total — a picker
               // sent here for 6 must not read the 12 that include another shelf.
               const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, loc.code) : p.qty;
               const isPrimary = (p.loc || "") === loc.code;
               const main = !isPrimary && locIsStored(p.loc) ? locParts(p.loc) : null;
+              const split = typeof hasLocSplit === "function" && hasLocSplit(p.sku);
               return (
-                <div key={p.sku} className="row" style={{ gap: 10, padding: 10, background: hl ? "var(--accent-soft)" : "var(--surface-2)", border: hl ? "1.5px solid var(--accent)" : "1px solid transparent", borderRadius: 8 }}>
+                <div key={p.sku} className="row" onClick={() => setViewSku(p.sku)} title="ดูรายละเอียดสินค้า"
+                  style={{ gap: 10, padding: 10, background: hl ? "var(--accent-soft)" : "var(--surface-2)", border: hl ? "1.5px solid var(--accent)" : "1px solid transparent", borderRadius: 8, cursor: "pointer" }}>
                   {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={40} radius={8}/>}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
@@ -4376,12 +4500,18 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
                     <div className="tnum" style={{ fontSize: 14, fontWeight: 500 }}>{here} ชิ้น</div>
                     {here !== p.qty && <div style={{ fontSize: 10, color: "var(--muted)" }}>รวมทุกที่ {p.qty}</div>}
                   </div>
-                  {/* Only the product whose PRIMARY shelf is here can be "removed" from it —
-                      split stock is edited in the product's own per-position panel. */}
-                  {canAssign && isPrimary && <button className="btn btn-ghost btn-icon" title="นำออกจากตำแหน่งนี้" style={{ flexShrink: 0 }} onClick={() => unassign(p)}><Icons.X size={13}/></button>}
+                  {/* Only a product stored here-and-only-here can be "removed" with one
+                      tap — a multi-position sku is rebalanced in its split panel
+                      (tap the row), not blanked. */}
+                  {canAssign && isPrimary && !split && <button className="btn btn-ghost btn-icon" title="นำออกจากตำแหน่งนี้" style={{ flexShrink: 0 }} onClick={(e) => { e.stopPropagation(); unassign(p); }}><Icons.X size={13}/></button>}
                 </div>
               );
             })}
+            {items.length > showItems && (
+              <button className="btn btn-sm" style={{ alignSelf: "center", marginTop: 4 }} onClick={() => setShowItems(n => n + 40)}>
+                ดูเพิ่ม — แสดง {showItems} จาก {items.length} รายการ
+              </button>
+            )}
           </div>
 
           <div style={{ marginTop: 22, fontWeight: 600, fontSize: 13, marginBottom: 8 }}>ภาพตำแหน่ง</div>
@@ -4408,6 +4538,12 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
           <button className="btn btn-primary" onClick={onClose} style={{ marginLeft: "auto" }}>เสร็จสิ้น</button>
         </div>
       </div>
+      {/* Product detail stacked over the position drawer (later sibling → on top).
+          Closing it drops back to this shelf list, not out of the drawer. */}
+      {(() => {
+        const vp = viewSku ? PRODUCTS.find(x => x.sku === viewSku) : null;
+        return vp ? <ProductDrawer product={vp} onClose={() => setViewSku(null)} pushToast={toast}/> : null;
+      })()}
     </>
   );
 }
@@ -5608,4 +5744,4 @@ function ProductFinder({ pushToast, goTo, focus }) {
   );
 }
 
-Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel });
+Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel, LocationSelect });

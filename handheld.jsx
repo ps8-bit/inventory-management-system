@@ -448,6 +448,9 @@ function MInbound({ ctx }) {
     setFlash(p);
     setTimeout(() => setFlash(null), 1500);
   };
+  // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
+  const setReceivedLoc = (idx, locV) =>
+    setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
 
   const submit = (override) => {
     if (closed) return;
@@ -495,6 +498,15 @@ function MInbound({ ctx }) {
       if (!p) return;
       adjustProductQty(r.sku, r.qty); // atomic +delta (concurrent-safe)
     });
+    // Same tick as the qty writes (see applyReceiveLocs): file each batch at
+    // its picked position so the split rows follow the new stock.
+    if (typeof applyReceiveLocs === "function") {
+      applyReceiveLocs(received).then(res => {
+        if (res && res.errors && res.errors.length) {
+          ctx.pushToast(`รับเข้าแล้ว แต่บันทึกตำแหน่งไม่สำเร็จ ${res.errors.length} SKU — แก้ได้ที่หน้าสินค้า`);
+        }
+      }).catch(() => {});
+    }
     if (typeof recordChange === "function") {
       recordChange({
         entity: "inbound", action: "close",
@@ -668,11 +680,15 @@ function MInbound({ ctx }) {
         <div className="m-section-label" style={{ padding: "0 4px 8px" }}>นับแล้ว · {received.length} SKU</div>
         <div className="m-list">
           {received.map((r, i) => (
-            <div key={i} className="m-row" style={{ cursor: "default" }}>
+            <div key={i} className="m-row" style={{ cursor: "default", alignItems: "flex-start" }}>
               <div className="m-row-thumb mono" style={{ fontSize: 10, fontWeight: 600 }}>{r.sku.slice(-3)}</div>
               <div className="m-row-main">
                 <div className="m-row-title">{r.name}</div>
-                <div className="m-row-sub mono">{r.sku} · {r.loc} · {r.t}</div>
+                <div className="m-row-sub mono">{r.sku} · {r.t}</div>
+                {closed
+                  ? <div className="m-row-sub mono">{r.loc || "—"}</div>
+                  : <LocationSelect mobile value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
+                      noneLabel="— จัดเก็บที่… —" style={{ marginTop: 4, height: 34, fontSize: 12, padding: "0 8px" }}/>}
               </div>
               <div className="tnum" style={{ fontWeight: 600, fontSize: 15 }}>×{r.qty}</div>
             </div>
@@ -1313,14 +1329,11 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
                 </button>
               )}
             </div>
-            <datalist id="m-loc-positions">
-              {(typeof allLocationCodes === "function" ? allLocationCodes() : []).map(c => <option key={c} value={c}/>)}
-            </datalist>
             {locRows.map((r, i) => (
               <div key={i} className="row" style={{ gap: 6, marginBottom: 6 }}>
-                <input className="m-input" style={{ flex: 1 }} value={r.loc} list="m-loc-positions"
-                  placeholder={i === 0 ? "เลือกตำแหน่ง (ไม่บังคับ)" : "เลือกตำแหน่งเพิ่ม"}
-                  onChange={e => { const v = e.target.value; setLocRows(rs => rs.map((x, j) => j === i ? { ...x, loc: v } : x)); }}/>
+                <LocationSelect mobile style={{ flex: 1 }} value={r.loc}
+                  noneLabel={i === 0 ? "— เลือกตำแหน่ง (ไม่บังคับ) —" : "— เลือกตำแหน่งเพิ่ม —"}
+                  onChange={v => setLocRows(rs => rs.map((x, j) => j === i ? { ...x, loc: v } : x))}/>
                 {multiLoc && (
                   <input className="m-input tnum" type="number" min="0" style={{ width: 72, textAlign: "right" }}
                     value={r.qty} placeholder="0"
@@ -3415,9 +3428,13 @@ function MLocations({ ctx }) {
     const h = () => setTree({ ...loadLocTree() });
     window.addEventListener("ims-locations-change", h);
     window.addEventListener("ims-products-change", h);
+    // Split rows move without touching products (partial ย้าย/แก้การแบ่ง) —
+    // the SKU badges and the open sheet must follow those too.
+    window.addEventListener("ims-product-locs-change", h);
     return () => {
       window.removeEventListener("ims-locations-change", h);
       window.removeEventListener("ims-products-change", h);
+      window.removeEventListener("ims-product-locs-change", h);
     };
   }, []);
 
@@ -3451,25 +3468,61 @@ function MLocations({ ctx }) {
   const toast = (m) => (ctx && ctx.pushToast ? ctx.pushToast(m) : window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })));
   const openPos = (sel) => { setAddingProd(false); setAddQ(""); setCamPick(false); setShowNPick(8); setShowNItems(40); setSelectedPos(sel); };
   const closeSheet = () => { setAddingProd(false); setAddQ(""); setCamPick(false); setShowNPick(8); setShowNItems(40); setSelectedPos(null); };
-  const assignToPos = (p) => {
+  const assignToPos = async (p) => {
     const sel = selectedPos; if (!sel) return;
     const from = p.loc && p.loc !== sel.code && typeof locParts === "function" ? locParts(p.loc) : null;
+    const rows = (typeof locSplitFor === "function") ? locSplitFor(p.sku, p.loc) : [];
+    if (rows.length && typeof moveStockToLocation === "function") {
+      /* Recorded split → the rows must move, not just p.loc (a bare p.loc write
+         showed 0 ชิ้น here and the pieces stayed filed at the old shelf).
+         Multi-position sku: ask how many pieces come here (default = the
+         primary pile); single-position sku moves whole, no question. */
+      let pieces = Number(p.qty) || 0;
+      if (rows.length > 1) {
+        const atPrimary = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, p.loc) : 0;
+        const ans = prompt(
+          `${p.name} แยกเก็บ ${rows.length} ตำแหน่ง (รวม ${pieces} ชิ้น)\nย้ายมา ${sel.p} กี่ชิ้น?`,
+          String(atPrimary > 0 ? atPrimary : pieces)
+        );
+        if (ans === null) return;
+        pieces = Math.round(Number(ans));
+        if (!pieces || pieces <= 0 || isNaN(pieces)) return;
+      }
+      const res = await moveStockToLocation(p.sku, sel.code, pieces);
+      if (!res || !res.ok) { if (res && res.error) toast(res.error); return; }
+      toast(res.all
+        ? (from ? `ย้าย ${p.name} จาก ${from.pos} มา ${sel.p} แล้ว` : `เพิ่ม ${p.name} เข้า ${sel.p} แล้ว`)
+        : `ย้าย ${p.name} มา ${sel.p} ${res.moved} ชิ้นแล้ว`);
+      return;
+    }
     updateProductInStore(p.sku, { loc: sel.code });
     toast(from ? `ย้าย ${p.name} จาก ${from.pos} มา ${sel.p} แล้ว` : `เพิ่ม ${p.name} เข้า ${sel.p} แล้ว`);
   };
-  // Camera scan → exact-SKU resolve → assign to the open position. Continuous
-  // mode keeps the scanner up so a whole shelf can be filled in one session.
+  // Camera scan → assign to the open position. Resolves like the desktop wedge
+  // path (exact SKU, else a single search hit). Continuous mode keeps the
+  // scanner up so a whole shelf can be filled in one session.
   const scanIntoPos = (code) => {
     const sel = selectedPos; if (!sel) return;
     const q = String(code || "").trim(); if (!q) return;
-    const p = PRODUCTS.find(x => String(x.sku || "").toLowerCase() === q.toLowerCase());
+    const exact = PRODUCTS.find(x => String(x.sku || "").toLowerCase() === q.toLowerCase());
+    const res = (typeof searchProductsForLocation === "function") ? searchProductsForLocation(q, 2) : { hits: [] };
+    const p = exact || (res.hits.length === 1 ? res.hits[0] : null);
     if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast("ไม่พบ SKU: " + q); return; }
     if (typeof playScanBeep === "function") playScanBeep();
-    if ((p.loc || "") === sel.code) { toast(`${p.name} อยู่ใน ${sel.p} อยู่แล้ว`); return; }
+    if ((p.loc || "") === sel.code && !(typeof hasLocSplit === "function" && hasLocSplit(p.sku))) {
+      toast(`${p.name} อยู่ใน ${sel.p} อยู่แล้ว`);
+      return;
+    }
     assignToPos(p);
   };
-  const unassignFromPos = (p) => {
+  const unassignFromPos = async (p) => {
     const sel = selectedPos; if (!sel) return;
+    const rows = (typeof locSplitFor === "function") ? locSplitFor(p.sku, p.loc) : [];
+    if (rows.length > 1) { toast(`${p.name} แยกเก็บหลายตำแหน่ง — แตะที่สินค้าเพื่อแก้การแบ่งตำแหน่ง`); return; }
+    if (rows.length === 1 && typeof saveLocSplit === "function") {
+      const res = await saveLocSplit(p.sku, []);
+      if (!res || !res.ok) { toast((res && res.error) || "นำออกไม่สำเร็จ"); return; }
+    }
     updateProductInStore(p.sku, { loc: "" });
     toast(`นำ ${p.name} ออกจาก ${sel.p} แล้ว`);
   };
@@ -3728,8 +3781,10 @@ function MLocations({ ctx }) {
                     const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, selectedPos.code) : p.qty;
                     const isPrimary = (p.loc || "") === selectedPos.code;
                     const main = !isPrimary && locIsStored(p.loc) ? locParts(p.loc) : null;
+                    const split = typeof hasLocSplit === "function" && hasLocSplit(p.sku);
                     return (
-                      <div key={p.sku} className="row" style={{ gap: 10, padding: "8px 10px", background: hl ? "var(--accent-soft)" : "var(--surface-2)", border: hl ? "1.5px solid var(--accent)" : "1px solid transparent", borderRadius: 8, marginBottom: 6 }}>
+                      <div key={p.sku} className="row" onClick={() => { closeSheet(); ctx.push("product", { sku: p.sku }); }}
+                        style={{ gap: 10, padding: "8px 10px", background: hl ? "var(--accent-soft)" : "var(--surface-2)", border: hl ? "1.5px solid var(--accent)" : "1px solid transparent", borderRadius: 8, marginBottom: 6, cursor: "pointer" }}>
                         <ProductImageThumb sku={p.sku} size={40} radius={8}/>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
@@ -3741,7 +3796,9 @@ function MLocations({ ctx }) {
                           <div className="tnum" style={{ fontSize: 14, fontWeight: 500 }}>{here} ชิ้น</div>
                           {here !== p.qty && <div style={{ fontSize: 10, color: "var(--muted)" }}>รวม {p.qty}</div>}
                         </div>
-                        {canAssign && isPrimary && <button style={{ display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0, cursor: "pointer" }} title="นำออกจากตำแหน่งนี้" onClick={() => unassignFromPos(p)}><Icons.X size={14}/></button>}
+                        {/* Multi-position sku is rebalanced in its split panel (tap the
+                            row), not blanked with one X. */}
+                        {canAssign && isPrimary && !split && <button style={{ display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0, cursor: "pointer" }} title="นำออกจากตำแหน่งนี้" onClick={(e) => { e.stopPropagation(); unassignFromPos(p); }}><Icons.X size={14}/></button>}
                       </div>
                     );
                   })
