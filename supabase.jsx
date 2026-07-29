@@ -23,11 +23,24 @@ async function dbLoadProducts() {
   if (error) { console.error('[DB] load products:', error.message); return null; }
   return data;
 }
+/* ── Why `cost` is NOT in the upsert payload ──
+   protect-cost-column.sql revoked SELECT on products.cost from `authenticated`.
+   PostgREST's upsert is INSERT … ON CONFLICT DO UPDATE, and Postgres refuses that
+   unless the caller can SELECT every column the DO UPDATE writes — so including
+   cost fails with "permission denied for table products" (42501) for EVERY user,
+   admin included: admin/manager is a JWT claim, but the DB role is `authenticated`
+   for everyone. (This silently broke every new-SKU create and stock-take apply
+   from 2026-07-26 until it was caught on 2026-07-29.)
+   So: upsert every other column, then set cost with a plain UPDATE, which needs
+   only UPDATE(cost) — a privilege the role does hold. The products_guard_cost
+   trigger still restores old.cost for anyone who isn't admin/manager, so this can
+   neither leak cost nor let a cost-blind client wipe it.
+   NOTE: cost is nullable DEFAULT 0, so an insert that omits it is safe. */
 async function dbUpsertProducts(products) {
   if (!products || !products.length) return { ok: true };
-  const rows = products.map(({ sku, name, cat, cost, price, qty, reserved, reorder, loc, supplier, brand }) => ({
+  const stamp = new Date().toISOString();
+  const rows = products.map(({ sku, name, cat, price, qty, reserved, reorder, loc, supplier, brand }) => ({
     sku, name, cat,
-    cost:     Number(cost)     || 0,
     price:    Number(price)    || 0,
     qty:      Number(qty)      || 0,
     reserved: Number(reserved) || 0,
@@ -35,7 +48,7 @@ async function dbUpsertProducts(products) {
     loc:      loc      || '-',
     supplier: supplier || 'ไม่ระบุ',
     brand:    brand    || '',
-    updated_at: new Date().toISOString()
+    updated_at: stamp
   }));
   // .select() detects an RLS-blocked write (0 rows, no error) — e.g. a viewer
   // editing a product they have no permission to persist.
@@ -45,8 +58,64 @@ async function dbUpsertProducts(products) {
     console.error('[DB] upsert products blocked (RLS): persisted', (data ? data.length : 0), 'of', rows.length);
     return { error: 'PERMISSION_OR_MISSING' };
   }
-  return { ok: true };
+  const costError = await _dbWriteCosts(products);
+  // The product itself saved — a cost-only failure must not be reported as a
+  // total failure (that would trigger a full reload and discard nothing useful),
+  // but it must not pass silently either.
+  return costError ? { ok: true, costError } : { ok: true };
 }
+
+/* Set `cost` for the rows just written — see the note on dbUpsertProducts.
+   Skipped outright for a cost-blind role: the trigger would revert it anyway, and
+   that client's masked value must never be sent. Costs are diffed against
+   products_v (which returns the real cost to admin/manager) so a re-import of
+   unchanged costs writes nothing, then grouped by value so what remains is one
+   scoped UPDATE per distinct cost rather than one per row. */
+async function _dbWriteCosts(products) {
+  if (typeof canDo === 'function' && !canDo('viewCost')) return null;
+  const want = new Map();                       // sku -> cost
+  products.forEach(p => {
+    const sku = p && p.sku;
+    if (sku) want.set(sku, Number(p.cost) || 0);
+  });
+  if (!want.size) return null;
+
+  const skus = [...want.keys()];
+  const CHUNK = 200;
+  // Drop the skus whose stored cost already matches.
+  for (let i = 0; i < skus.length; i += CHUNK) {
+    const slice = skus.slice(i, i + CHUNK);
+    const { data, error } = await sb.from('products_v').select('sku,cost').in('sku', slice);
+    if (error) break;                            // can't diff → fall through and write them all
+    (data || []).forEach(r => {
+      if (want.has(r.sku) && (Number(r.cost) || 0) === want.get(r.sku)) want.delete(r.sku);
+    });
+  }
+  if (!want.size) return null;
+
+  const byCost = new Map();                      // cost -> [sku]
+  want.forEach((cost, sku) => {
+    if (!byCost.has(cost)) byCost.set(cost, []);
+    byCost.get(cost).push(sku);
+  });
+
+  let firstErr = null;
+  for (const [cost, list] of byCost) {
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const { error } = await sb.from('products').update({ cost }).in('sku', list.slice(i, i + CHUNK));
+      if (error && !firstErr) { firstErr = error.message; console.error('[DB] set product cost:', error.message); }
+    }
+  }
+  if (firstErr) {
+    try {
+      window.dispatchEvent(new CustomEvent('ims-toast', {
+        detail: 'บันทึกสินค้าแล้ว แต่บันทึกราคาทุนไม่สำเร็จ: ' + firstErr
+      }));
+    } catch (e) {}
+  }
+  return firstErr;
+}
+
 async function dbDeleteProducts(skus) {
   if (!skus) return { ok: true, deleted: 0 };
   const raw = Array.isArray(skus) ? skus : [...skus];
