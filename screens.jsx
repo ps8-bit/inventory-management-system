@@ -4033,6 +4033,41 @@ function ProductEditModal({ product, onClose, onSave }) {
   );
 }
 
+/* ── QtyStepper — จำนวนที่กดพลาดไม่ได้ ────────────────────────────────
+   A focused <input type="number"> increments on mouse-wheel, so scrolling a
+   long ปรับสต็อก list with the cursor over the amount silently changed it
+   (reported 2026-09-19 — the count went in wrong and nobody saw why).
+   This is type="text" + inputMode="numeric": no native spinner, nothing for
+   the wheel to grab, and explicit − / + buttons replace the arrows.
+   `value` stays a STRING so the field can be emptied while typing; callers
+   already treat it that way (r.amount). Shared with the mobile fork — defined
+   here because screens.jsx loads before handheld.jsx (same as CameraScanner). */
+function QtyStepper({ value, onChange, min = 0, max, small, title }) {
+  const raw = String(value == null ? "" : value);
+  const parsed = parseInt(raw, 10);
+  const base = Number.isFinite(parsed) ? parsed : 0;
+  const clamp = (n) => {
+    let v = n;
+    if (typeof min === "number") v = Math.max(min, v);
+    if (typeof max === "number") v = Math.min(max, v);
+    return v;
+  };
+  const bump = (d) => onChange(String(clamp(base + d)));
+  const atMin = typeof min === "number" && raw !== "" && base <= min;
+  const atMax = typeof max === "number" && base >= max;
+  return (
+    <div className={"qty-stepper" + (small ? " qty-sm" : "")} title={title}>
+      <button type="button" tabIndex={-1} disabled={atMin} onClick={() => bump(-1)} aria-label="ลดจำนวน">−</button>
+      <input
+        type="text" inputMode="numeric" pattern="[0-9]*" value={raw} placeholder="0"
+        onChange={e => onChange(e.target.value.replace(/[^\d]/g, ""))}
+        onFocus={e => e.target.select()}
+        aria-label={title || "จำนวน"}/>
+      <button type="button" tabIndex={-1} disabled={atMax} onClick={() => bump(1)} aria-label="เพิ่มจำนวน">+</button>
+    </div>
+  );
+}
+
 /* Reason-driven stock adjustment (นับผิด / เสียหาย / ขายนอกระบบ) — applies via
    the shared applyStockAdjustmentBatch → applyStockAdjustment choke point
    (data.jsx), which also writes the audit trail + stock_adjustments history.
@@ -4052,6 +4087,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const [showN, setShowN] = useState(30);
   const [pickOpen, setPickOpen] = useState(!product);
   const [busy, setBusy] = useState(false);
+  const [fillValue, setFillValue] = useState("");   // "ใส่เท่ากันทุกแถว" box
   const busyRef = useRef(false);
   const scanRef = useRef(null);
   const toast = pushToast || (() => {});
@@ -4250,9 +4286,9 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
                   {rows.length > 1 && (
                     <div className="row" style={{ gap: 6 }}>
                       <span style={{ fontSize: 11, color: "var(--muted)" }}>ใส่เท่ากันทุกแถว</span>
-                      <input className="input" type="number" min="0" placeholder="0"
-                        style={{ width: 78, textAlign: "right", padding: "5px 8px", height: "auto" }}
-                        onChange={e => fillAll(e.target.value)}/>
+                      <QtyStepper small value={fillValue}
+                        onChange={v => { setFillValue(v); fillAll(v); }}
+                        title="ใส่จำนวนเท่ากันทุกแถว"/>
                     </div>
                   )}
                 </div>
@@ -4270,9 +4306,9 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
                           {/* Neutral label here — the delta can be positive. */}
                           <LocPickSelect sku={r.sku} value={r.loc} need={d < 0 ? -d : 0} label="ตำแหน่ง" onChange={loc => setRowLoc(r.sku, loc)}/>
                         </div>
-                        <input className="input" type="number" min="0" value={r.amount} placeholder="0"
-                          onChange={e => setAmount(r.sku, e.target.value)}
-                          style={{ width: 82, textAlign: "right", flexShrink: 0 }}/>
+                        <QtyStepper value={r.amount} onChange={v => setAmount(r.sku, v)}
+                          max={mode === "remove" ? cur : undefined}
+                          title={`จำนวนสำหรับ ${r.sku}`}/>
                         <div className="tnum" style={{ width: 76, textAlign: "right", fontSize: 12, flexShrink: 0, color: d === 0 ? "var(--muted)" : d > 0 ? "var(--success)" : "var(--danger)" }}>
                           {d === 0 ? "—" : `${cur} → ${Math.max(0, cur + d)}`}
                         </div>
@@ -6298,4 +6334,4 @@ function PackQueue({ pushToast, goTo, user }) {
   );
 }
 
-Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel, LocationSelect, PackQueue });
+Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel, LocationSelect, PackQueue, QtyStepper });

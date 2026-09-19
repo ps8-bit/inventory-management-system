@@ -1987,3 +1987,64 @@ html, body {
 /* Flex children that own a scrollbar must be allowed to shrink, or a long
    list pushes the sheet past its max-height and the tail is unreachable. */
 .m-content, .m-sheet-body { min-height: 0; }
+
+/* ══════════════════════════════════════════════════════════════
+   QUANTITY STEPPER — ช่องกรอกจำนวนที่กันกดพลาด (2026-09-19)
+   A focused <input type="number"> increments on mouse-wheel, so scrolling a
+   long list with the cursor over the field silently changed the amount. This
+   is type="text" + inputMode="numeric": no native spinner, no wheel capture —
+   you type, or you press − / +. Used by ปรับสต็อก on both desktop and mobile.
+   ══════════════════════════════════════════════════════════════ */
+.qty-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+  box-shadow: var(--elev-1);
+}
+.qty-stepper:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.qty-stepper > button {
+  width: 34px;
+  flex-shrink: 0;
+  border: none;
+  background: var(--surface-2);
+  color: var(--fg-2);
+  font-family: inherit;
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .12s ease, color .12s ease;
+}
+.qty-stepper > button:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
+.qty-stepper > button:active:not(:disabled) { transform: scale(0.94); }
+.qty-stepper > button:disabled { opacity: .3; cursor: not-allowed; }
+.qty-stepper > input {
+  width: 54px;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  padding: 8px 2px;
+  font-variant-numeric: tabular-nums;
+}
+.qty-stepper.qty-sm > button { width: 30px; font-size: 15px; }
+.qty-stepper.qty-sm > input { width: 44px; font-size: 13px; padding: 6px 2px; }
+/* Touch targets on the phone fork */
+html[data-mobile="1"] .qty-stepper > button { width: 38px; }
+html[data-mobile="1"] .qty-stepper > input { width: 50px; }

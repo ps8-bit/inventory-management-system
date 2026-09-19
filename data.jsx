@@ -2722,6 +2722,32 @@ function guessBrandFromSku(sku) {
   return pre;
 }
 
+/* ── Mouse wheel must never change a number ──────────────────────────────
+   A focused <input type="number"> increments/decrements on wheel. Scrolling a
+   long list with the cursor over a qty field therefore changed it silently —
+   reported on ปรับสต็อก 2026-09-19, but the app has ~35 number inputs (stock
+   take counts, receiving amounts, sell quantities, bundle quantities …) and
+   every one of them had the same hazard.
+
+   Guarded at the document, in the CAPTURE phase, so it applies to inputs in
+   both forks without touching 35 call sites — including any added later.
+   We BLUR instead of preventDefault: dropping focus stops the value change
+   (the wheel only steps a FOCUSED field) while letting the list underneath
+   scroll normally, which preventDefault would freeze. ปรับสต็อก goes further
+   and uses QtyStepper (type="text" + − / + buttons), so there is nothing for
+   the wheel to grab in the first place. */
+(function guardNumberInputsFromWheel() {
+  if (typeof document === "undefined") return;
+  document.addEventListener("wheel", function (e) {
+    const el = document.activeElement;
+    if (!el || el.tagName !== "INPUT" || el.type !== "number") return;
+    // Only when the pointer is actually over the focused field — scrolling
+    // elsewhere on the page is none of our business.
+    if (el !== e.target && !(el.contains && el.contains(e.target))) return;
+    el.blur();
+  }, { capture: true, passive: true });
+})();
+
 /* ── Offline write queue ──────────────────────────────────────────────────
    Failed DB writes (network down / RLS block) are enqueued here and retried
    automatically on the next "online" event. Entry shape: { id, type, payload, ts }. */

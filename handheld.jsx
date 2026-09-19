@@ -1782,6 +1782,7 @@ function MAdjust({ ctx }) {
   const [mode, setMode] = useStateM("remove"); // add | remove | set
   const [reasonId, setReasonId] = useStateM("");
   const [busy, setBusy] = useStateM(false);
+  const [fillValue, setFillValue] = useStateM("");   // "ใส่เท่ากันทุกแถว" box
   const busyRef = useRefM(false);
   const [note, setNote] = useStateM("");
   useEffectM(() => () => setCamOpen(false), []);
@@ -1937,9 +1938,12 @@ function MAdjust({ ctx }) {
               {rows.length > 1 && (
                 <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 400 }}>
                   <span style={{ fontSize: 10, color: "var(--muted)" }}>ใส่เท่ากันทุกแถว</span>
-                  <input className="m-input" type="number" min="0" inputMode="numeric" placeholder="0"
-                    style={{ width: 64, padding: "6px 8px", fontSize: 13, textAlign: "right", marginBottom: 0 }}
-                    onChange={e => fillAll(e.target.value)}/>
+                  {typeof QtyStepper === "function"
+                    ? <QtyStepper small value={fillValue}
+                        onChange={v => { setFillValue(v); fillAll(v); }} title="ใส่จำนวนเท่ากันทุกแถว"/>
+                    : <input className="m-input" type="text" inputMode="numeric" placeholder="0"
+                        style={{ width: 64, padding: "6px 8px", fontSize: 13, textAlign: "right", marginBottom: 0 }}
+                        onChange={e => fillAll(e.target.value.replace(/[^\d]/g, ""))}/>}
                 </span>
               )}
             </div>
@@ -1963,9 +1967,14 @@ function MAdjust({ ctx }) {
                       {/* Neutral label — the delta can be positive. */}
                       <MLocPickChips sku={r.sku} value={r.loc} need={d < 0 ? -d : 0} label="ตำแหน่ง" onChange={loc => setRowLoc(r.sku, loc)}/>
                     </div>
-                    <input className="m-input" type="number" min="0" inputMode="numeric" value={r.amount} placeholder="0"
-                      onChange={e => setAmount(r.sku, e.target.value)}
-                      style={{ width: 66, padding: "8px 10px", fontSize: 14, textAlign: "right", marginBottom: 0, flexShrink: 0 }}/>
+                    {/* Typed or − / + only. A number input increments on wheel/scroll,
+                        which quietly corrupted counts — see QtyStepper in screens.jsx. */}
+                    {typeof QtyStepper === "function"
+                      ? <QtyStepper small value={r.amount} onChange={v => setAmount(r.sku, v)}
+                          max={mode === "remove" ? cur : undefined} title={`จำนวนสำหรับ ${r.sku}`}/>
+                      : <input className="m-input" type="text" inputMode="numeric" value={r.amount} placeholder="0"
+                          onChange={e => setAmount(r.sku, e.target.value.replace(/[^\d]/g, ""))}
+                          style={{ width: 66, padding: "8px 10px", fontSize: 14, textAlign: "right", marginBottom: 0, flexShrink: 0 }}/>}
                     <button onClick={() => removeSku(r.sku)} title="เอาออก"
                       style={{ display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0, cursor: "pointer" }}>
                       <Icons.X size={14}/>
