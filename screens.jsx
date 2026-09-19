@@ -1184,6 +1184,7 @@ function Inbound({ goTo, pushToast }) {
   // Restore any in-progress receiving draft so leaving + returning (or a reload)
   // doesn't lose scanned-but-not-committed items.
   const [received, setReceived] = useState(() => typeof loadInboundDraft === "function" ? loadInboundDraft() : []);
+  const [qtyEdit, setQtyEdit] = useState(null); // null | { sku, val } — raw text while a count is being typed
   const [scan, setScan] = useState("");
   const [flash, setFlash] = useState(null);
   const [camOpen, setCamOpen] = useState(false);
@@ -1551,11 +1552,32 @@ function Inbound({ goTo, pushToast }) {
         action="ยืนยันปิดงาน"
         onCancel={() => setCloseConfirm(null)}
         onConfirm={() => {
-          received.forEach(r => {
-            const p = PRODUCTS.find(x => x.sku === r.sku);
-            if (!p) return;
-            adjustProductQty(r.sku, r.qty); // atomic +delta (concurrent-safe)
-          });
+          /* One receiving batch = one commit. Without this latch a double-click,
+             or a reload that restored the draft after the write had already
+             landed, ran the whole batch again and every sku was received twice.
+             The key is a fingerprint of the batch, so a DIFFERENT batch — even
+             one second later — is never blocked. */
+          const guardKey = (typeof commitFingerprint === "function")
+            ? commitFingerprint("inbound-close", received) : null;
+          if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
+            if (typeof duplicateCommitToast === "function") duplicateCommitToast();
+            setCloseConfirm(null);
+            setClosed(true);
+            return;
+          }
+          // Retire the draft NOW, not in the [closed] effect: a reload landing
+          // between the stock write and that effect used to restore the batch
+          // and invite a second ปิดงาน.
+          if (typeof saveInboundDraft === "function") saveInboundDraft([]);
+          /* Applies every line (atomic +delta, concurrent-safe) and writes one
+             movement-ledger row per sku using the quantity the SERVER confirms
+             — not the quantity we asked for. Synchronous internally, so the
+             applyReceiveLocs call below still sees the new p.qty this tick. */
+          if (typeof receiveStockAndRecord === "function") {
+            receiveStockAndRecord(received, "รับเข้าสินค้า");
+          } else {
+            received.forEach(r => { if (PRODUCTS.some(p => p.sku === r.sku)) adjustProductQty(r.sku, r.qty); });
+          }
           // Same tick as the qty writes (see applyReceiveLocs): file each batch
           // at its picked position so the split rows follow the new stock.
           if (typeof applyReceiveLocs === "function") {
@@ -1677,65 +1699,11 @@ function Outbound({ goTo, pushToast, focus }) {
   const STATUS_LABEL = { picking: "กำลังหยิบ", packed: "พร้อมส่ง", shipped: "ส่งแล้ว", delivered: "จัดส่งสำเร็จ" };
   const STATUS_CLS   = { picking: "badge-warning", packed: "badge-info", shipped: "badge-success", delivered: "badge-neutral" };
 
+  // Multi-item stock-out: the modal hands over a cart, commitIssueOrder does the
+  // deduct + shelf re-balance + audit + single order append (shared with the
+  // สินค้าคงคลัง entry point so the two can't drift).
   const submitIssue = async (data) => {
-    const id = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
-    // Re-balance the per-position split against the shelves the user picked.
-    // Must run in the same tick as the qty write, before any other await.
-    const applyPicks = async () => {
-      if (typeof applyLocPicks !== "function") return;
-      const r = await applyLocPicks(data.locPicks);
-      if (r && r.offline) pushToast("ตัดสต็อกแล้ว — จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์");
-      else if (r && r.errors && r.errors.length) pushToast("ตัดสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + r.errors[0].error);
-    };
-    const totalQty = data.deductions.reduce((s, d) => s + d.qty, 0);
-    const primary = data.deductions[0];
-    const channelLabel = data.deductions.length === 1 ? primary.name : `${data.deductions.length} ช่องทาง`;
-    const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
-    const dateIso = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
-
-    if (data.mode === "bundle") {
-      const bundle = data.bundle;
-      deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * totalQty })));
-      await applyPicks();
-      if (typeof recordChange === "function") {
-        recordChange({
-          entity: "bundle", entityId: bundle.id, action: "update",
-          summary: `ตัดสต็อกชุด "${bundle.name}" ${totalQty} ชุด ผ่านหน้าจัดส่ง`,
-          count: bundle.items.length,
-          changes: bundle.items.map(item => ({
-            label: item.sku, to: `−${item.qty * totalQty} ชิ้น`
-          })),
-          note: `ออร์เดอร์ ${id} · ${channelLabel}`
-        });
-      }
-      appendOrder({
-        id, channel: channelLabel, customer: data.customer || "ลูกค้าใหม่",
-        items: bundle.items.length, status: "picking", carrier: "", tracking: "",
-        ts, dateIso, deductions: data.deductions, isBundle: true, bundleName: bundle.name,
-        lineItems: bundle.items.map(it => snapLineItem(it.sku, null, it.qty * totalQty))
-      });
-      pushToast(`ตัดสต็อกชุด "${bundle.name}" ${totalQty} ชุด — ${bundle.items.length} รายการสินค้า`);
-      setIssueOpen(false);
-      return;
-    }
-
-    deductStockAndPersist(data.sku, totalQty);
-    await applyPicks();
-    if (typeof recordChange === "function") {
-      recordChange({
-        entity: "product", entityId: data.sku, action: "deduct",
-        summary: `ตัดสต็อก ${data.sku} จำนวน ${totalQty} ชิ้น ผ่านหน้าจัดส่ง`,
-        changes: [{ label: data.sku, to: `−${totalQty} ชิ้น` }],
-        note: `ออร์เดอร์ ${id} · ${channelLabel}`
-      });
-    }
-    appendOrder({
-      id, channel: channelLabel, customer: data.customer || "ลูกค้าใหม่",
-      items: data.deductions.length, status: "picking", carrier: "", tracking: "",
-      ts, dateIso, deductions: data.deductions, sku: data.sku,
-      lineItems: [snapLineItem(data.sku, null, totalQty, data.locPicks && data.locPicks[0] && data.locPicks[0].loc)]
-    });
-    pushToast(`ตัดสต็อก ${data.sku} จำนวน ${totalQty} ชิ้น (${data.deductions.length} ช่องทาง)`);
+    await commitIssueOrder(data, pushToast);
     setIssueOpen(false);
   };
 
@@ -1916,19 +1884,25 @@ function Outbound({ goTo, pushToast, focus }) {
               const dateStr = new Date().toLocaleDateString("th-TH", { dateStyle: "full" });
               const timeStr = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
 
-              // Build per-SKU consolidated pick map: sku → {name, loc, orders:[{id,customer,qty}], total}
-              const skuMap = {};
-              toPrint.forEach(o => {
-                const lines = Array.isArray(o.lineItems) ? o.lineItems : [];
-                lines.forEach(it => {
-                  const prod = PRODUCTS.find(p => p.sku === it.sku);
-                  if (!skuMap[it.sku]) skuMap[it.sku] = { name: it.name || (prod && prod.name) || it.sku, loc: (prod && prod.loc) || "—", orders: [], total: 0 };
-                  skuMap[it.sku].orders.push({ id: o.id, customer: o.customer || "—", qty: it.qty || 1 });
-                  skuMap[it.sku].total += (it.qty || 1);
-                });
-              });
-              // Sort by bin location for efficient warehouse walk
-              const skuRows = Object.entries(skuMap).sort(([,a],[,b]) => (a.loc||"").localeCompare(b.loc||""));
+              /* One row per (sku, shelf) via the shared pack resolver, so the paper
+                 sheet, the mobile pack screen and the desktop queue all send the
+                 picker to the SAME position. It matters: the resolver uses the shelf
+                 the sale actually debited (lineItems[].loc) and walks the location
+                 tree in physical order, where this used to print the product's
+                 primary p.loc sorted alphabetically — which misdirects the picker
+                 for any SKU whose stock is split across positions. */
+              const waveLines = (typeof packLinesForOrders === "function") ? packLinesForOrders(toPrint) : [];
+              const skuRows = waveLines.map(l => [l.sku, {
+                name: l.name,
+                loc: l.loc ? (((typeof locParts === "function" && locParts(l.loc)) || {}).pos || l.loc) : "—",
+                locSub: l.parts ? `${l.parts.building}${l.parts.floor ? " · " + l.parts.floor : ""}` : "",
+                shelfQty: l.shelfQty,
+                orders: l.per.map(pr => {
+                  const src = toPrint.find(x => x.id === pr.orderId);
+                  return { id: pr.orderId, customer: (src && src.customer) || "—", qty: pr.qty };
+                }),
+                total: l.qty
+              }]);
               const totalQty = skuRows.reduce((s,[,v]) => s + v.total, 0);
               const hasLineItems = skuRows.length > 0;
 
@@ -1939,10 +1913,10 @@ function Outbound({ goTo, pushToast, focus }) {
                   <tbody>${skuRows.map(([sku,v]) => `
                     <tr>
                       <td><span class="chk"></span></td>
-                      <td class="mono loc">${v.loc}</td>
+                      <td class="mono loc">${v.loc}${v.locSub ? `<div class="small" style="font-weight:400;color:#666">${v.locSub}</div>` : ""}</td>
                       <td class="mono">${sku}</td>
                       <td>${v.name}</td>
-                      <td class="num bold">${v.total}</td>
+                      <td class="num bold">${v.total}${v.shelfQty < v.total ? `<div class="small" style="color:#c62828;font-weight:400">ในชั้นมี ${v.shelfQty}</div>` : ""}</td>
                       <td class="small">${v.orders.map(r=>`${r.id} (${r.qty})`).join(", ")}</td>
                     </tr>`).join("")}
                     <tr class="total-row"><td colspan="4" style="text-align:right;font-weight:600">รวมทั้งหมด</td><td class="num bold">${totalQty}</td><td></td></tr>
@@ -2087,7 +2061,7 @@ function Outbound({ goTo, pushToast, focus }) {
         </table>
       </div>
 
-      {issueOpen && <IssueModal onClose={() => setIssueOpen(false)} onSubmit={submitIssue}/>}
+      {issueOpen && <IssueModal onClose={() => setIssueOpen(false)} onSubmit={submitIssue} pushToast={pushToast}/>}
       <ConfirmDialog open={!!obBulkConfirm} {...(obBulkConfirm || {})} onCancel={() => setObBulkConfirm(null)}/>
     </div>
   );
@@ -2234,194 +2208,453 @@ function SkuPicker({ value, onChange, products }) {
   );
 }
 
-function IssueModal({ onClose, onSubmit }) {
-  const [mode, setMode] = useState("single"); // single | bundle
-  const bundles = useMemo(() => (typeof loadBundles === "function" ? loadBundles() : []), []);
+/* MULTI-ITEM stock-out. The cart takes any number of products AND bundles;
+   every line carries its own จำนวน, ช่องทาง and (for a split sku) the shelf it
+   is picked from, and one confirm writes ONE order. The old form is the 1-line
+   case of this, and its "split one sku across channels" is now two lines with
+   the same sku — nothing the previous version could do was lost.
+   presetSkus prefills the cart (opened from the สินค้าคงคลัง bulk bar). */
+const ISSUE_DEFAULT_CH = "shopee";
+function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
+  const toast = pushToast || ((m) => { try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })); } catch (e) {} });
+  // Keep stock/bundle numbers live while the modal is open (mirrors SellProductModal)
+  const [stockKey, setStockKey] = useState(0);
+  useEffect(() => {
+    const refresh = () => setStockKey(k => k + 1);
+    window.addEventListener("ims-stock-adj-change", refresh);
+    window.addEventListener("ims-products-change",  refresh);
+    window.addEventListener("ims-bundles-change",   refresh);
+    return () => {
+      window.removeEventListener("ims-stock-adj-change", refresh);
+      window.removeEventListener("ims-products-change",  refresh);
+      window.removeEventListener("ims-bundles-change",   refresh);
+    };
+  }, []);
+
+  const bundles = useMemo(() => (typeof loadBundles === "function" ? loadBundles() : []), [stockKey]);
   const effQty = (sku) => (typeof getEffectiveQty === "function"
     ? getEffectiveQty(sku)
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
 
-  const [skuId, setSkuId] = useState(PRODUCTS[0].sku);
-  const [bundleId, setBundleId] = useState(bundles[0]?.id || "");
-  const [customer, setCustomer] = useState("");
-  const [channels, setChannels] = useState(() =>
-    Object.fromEntries(CHANNEL_LIST.map(c => [c.id, { on: c.id === "shopee", qty: c.id === "shopee" ? 1 : 0 }]))
+  // A line is identified by (type, sku|bundle id, channel) — that triple is the
+  // cart key, so the same sku on two channels is two independent lines.
+  const lineIdOf = (l) => (l.type === "bundle" ? l.id : l.sku);
+  const mkKey = (type, id, ch) => `${type}:${id}:${ch}`;
+  const productLine = (p, ch) => ({
+    key: mkKey("product", p.sku, ch), type: "product", sku: p.sku, name: p.name,
+    price: p.price, qty: 1, ch,
+    loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(p) : (p.loc || "")
+  });
+  const bundleLine = (b, ch) => ({
+    key: mkKey("bundle", b.id, ch), type: "bundle", id: b.id, name: b.name,
+    price: b.price, items: b.items, qty: 1, ch
+  });
+
+  const [cart, setCart] = useState(() =>
+    (Array.isArray(presetSkus) ? presetSkus : [])
+      .map(s => PRODUCTS.find(p => p.sku === s))
+      .filter(Boolean)
+      .map(p => productLine(p, ISSUE_DEFAULT_CH))
   );
+  const [defCh, setDefCh] = useState(ISSUE_DEFAULT_CH);
+  const [customer, setCustomer] = useState("");
+  const [tab, setTab] = useState("product");   // picker tab: product | bundle
+  const [q, setQ] = useState("");
+  const [showN, setShowN] = useState(30);
+  const [pickOpen, setPickOpen] = useState(!(presetSkus && presetSkus.length));
+  const [scan, setScan] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scanRef = useRef(null);
 
-  const product = PRODUCTS.find(p => p.sku === skuId);
-  const bundle = bundles.find(b => b.id === bundleId);
-  const bundleMax = bundle && typeof bundleAvail === "function" ? bundleAvail(bundle) : 0;
+  const addProduct = (p) => setCart(prev => {
+    const k = mkKey("product", p.sku, defCh);
+    const idx = prev.findIndex(l => l.key === k);
+    if (idx > -1) { const n = [...prev]; n[idx] = { ...n[idx], qty: n[idx].qty + 1 }; return n; }
+    return [...prev, productLine(p, defCh)];
+  });
+  const addBundle = (b) => setCart(prev => {
+    const k = mkKey("bundle", b.id, defCh);
+    const idx = prev.findIndex(l => l.key === k);
+    if (idx > -1) { const n = [...prev]; n[idx] = { ...n[idx], qty: n[idx].qty + 1 }; return n; }
+    return [...prev, bundleLine(b, defCh)];
+  });
+  const removeLine = (key) => setCart(prev => prev.filter(l => l.key !== key));
+  const setLineQty = (key, qty) => {
+    if (qty <= 0) { removeLine(key); return; }
+    setCart(prev => prev.map(l => (l.key === key ? { ...l, qty } : l)));
+  };
+  const setLineLoc = (key, loc) => setCart(prev => prev.map(l => (l.key === key ? { ...l, loc } : l)));
+  // Moving a line onto a channel that already holds the same item merges the two.
+  const setLineCh = (key, ch) => setCart(prev => {
+    const row = prev.find(l => l.key === key);
+    if (!row || row.ch === ch) return prev;
+    const twin = prev.find(l => l.key !== key && l.type === row.type && lineIdOf(l) === lineIdOf(row) && l.ch === ch);
+    if (twin) return prev.filter(l => l.key !== key).map(l => (l.key === twin.key ? { ...l, qty: l.qty + row.qty } : l));
+    return prev.map(l => (l.key === key ? { ...l, ch, key: mkKey(row.type, lineIdOf(row), ch) } : l));
+  });
+  const applyChToAll = () => setCart(prev => {
+    const out = [];
+    prev.forEach(l => {
+      const hit = out.find(x => x.type === l.type && lineIdOf(x) === lineIdOf(l));
+      if (hit) hit.qty += l.qty;
+      else out.push({ ...l, ch: defCh, key: mkKey(l.type, lineIdOf(l), defCh) });
+    });
+    return out;
+  });
 
-  const total = Object.values(channels).reduce((s, c) => s + (c.on ? c.qty : 0), 0);
-  const selectedCount = Object.values(channels).filter(c => c.on && c.qty > 0).length;
-  const isBundle = mode === "bundle";
-  const unit = isBundle ? "ชุด" : "ชิ้น";
-  const stockCap = isBundle ? bundleMax : (product?.qty ?? 0);
-  const overStock = total > stockCap;
-  const noBundles = isBundle && bundles.length === 0;
-  const bundleIssues = isBundle && bundle && typeof bundleStockIssues === "function"
-    ? bundleStockIssues(bundle, total || 1) : [];
-
-  const toggleCh = (id) => setChannels(c => ({ ...c, [id]: { ...c[id], on: !c[id].on, qty: !c[id].on && c[id].qty === 0 ? 1 : c[id].qty } }));
-  const setQty = (id, q) => setChannels(c => ({ ...c, [id]: { ...c[id], qty: Math.max(0, q), on: q > 0 ? true : c[id].on } }));
-
-  // Shelf to take from — reset whenever the chosen product changes.
-  const [pickLoc, setPickLoc] = useState("");
-  useEffect(() => {
-    setPickLoc((typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === skuId)) : "");
-  }, [skuId]);
-
-  const submit = () => {
-    if (selectedCount === 0 || total === 0 || overStock) return;
-    const deductions = CHANNEL_LIST.filter(c => channels[c.id].on && channels[c.id].qty > 0).map(c => ({
-      id: c.id, name: c.name, color: c.color, qty: channels[c.id].qty
-    }));
-    if (isBundle) {
-      if (!bundle) return;
-      // Bundle components take their own default shelf — no per-component picker.
-      const locPicks = bundle.items.map(it => {
-        const cp = PRODUCTS.find(x => x.sku === it.sku);
-        return { sku: it.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" };
-      });
-      onSubmit({ mode: "bundle", bundle, customer, deductions, total, locPicks });
-    } else {
-      onSubmit({ mode: "single", sku: skuId, customer, deductions, total, locPicks: [{ sku: skuId, loc: pickLoc }] });
+  // Scan / typed SKU → add to the cart. Product SELECTION only (exact match),
+  // not a third barcode-resolution funnel.
+  const submitScan = (code) => {
+    const s = String(code ?? scan).trim();
+    if (!s) return;
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === s.toLowerCase());
+    if (!p) {
+      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      toast("ไม่พบ SKU: " + s);
+      return;
     }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setScan("");
+    addProduct(p);
   };
 
-  const canSubmit = !noBundles && total > 0 && !overStock && (isBundle ? !!bundle : true);
+  /* Stock is validated per SKU across the WHOLE cart (bundle components folded
+     in), not per line — two lines of the same sku on different channels must
+     not each pass on their own. */
+  const needBySku = {};
+  cart.forEach(l => {
+    if (l.type === "bundle") (l.items || []).forEach(ci => { needBySku[ci.sku] = (needBySku[ci.sku] || 0) + (Number(ci.qty) || 0) * l.qty; });
+    else needBySku[l.sku] = (needBySku[l.sku] || 0) + l.qty;
+  });
+  const shortages = Object.keys(needBySku)
+    .filter(s => needBySku[s] > effQty(s))
+    .map(s => {
+      const p = PRODUCTS.find(x => x.sku === s);
+      return `${p ? p.name : s}: ต้องการ ${needBySku[s]} แต่มีเพียง ${effQty(s)}`;
+    });
+  const shortSku = (sku) => needBySku[sku] > effQty(sku);
+  const totalUnits = cart.reduce((s, l) => s + l.qty, 0);
+  const totalPieces = Object.keys(needBySku).reduce((s, k) => s + needBySku[k], 0);
+  const cartValue = cart.reduce((s, l) => s + (l.price || 0) * l.qty, 0);
+  const chSummary = CHANNEL_LIST
+    .map(c => ({ ...c, qty: cart.filter(l => l.ch === c.id).reduce((s, l) => s + l.qty, 0) }))
+    .filter(c => c.qty > 0);
+  const mixedCh = chSummary.length > 1;
+
+  const qL = q.toLowerCase();
+  const prodMatches = PRODUCTS.filter(p =>
+    !q || p.sku.toLowerCase().includes(qL) || p.name.toLowerCase().includes(qL) || (p.cat || "").toLowerCase().includes(qL)
+  );
+  const bundleMatches = bundles.filter(b =>
+    !q || b.name.toLowerCase().includes(qL) || b.id.toLowerCase().includes(qL)
+  );
+
+  const canSubmit = cart.length > 0 && totalUnits > 0 && shortages.length === 0 && !busy;
+  const submit = async () => {
+    if (!canSubmit) return;
+    setBusy(true);
+    try { await onSubmit({ customer, lines: cart }); }
+    finally { setBusy(false); }
+  };
 
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose}/>
-      <div className="modal" style={{ maxHeight: "92vh", overflowY: "auto" }}>
+      <div className="modal" style={{ width: 720, maxWidth: "calc(100vw - 40px)", maxHeight: "92vh", overflowY: "auto" }}>
         <div className="modal-head">
           <div>
             <h3>สร้างใบจัดส่ง · ตัดสต็อก</h3>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>เลือกสินค้าเดี่ยวหรือชุดสินค้า ระบุจำนวน และช่องทางที่ต้องการตัดสต็อก</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+              {cart.length
+                ? `เลือกไว้ ${cart.length} รายการ · รวม ${totalPieces} ชิ้น — ตัดพร้อมกันในออร์เดอร์เดียว`
+                : "เลือกได้หลายรายการพร้อมกัน — สินค้าเดี่ยวและชุดสินค้า ระบุจำนวนและช่องทางแยกรายบรรทัด"}
+            </div>
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
 
         <div className="modal-body">
-          {/* Mode toggle */}
-          <div className="seg" style={{ marginBottom: 14, width: "100%" }}>
-            <button className={mode === "single" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("single")}>
-              <Icons.Box size={13}/> สินค้าเดี่ยว
-            </button>
-            <button className={mode === "bundle" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("bundle")}>
-              <Icons.Bundle size={13}/> ชุดสินค้า
-            </button>
+          <div className="field" style={{ marginBottom: 12 }}>
+            <label>สแกนบาร์โค้ด / พิมพ์ SKU เพื่อเพิ่มเข้ารายการ</label>
+            <input ref={scanRef} className="input" value={scan} onChange={e => setScan(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") submitScan(); }}
+              placeholder="ยิงบาร์โค้ดหรือพิมพ์ SKU แล้วกด Enter" autoFocus/>
           </div>
 
-          {!isBundle && (
-            <div className="field" style={{ marginBottom: 14 }}>
-              <label>สินค้า</label>
-              <SkuPicker value={skuId} onChange={setSkuId} products={PRODUCTS}/>
-              <div className="row" style={{ justifyContent: "space-between", fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
-                <span>คงเหลือ <strong className="tnum" style={{ color: "var(--fg)" }}>{product.qty}</strong> ชิ้น · ตำแหน่ง <span className="mono">{locIsStored(product.loc) ? product.loc : "—"}</span></span>
-                <span>ราคา ฿{product.price.toLocaleString()}</span>
+          {/* Default channel — new lines inherit it, so a 10-line Shopee batch is one click */}
+          <div className="field" style={{ marginBottom: 12 }}>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <label style={{ margin: 0 }}>ช่องทาง <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ใช้กับรายการที่เพิ่มใหม่)</span></label>
+              {cart.length > 0 && (
+                <button className="btn btn-sm" onClick={applyChToAll}>ใช้กับทุกแถว</button>
+              )}
+            </div>
+            <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+              {CHANNEL_LIST.map(c => (
+                <button key={c.id} className={"btn btn-sm" + (defCh === c.id ? " btn-accent" : "")} onClick={() => setDefCh(c.id)}>
+                  <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/> {c.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Product / bundle picker */}
+          <div className="field" style={{ marginBottom: 12 }}>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <label style={{ margin: 0 }}>เลือกสินค้า {cart.length > 0 && <span style={{ color: "var(--accent)" }}>({cart.length})</span>}</label>
+              <button className="btn btn-sm" onClick={() => setPickOpen(o => !o)}>
+                {pickOpen ? <><Icons.Chev size={12} style={{ transform: "rotate(-90deg)" }}/> ซ่อนรายการ</> : <><Icons.Plus size={12}/> เลือกสินค้าเพิ่ม</>}
+              </button>
+            </div>
+            {pickOpen && (
+              <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", background: "var(--surface)" }}>
+                <div style={{ padding: 8, borderBottom: "1px solid var(--border)", background: "var(--surface-2)" }}>
+                  <div className="seg" style={{ width: "100%", marginBottom: 8 }}>
+                    <button className={tab === "product" ? "on" : ""} style={{ flex: 1 }} onClick={() => { setTab("product"); setShowN(30); }}>
+                      <Icons.Box size={13}/> สินค้าเดี่ยว
+                    </button>
+                    <button className={tab === "bundle" ? "on" : ""} style={{ flex: 1 }} onClick={() => { setTab("bundle"); setShowN(30); }}>
+                      <Icons.Bundle size={13}/> ชุดสินค้า
+                    </button>
+                  </div>
+                  <div className="search" style={{ width: "100%" }}>
+                    <Icons.Search size={14}/>
+                    <input value={q} onChange={e => { setQ(e.target.value); setShowN(30); }} placeholder="ค้นหา SKU, ชื่อสินค้า, หมวด..."/>
+                    {q && <span style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => { setQ(""); setShowN(30); }}><Icons.X size={12}/></span>}
+                  </div>
+                </div>
+                <div style={{ maxHeight: 230, overflowY: "auto", overscrollBehavior: "contain" }}>
+                  {tab === "product" && prodMatches.slice(0, showN).map(p => {
+                    const s = stockStatus(p);
+                    const inCart = cart.filter(l => l.type === "product" && l.sku === p.sku).reduce((n, l) => n + l.qty, 0);
+                    return (
+                      <div key={p.sku} onClick={() => addProduct(p)}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
+                          cursor: "pointer", borderBottom: "1px solid var(--border)",
+                          background: inCart ? "var(--accent-soft)" : "transparent"
+                        }}>
+                        {typeof ProductImageThumb === "function" && <ProductImageThumb sku={p.sku} size={34} radius={7}/>}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
+                          <div className="row" style={{ gap: 6, marginTop: 1 }}>
+                            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</span>
+                            <span style={{ fontSize: 11, color: "var(--muted)" }}>· {p.cat}</span>
+                          </div>
+                        </div>
+                        <div style={{ textAlign: "right", flexShrink: 0 }}>
+                          <div className="tnum" style={{ fontSize: 14, fontWeight: 600 }}>{effQty(p.sku)}</div>
+                          <span className={"badge " + s.cls} style={{ fontSize: 9, padding: "1px 7px", marginTop: 2 }}><span className="dot"/>{s.label}</span>
+                        </div>
+                        {inCart > 0 && <span className="badge badge-info" style={{ fontSize: 10, flexShrink: 0 }}>×{inCart}</span>}
+                        <Icons.Plus size={14} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                      </div>
+                    );
+                  })}
+                  {tab === "product" && prodMatches.length > showN && (
+                    <button className="btn btn-sm" style={{ width: "100%", borderRadius: 0, justifyContent: "center" }} onClick={() => setShowN(n => n + 30)}>
+                      ดูเพิ่ม — แสดง {showN} จาก {prodMatches.length} รายการ
+                    </button>
+                  )}
+                  {tab === "bundle" && bundleMatches.map(b => {
+                    const max = (typeof bundleAvail === "function") ? bundleAvail(b) : 0;
+                    const inCart = cart.filter(l => l.type === "bundle" && l.id === b.id).reduce((n, l) => n + l.qty, 0);
+                    return (
+                      <div key={b.id} onClick={() => addBundle(b)}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 10, padding: "8px 12px",
+                          cursor: "pointer", borderBottom: "1px solid var(--border)",
+                          background: inCart ? "var(--accent-soft)" : "transparent"
+                        }}>
+                        <span style={{ width: 34, height: 34, borderRadius: 7, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}>
+                          <Icons.Bundle size={16}/>
+                        </span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{b.name}</div>
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 1 }}>{b.items.length} รายการ/ชุด · ฿{(b.price || 0).toLocaleString()}</div>
+                        </div>
+                        <div style={{ textAlign: "right", flexShrink: 0 }}>
+                          <div className="tnum" style={{ fontSize: 14, fontWeight: 600, color: max === 0 ? "var(--danger)" : "var(--fg)" }}>{max}</div>
+                          <div style={{ fontSize: 10, color: "var(--muted)" }}>ชุดที่ทำได้</div>
+                        </div>
+                        {inCart > 0 && <span className="badge badge-info" style={{ fontSize: 10, flexShrink: 0 }}>×{inCart}</span>}
+                        <Icons.Plus size={14} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                      </div>
+                    );
+                  })}
+                  {((tab === "product" && prodMatches.length === 0) || (tab === "bundle" && bundleMatches.length === 0)) && (
+                    <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                      {tab === "bundle" && bundles.length === 0 ? "ยังไม่มีชุดสินค้า — สร้างชุดได้ที่หน้า “ชุดสินค้า”" : `ไม่พบรายการที่ตรงกับ "${q}"`}
+                    </div>
+                  )}
+                </div>
               </div>
-              {/* Split product → choose the shelf; that line above names only the primary. */}
-              <LocPickSelect sku={skuId} value={pickLoc} need={total} onChange={setPickLoc}/>
+            )}
+          </div>
+
+          {/* The cart */}
+          {cart.length === 0 ? (
+            <div style={{ padding: 22, textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)", borderRadius: 12, marginBottom: 14 }}>
+              <Icons.Out size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>
+              <div>ยังไม่ได้เลือกสินค้า — สแกนบาร์โค้ดหรือกดเลือกจากรายการด้านบน</div>
+            </div>
+          ) : (
+            <div style={{ marginBottom: 14 }}>
+              <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 12, color: "var(--fg-2)", fontWeight: 500 }}>รายการที่จะตัดสต็อก ({cart.length})</span>
+                <button className="btn btn-ghost btn-sm" onClick={() => setCart([])}>ล้างทั้งหมด</button>
+              </div>
+              <div className="stack" style={{ gap: 6 }}>
+                {cart.map(l => {
+                  const isB = l.type === "bundle";
+                  const p = isB ? null : PRODUCTS.find(x => x.sku === l.sku);
+                  const short = isB
+                    ? (l.items || []).some(ci => shortSku(ci.sku))
+                    : shortSku(l.sku);
+                  return (
+                    <div key={l.key} style={{
+                      display: "flex", alignItems: "flex-start", gap: 10, padding: "9px 10px",
+                      border: "1px solid " + (short ? "var(--danger)" : "var(--border)"),
+                      background: short ? "var(--danger-soft)" : "var(--surface-2)", borderRadius: 10
+                    }}>
+                      {isB ? (
+                        <span style={{ width: 34, height: 34, borderRadius: 7, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}>
+                          <Icons.Bundle size={16}/>
+                        </span>
+                      ) : (typeof ProductImageThumb === "function" && <ProductImageThumb sku={l.sku} size={34} radius={7}/>)}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {isB && <span className="badge badge-neutral" style={{ fontSize: 9, marginRight: 6 }}>ชุด</span>}{l.name}
+                        </div>
+                        <div className="row" style={{ gap: 6, marginTop: 1 }}>
+                          <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{isB ? l.id : l.sku}</span>
+                          <span className="tnum" style={{ fontSize: 11, color: short ? "var(--danger)" : "var(--muted)" }}>
+                            {isB
+                              ? `${(l.items || []).length} รายการ/ชุด`
+                              : `คงเหลือ ${effQty(l.sku)} → ${Math.max(0, effQty(l.sku) - (needBySku[l.sku] || 0))}`}
+                          </span>
+                        </div>
+                        {/* Split sku → pick the shelf for THIS line */}
+                        {!isB && <LocPickSelect sku={l.sku} value={l.loc} need={l.qty} onChange={loc => setLineLoc(l.key, loc)}/>}
+                      </div>
+                      <select className="input" style={{ height: 30, fontSize: 12, padding: "2px 6px", width: 118, flexShrink: 0 }}
+                        value={l.ch} onChange={e => setLineCh(l.key, e.target.value)} title="ช่องทางของรายการนี้">
+                        {CHANNEL_LIST.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                      <div className="qty-stepper" style={{ flexShrink: 0 }}>
+                        <button onClick={() => setLineQty(l.key, l.qty - 1)}>−</button>
+                        <input value={l.qty} onChange={e => setLineQty(l.key, Math.max(0, parseInt(e.target.value, 10) || 0))}/>
+                        <button onClick={() => setLineQty(l.key, l.qty + 1)}>+</button>
+                      </div>
+                      <button onClick={() => removeLine(l.key)} title="เอาออก"
+                        style={{ display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", cursor: "pointer", flexShrink: 0 }}>
+                        <Icons.X size={14}/>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
-          {isBundle && (
-            noBundles ? (
-              <div style={{ padding: 24, textAlign: "center", background: "var(--surface-2)", borderRadius: 10, marginBottom: 14, color: "var(--muted)", fontSize: 13 }}>
-                <Icons.Bundle size={22} style={{ opacity: 0.4, marginBottom: 6 }}/>
-                <div>ยังไม่มีชุดสินค้า — สร้างชุดได้ที่หน้า "ชุดสินค้า"</div>
-              </div>
-            ) : (
-              <div className="field" style={{ marginBottom: 14 }}>
-                <label>ชุดสินค้า</label>
-                <select className="input" value={bundleId} onChange={e => setBundleId(e.target.value)}>
-                  {bundles.map(b => (
-                    <option key={b.id} value={b.id}>{b.name} ({b.id})</option>
-                  ))}
-                </select>
-                {bundle && (
-                  <>
-                    <div className="row" style={{ justifyContent: "space-between", fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
-                      <span>ขายได้สูงสุด <strong className="tnum" style={{ color: bundleMax === 0 ? "var(--danger)" : "var(--fg)" }}>{bundleMax}</strong> ชุด</span>
-                      <span>ราคาชุด ฿{bundle.price.toLocaleString()}</span>
-                    </div>
-                    <div style={{ marginTop: 8, padding: "8px 12px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
-                      <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>สินค้าที่จะถูกตัดสต็อก ({bundle.items.length} รายการ)</div>
-                      <div className="stack" style={{ gap: 4 }}>
-                        {bundle.items.map(item => {
-                          const p = PRODUCTS.find(x => x.sku === item.sku);
-                          const eq = effQty(item.sku);
-                          const perSet = item.qty;
-                          const need = perSet * total;
-                          return (
-                            <div key={item.sku} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                              <span style={{ width: 6, height: 6, borderRadius: 999, background: eq < need ? "var(--danger)" : eq <= 10 ? "var(--warning)" : "var(--success)", flexShrink: 0 }}/>
-                              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p?.name || item.sku}</span>
-                              <span className="mono" style={{ color: "var(--muted)", flexShrink: 0 }}>×{perSet}/ชุด</span>
-                              <span className="tnum" style={{ color: "var(--muted)", flexShrink: 0, minWidth: 56, textAlign: "right" }}>
-                                {eq}{total > 0 ? ` → ${Math.max(0, eq - need)}` : ""}
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                    <div style={{ marginTop: 8 }}>
-                      <BundleStockAlert issues={bundleIssues}/>
-                    </div>
-                  </>
-                )}
-              </div>
-            )
-          )}
-
-          <div className="field" style={{ marginBottom: 16 }}>
+          <div className="field" style={{ marginBottom: 14 }}>
             <label>ลูกค้า / เลขที่อ้างอิง <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span></label>
             <input className="input" placeholder="เช่น คุณ ปวีณา ท. / Shopee #2025-119283" value={customer} onChange={e => setCustomer(e.target.value)}/>
           </div>
 
-          <div style={{ fontSize: 12, color: "var(--fg-2)", fontWeight: 500, marginBottom: 8 }}>ตัดสต็อกตามช่องทาง <span style={{ color: "var(--muted)", fontWeight: 400 }}>(จำนวน = {unit})</span></div>
-          <div className="stack" style={{ gap: 6 }}>
-            {CHANNEL_LIST.map(c => {
-              const v = channels[c.id];
-              return (
-                <div key={c.id} className={"ch-row" + (v.on ? " on" : "")}>
-                  <span
-                    className={"check" + (v.on ? " on" : "")}
-                    onClick={() => toggleCh(c.id)}
-                  />
-                  <span style={{ width: 10, height: 10, borderRadius: 999, background: c.color }}/>
-                  <span style={{ flex: 1, fontSize: 13, fontWeight: v.on ? 500 : 400, color: v.on ? "var(--fg)" : "var(--fg-2)" }}>{c.name}</span>
-                  <div className="qty-stepper">
-                    <button onClick={() => setQty(c.id, v.qty - 1)} disabled={v.qty <= 0}>−</button>
-                    <input value={v.qty} onChange={e => setQty(c.id, Math.max(0, parseInt(e.target.value, 10) || 0))}/>
-                    <button onClick={() => setQty(c.id, v.qty + 1)}>+</button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div style={{ marginTop: 16, padding: 12, background: overStock ? "var(--danger-soft)" : "var(--surface-2)", color: overStock ? "var(--danger)" : "var(--fg)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ fontSize: 12 }}>
-              <div>รวมตัดสต็อก</div>
-              {overStock && <div style={{ fontSize: 11, marginTop: 2 }}>เกินจำนวนที่ขายได้ ({stockCap} {unit})</div>}
+          {shortages.length > 0 && (
+            <div style={{ padding: "10px 12px", background: "var(--danger-soft)", color: "var(--danger)", borderRadius: 10, fontSize: 12, marginBottom: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>สต็อกไม่พอ</div>
+              {shortages.map((e, i) => <div key={i}>{e}</div>)}
             </div>
-            <div className="tnum" style={{ fontSize: 22, fontWeight: 600 }}>{total} <span style={{ fontSize: 12, fontWeight: 400, color: "var(--muted)" }}>{unit} · {selectedCount} ช่องทาง</span></div>
+          )}
+
+          <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 10 }}>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 12 }}>
+                <div>รวมตัดสต็อก</div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                  {cart.length} รายการ · มูลค่า ฿{cartValue.toLocaleString()}
+                </div>
+              </div>
+              <div className="tnum" style={{ fontSize: 22, fontWeight: 600 }}>
+                {totalPieces} <span style={{ fontSize: 12, fontWeight: 400, color: "var(--muted)" }}>ชิ้น{mixedCh ? ` · ${chSummary.length} ช่องทาง` : ""}</span>
+              </div>
+            </div>
+            {chSummary.length > 0 && (
+              <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                {chSummary.map(c => (
+                  <span key={c.id} className="ch-chip">
+                    <span className="swatch" style={{ background: c.color }}/>{c.name} <strong className="tnum" style={{ marginLeft: 4 }}>{c.qty}</strong>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
         <div className="modal-foot">
           <button className="btn" onClick={onClose}>ยกเลิก</button>
           <button className="btn btn-primary" disabled={!canSubmit} onClick={submit} style={!canSubmit ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
-            <Icons.Check size={14}/> ยืนยันตัดสต็อก
+            <Icons.Check size={14}/> ยืนยันตัดสต็อก{cart.length > 1 ? ` ${cart.length} รายการ` : ""}
           </button>
         </div>
       </div>
     </>
   );
+}
+
+/* Shared ตัดสต็อก commit — the จัดส่งสินค้า header button and the สินค้าคงคลัง
+   bulk bar open the SAME modal, so the write lives in one place. Deducts every
+   sku, re-balances the position split in the same tick, records the audit entry
+   and appends ONE order (appendOrder = the convergence-safe writer). */
+async function commitIssueOrder(data, pushToast) {
+  const toast = pushToast || (() => {});
+  const plan = (typeof buildIssuePlan === "function") ? buildIssuePlan(data.lines) : null;
+  if (!plan || !plan.skuDeducts.length) { toast("ยังไม่ได้เลือกสินค้า"); return null; }
+
+  const id = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
+  const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+  const dateIso = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+
+  const pieces = plan.skuDeducts.reduce((s, d) => s + d.qty, 0);
+
+  deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก · ออร์เดอร์ ${id} (${plan.channelLabel})`);
+  // Same tick as the qty write, before any other await — applyLocPicks re-reads p.qty.
+  if (typeof applyLocPicks === "function") {
+    const r = await applyLocPicks(plan.locPicks);
+    if (r && r.offline) toast("ตัดสต็อกแล้ว — จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์");
+    else if (r && r.errors && r.errors.length) toast("ตัดสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + r.errors[0].error);
+  }
+
+  if (typeof recordChange === "function") {
+    recordChange({
+      entity: "order", entityId: id, action: "create",
+      summary: `ตัดสต็อก ${plan.lineCount} รายการ (${pieces} ชิ้น) ผ่านหน้าจัดส่ง`,
+      count: plan.lineCount,
+      changes: data.lines.filter(l => l.qty > 0).map(l => ({
+        label: l.type === "bundle" ? `ชุด: ${l.name}` : l.name,
+        to: `−${l.qty} ${l.type === "bundle" ? "ชุด" : "ชิ้น"}`
+      })),
+      note: `ออร์เดอร์ ${id} · ${plan.channelLabel}`
+    });
+  }
+
+  const res = await appendOrder({
+    id, channel: plan.channelLabel, customer: data.customer || "ลูกค้าใหม่",
+    items: plan.lineCount, status: "picking", carrier: "", tracking: "",
+    ts, dateIso, deductions: plan.channelSplit,
+    isBundle: plan.hasBundle,
+    bundleName: plan.hasBundle ? plan.bundleNames.join(", ") : undefined,
+    lineItems: plan.lineItems
+  });
+  if (res && res.error) toast("⚠️ ออร์เดอร์จะซิงค์อัตโนมัติเมื่อออนไลน์");
+
+  const only = data.lines.filter(l => l && l.qty > 0)[0];
+  toast(plan.lineCount === 1 && only
+    ? `ตัดสต็อก ${only.name} ${pieces} ชิ้น — ${plan.channelLabel}`
+    : `ตัดสต็อก ${plan.lineCount} รายการ (${pieces} ชิ้น) — ${plan.channelLabel}`);
+  return id;
 }
 
 function SmallStat({ label, value, hint, tone }) {
@@ -2450,6 +2683,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
   const [addOpen, setAddOpen] = useState(false);
   const [adjOpen, setAdjOpen] = useState(false);
   const [assignSkus, setAssignSkus] = useState(null); // array of skus → open AssignLocationModal
+  const [issueSkus, setIssueSkus] = useState(null);   // array of skus → open IssueModal prefilled
   const [stockKey, setStockKey] = useState(0);
 
   // Re-render whenever the shared stock-adjustment layer, the product catalog
@@ -2715,6 +2949,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
           </div>
           <div className="spacer"/>
           <div className="row" style={{ gap: 6 }}>
+            {canDo("sell") && <BulkBtn icon={<Icons.Out size={13}/>} label="ตัดสต็อก" onClick={() => setIssueSkus([...selectedSkus])}/>}
             <BulkBtn icon={<Icons.Map size={13}/>} label="จัดเก็บเข้าตำแหน่ง" onClick={() => setAssignSkus([...selectedSkus])}/>
             {canDo("editProduct") && <BulkBtn icon={<Icons.Edit size={13}/>} label="แก้ไขทั้งหมด" onClick={() => setBulkOpen(true)}/>}
             <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์บาร์โค้ด" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); if (typeof printBarcodeLabels === "function") printBarcodeLabels(items, pushToast); }}/>
@@ -2823,6 +3058,20 @@ function Inventory({ pushToast, density, goTo, focus }) {
       {assignSkus && <AssignLocationModal skus={assignSkus} products={liveProducts} storedCodes={storedCodes} onClose={() => setAssignSkus(null)} onApply={applyAssign}/>}
       {addOpen && <AddSkuModal products={products} categories={cats.filter(c => c !== "ทั้งหมด")} onClose={() => setAddOpen(false)} onAdd={addProduct}/>}
       {adjOpen && <StockAdjustModal product={null} onClose={() => setAdjOpen(false)} pushToast={pushToast}/>}
+      {/* Same modal the จัดส่งสินค้า page opens, prefilled with the ticked rows —
+          one multi-item stock-out, one order. */}
+      {issueSkus && (
+        <IssueModal
+          presetSkus={issueSkus}
+          pushToast={pushToast}
+          onClose={() => setIssueSkus(null)}
+          onSubmit={async (data) => {
+            await commitIssueOrder(data, pushToast);
+            setIssueSkus(null);
+            clearSelection();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -3479,16 +3728,26 @@ function ProductDrawer({ product, onClose, pushToast }) {
   // Real adjustment history from stock_adjustments (replaces the old hardcoded
   // demo rows). null = loading; [] = loaded, none yet. Re-fetched per sku.
   const [moves, setMoves] = useState(null);
+  const [movesTick, setMovesTick] = useState(0);
+  // Re-fetch whenever stock moves while the drawer is open, so an adjustment
+  // made right here shows up in the list instead of looking like it wasn't saved.
+  useEffect(() => {
+    // Short delay: the qty write lands first and the ledger row is inserted
+    // right behind it, so an immediate re-read would miss the new row.
+    let t = null;
+    const bump = () => { if (t) clearTimeout(t); t = setTimeout(() => setMovesTick(v => v + 1), 900); };
+    window.addEventListener("ims-products-change", bump);
+    return () => { if (t) clearTimeout(t); window.removeEventListener("ims-products-change", bump); };
+  }, []);
   useEffect(() => {
     let dead = false;
-    setMoves(null);
     if (typeof dbLoadStockAdjustments === "function") {
-      dbLoadStockAdjustments(product.sku, 5)
+      dbLoadStockAdjustments(product.sku, 12)
         .then(rows => { if (!dead) setMoves(Array.isArray(rows) ? rows : []); })
         .catch(() => { if (!dead) setMoves([]); });
     } else setMoves([]);
     return () => { dead = true; };
-  }, [product.sku]);
+  }, [product.sku, movesTick]);
 
   return (
     <>
@@ -3604,13 +3863,15 @@ function ProductDrawer({ product, onClose, pushToast }) {
           </div>
 
           <div style={{ marginTop: 22 }}>
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>ประวัติปรับสต็อกล่าสุด</div>
+            {/* Every movement kind now lands here — รับเข้า / ตัดสต็อก / ตรวจนับ /
+                ปรับสต็อก — so this panel is the product's real stock history. */}
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>ประวัติการเคลื่อนไหวสต็อกล่าสุด</div>
             <div className="stack" style={{ gap: 8 }}>
               {moves === null && (
                 <div style={{ fontSize: 12, color: "var(--muted)", padding: 10 }}>กำลังโหลด…</div>
               )}
               {moves && moves.length === 0 && (
-                <div style={{ fontSize: 12, color: "var(--muted)", padding: 10, background: "var(--surface-2)", borderRadius: 8 }}>ยังไม่มีการปรับสต็อก</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", padding: 10, background: "var(--surface-2)", borderRadius: 8 }}>ยังไม่มีการเคลื่อนไหวสต็อก</div>
               )}
               {(moves || []).map(m => (
                 <div key={m.id} className="row" style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8, gap: 12 }}>
@@ -3790,6 +4051,8 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const [q, setQ] = useState("");
   const [showN, setShowN] = useState(30);
   const [pickOpen, setPickOpen] = useState(!product);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const scanRef = useRef(null);
   const toast = pushToast || (() => {});
   const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
@@ -3846,16 +4109,33 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   );
 
   const resetForNext = () => {
+    busyRef.current = false; setBusy(false);
     setRows([]); setMode("remove"); setReasonId(""); setNote(""); setScan(""); setQ(""); setShowN(30); setPickOpen(true);
     setTimeout(() => scanRef.current?.focus(), 60);
   };
 
   const confirm = async () => {
-    if (!canConfirm) return;
+    if (!canConfirm || busyRef.current) return;
+    // Synchronous latch: a second click can land before React re-renders with a
+    // disabled button, and each one applied the batch again.
+    busyRef.current = true;
+    setBusy(true);
+    const guardKey = (typeof commitFingerprint === "function")
+      ? commitFingerprint("adjust-" + mode + "-" + reasonId, changes) : null;
+    if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
+      if (typeof duplicateCommitToast === "function") duplicateCommitToast();
+      busyRef.current = false; setBusy(false);
+      return;
+    }
     const res = (typeof applyStockAdjustmentBatch === "function")
       ? applyStockAdjustmentBatch(changes, { reason, note })
       : { applied: 0, net: 0 };
-    if (!res.applied) { toast("ปรับสต็อกไม่สำเร็จ"); return; }
+    if (!res.applied) {
+      toast("ปรับสต็อกไม่สำเร็จ");
+      if (guardKey && typeof releaseCommit === "function") releaseCommit(guardKey);
+      busyRef.current = false; setBusy(false);
+      return;
+    }
     /* Re-balance the split from the ACTUAL applied results — a row the clamp ate
        contributes nothing. Works for both signs: a positive delta lands on the
        chosen shelf, a negative one comes off it and cascades. */
@@ -3870,6 +4150,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
     toast(changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
       : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น) — ${reason.label}`);
+    busyRef.current = false; setBusy(false);
     if (product) onApply?.();
     else resetForNext(); // batch loop: back to the picker for the next round
   };
@@ -4030,7 +4311,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
         <div className="modal-foot">
           <button className="btn" onClick={onClose}>{product ? "ยกเลิก" : "ปิด"}</button>
           {rows.length > 0 && (
-            <button className="btn btn-primary" disabled={!canConfirm} onClick={confirm} style={!canConfirm ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+            <button className="btn btn-primary" disabled={!canConfirm || busy} onClick={confirm} style={(!canConfirm || busy) ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
               <Icons.Check size={14}/> ยืนยันปรับสต็อก{changes.length > 1 ? ` (${changes.length})` : ""}
             </button>
           )}
@@ -4713,6 +4994,8 @@ function LocPickSelect({ sku, value, onChange, need, label }) {
 /* ========= SELL PRODUCT MODAL (3-step wizard) ========= */
 function SellProductModal({ onClose, onSellComplete, presetSku }) {
   const [step, setStep] = useState(1);
+  const [sellBusy, setSellBusy] = useState(false);
+  const sellBusyRef = useRef(false);
   // presetSku: opened from the Product Finder with an already-confirmed product —
   // start the cart with it so staff never re-search (and can't re-pick the wrong SKU).
   const [cart, setCart] = useState(() => {
@@ -4800,7 +5083,15 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
 
   const shipValid = ship.name.trim() && ship.phone.trim() && ship.addr1.trim();
 
+  /* Synchronous double-submit latch. A state flag is NOT enough here: this
+     handler awaits applyLocPicks (a network round-trip) before the modal
+     closes, so the button sits there live and unchanged for as long as the
+     connection takes — and a second tap during that gap deducted the whole cart
+     again. A ref flips before React can re-render. */
   const submitOrder = async () => {
+    if (sellBusyRef.current) return;
+    sellBusyRef.current = true;
+    setSellBusy(true);
     const allDeductions = [];
     // Which shelf each sku comes off. Kept BESIDE the deduction, never inside it:
     // dbDeductStock rebuilds entries as {sku,qty} and the offline queue replays that.
@@ -4817,7 +5108,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
         });
       }
     });
-    deductManyAndPersist(allDeductions);
+    deductManyAndPersist(allDeductions, "ขายสินค้า · " + (ship.name || "ลูกค้าใหม่"));
     // Same tick, before any other await: applyLocPicks re-reads the just-written qty.
     if (typeof applyLocPicks === "function") {
       const locRes = await applyLocPicks(locPicks);
@@ -5234,7 +5525,8 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
             <button className="btn" onClick={() => setStep(2)}>
               <Icons.ArrowRight size={14} style={{ transform: "rotate(180deg)" }}/> ย้อนกลับ
             </button>
-            <button className="btn btn-primary" onClick={submitOrder}>
+            <button className="btn btn-primary" disabled={sellBusy} onClick={submitOrder}
+              style={sellBusy ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
               <Icons.Check size={14}/> ยืนยันการขาย
             </button>
           </>}
@@ -5336,6 +5628,19 @@ function StockTake({ pushToast }) {
   };
 
   const apply = () => {
+    // Same duplicate-commit latch as รับเข้า: applying a count is destructive
+    // (it SETS qty), so running it twice on a double-click hid a real movement
+    // that happened in between the two runs.
+    const guardKey = (typeof commitFingerprint === "function")
+      ? commitFingerprint("stocktake-apply", changeList) : null;
+    if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
+      if (typeof duplicateCommitToast === "function") duplicateCommitToast();
+      // The identical count DID just apply (that is what the latch matched), so
+      // retire the sheet instead of leaving numbers that invite a third attempt.
+      setCounts({}); saveStockTake({});
+      setConfirmOpen(false);
+      return;
+    }
     const changes = (typeof applyStockCounts === "function") ? applyStockCounts(counts) : [];
     const net = changes.reduce((s, c) => s + c.delta, 0);
     if (typeof recordChange === "function" && changes.length) {
@@ -5744,4 +6049,253 @@ function ProductFinder({ pushToast, goTo, focus }) {
   );
 }
 
-Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel, LocationSelect });
+/* ═══════════════════════════════════════════════════════════════════
+   แพ็คสินค้า — desktop queue / supervisor view
+
+   The packer's working screen is the MOBILE fork (MPack / MPackOrder /
+   MPackWave in handheld.jsx) — that is where tick-off, scanning and the
+   shortage flow live, because picking happens on the floor with a phone.
+   This desktop screen is deliberately the OTHER half of that job: see the
+   queue, see how far each order has got and who is on it, drill into the
+   lines, and close orders out from the packing table. It reads the same
+   pack helpers, so the two views can never disagree.
+   ═══════════════════════════════════════════════════════════════════ */
+function PackQueue({ pushToast, goTo, user }) {
+  const [tick, setTick] = useState(0);
+  const [open, setOpen] = useState(null);      // expanded order id
+  const [sel, setSel] = useState({});
+
+  useEffect(() => {
+    const refresh = () => setTick(t => t + 1);
+    ["ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-products-change", "ims-product-locs-change"]
+      .forEach(ev => window.addEventListener(ev, refresh));
+    return () => ["ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-products-change", "ims-product-locs-change"]
+      .forEach(ev => window.removeEventListener(ev, refresh));
+  }, []);
+
+  const progress = useMemo(() => (typeof loadPackProgress === "function") ? loadPackProgress() : {}, [tick]);
+  const rows = useMemo(() => {
+    const q = (typeof packQueue === "function") ? packQueue() : [];
+    return q.map(o => {
+      const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
+      const totals = (typeof packLineTotals === "function") ? packLineTotals(lines, progress[o.id]) : { need: 0, got: 0, pct: 0, lineCount: 0, lineDone: 0, shortLines: 0, complete: false };
+      const shelves = new Set(lines.map(l => l.loc).filter(Boolean));
+      const rec = progress[o.id] || null;
+      return { o, lines, totals, shelves: shelves.size, rec };
+    });
+  }, [tick, progress]);
+
+  // Waves in flight, so the table's "why is this order half-picked" is explainable.
+  const waves = useMemo(() => Object.keys(progress)
+    .filter(k => k.indexOf("batch:") === 0)
+    .map(k => ({ id: k, rec: progress[k] })), [progress]);
+  const waveOf = useMemo(() => {
+    const m = {};
+    waves.forEach(w => (w.rec.orderIds || []).forEach(id => { m[id] = w; }));
+    return m;
+  }, [waves]);
+
+  const selIds = Object.keys(sel).filter(id => sel[id]);
+  const totalPieces = rows.reduce((s, r) => s + r.totals.need, 0);
+  const started = rows.filter(r => r.rec).length;
+  const readyCount = rows.filter(r => r.totals.complete).length;
+
+  const markPacked = (ids) => {
+    if (!ids.length) return;
+    const notDone = ids.filter(id => { const r = rows.find(x => x.o.id === id); return r && !r.totals.complete; });
+    const msg = notDone.length
+      ? `ทำเครื่องหมาย "พร้อมส่ง" ${ids.length} ออร์เดอร์?\nมี ${notDone.length} ออร์เดอร์ที่ยังหยิบไม่ครบ`
+      : `ทำเครื่องหมาย "พร้อมส่ง" ${ids.length} ออร์เดอร์?`;
+    if (!confirm(msg)) return;
+    const at = new Date().toISOString();
+    const who = (user && user.name) || "";
+    ids.forEach(id => {
+      if (typeof setOrderField === "function") setOrderField(id, { status: "packed", packedAt: at, packedBy: who });
+      if (typeof clearPackEntry === "function") clearPackEntry(id);
+    });
+    if (typeof recordChange === "function") {
+      recordChange({
+        entity: "order", action: ids.length > 1 ? "bulk-update" : "update",
+        entityId: ids.length === 1 ? ids[0] : undefined,
+        summary: `แพ็คสินค้าเสร็จ ${ids.length} ออร์เดอร์ (จากหน้าเดสก์ท็อป)`,
+        count: ids.length,
+        changes: [{ label: "สถานะ", from: "กำลังจัดเตรียม", to: "พร้อมส่ง" }],
+        note: "ออร์เดอร์: " + ids.join(", ")
+      });
+    }
+    setSel({});
+    pushToast(`พร้อมส่ง ${ids.length} ออร์เดอร์`);
+  };
+
+  const resetProgress = (id) => {
+    if (!confirm("ล้างความคืบหน้าการหยิบของออร์เดอร์นี้?")) return;
+    if (typeof clearPackEntry === "function") clearPackEntry(id);
+    pushToast("ล้างความคืบหน้าแล้ว");
+  };
+
+  return (
+    <div className="stack" style={{ gap: 24 }}>
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">แพ็คสินค้า</h1>
+          <div className="page-sub">
+            รอแพ็ค {rows.length} ออร์เดอร์ · {totalPieces} ชิ้น · กำลังแพ็ค {started}
+            {waves.length > 0 ? ` · หยิบรวม ${waves.length} รอบ` : ""}
+          </div>
+        </div>
+        <div className="row">
+          {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
+          {canOpenPage("handheld") && <button className="btn btn-primary" onClick={() => goTo("handheld")}><Icons.Phone size={14}/> เปิดโหมดมือถือเพื่อหยิบของ</button>}
+        </div>
+      </div>
+
+      <div className="grid-3">
+        <SmallStat label="รอแพ็ค"    value={rows.length}  tone="warning" hint="ออร์เดอร์ที่ตัดสต็อกแล้วรอหยิบ"/>
+        <SmallStat label="หยิบครบแล้ว" value={readyCount}   tone="success" hint="พร้อมปิดเป็นพร้อมส่ง"/>
+        <SmallStat label="รวมชิ้นที่ต้องหยิบ" value={totalPieces} tone="info" hint="ทุกออร์เดอร์ในคิว"/>
+      </div>
+
+      <div style={{ padding: "12px 16px", borderRadius: 12, background: "var(--info-soft)", color: "var(--info)", fontSize: 12.5, lineHeight: 1.7 }}>
+        <strong>สต็อกถูกตัดไปแล้วตอนกดตัดสต็อก</strong> — หน้านี้บอกว่าต้องไปหยิบของจากชั้นไหน ไม่ได้ตัดสต็อกซ้ำ
+        การติ๊กทีละชิ้น สแกนบาร์โค้ด และแจ้งของขาด ทำบนมือถือ (แพ็คสินค้า ในเมนูเพิ่มเติม)
+      </div>
+
+      {selIds.length > 0 && (
+        <div style={{ position: "sticky", top: 70, zIndex: 9, background: "var(--fg)", color: "oklch(0.99 0.003 250)", padding: "10px 18px", borderRadius: 14, display: "flex", alignItems: "center", gap: 12, boxShadow: "var(--shadow-lg)" }}>
+          <span style={{ width: 28, height: 28, borderRadius: 999, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 13, fontWeight: 600 }} className="tnum">{selIds.length}</span>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>เลือก {selIds.length} ออร์เดอร์</span>
+          <button onClick={() => setSel({})} style={{ background: "transparent", border: "none", color: "oklch(0.85 0.005 250)", fontSize: 12, cursor: "pointer", textDecoration: "underline" }}>ล้างการเลือก</button>
+          <div className="spacer"/>
+          <BulkBtn icon={<Icons.Check size={13}/>} label="พร้อมส่ง" onClick={() => markPacked(selIds)}/>
+        </div>
+      )}
+
+      <div className="card card-tight">
+        <table className="t">
+          <thead><tr>
+            <th style={{ width: 24 }}>
+              <span className={"check" + (selIds.length && selIds.length === rows.length ? " on" : "")}
+                onClick={() => setSel(selIds.length === rows.length ? {} : Object.fromEntries(rows.map(r => [r.o.id, true])))}
+                title="เลือกทั้งหมด"/>
+            </th>
+            <th>เลขที่ออร์เดอร์</th>
+            <th>ลูกค้า</th>
+            <th>ช่องทาง</th>
+            <th className="t-num">รายการ</th>
+            <th className="t-num">ชิ้น</th>
+            <th className="t-num">ตำแหน่ง</th>
+            <th style={{ minWidth: 150 }}>ความคืบหน้า</th>
+            <th>ผู้หยิบ</th>
+            <th style={{ width: 1 }}/>
+          </tr></thead>
+          <tbody>
+            {rows.map(r => {
+              const isOpen = open === r.o.id;
+              const w = waveOf[r.o.id];
+              return (
+                <React.Fragment key={r.o.id}>
+                  <tr style={r.totals.complete ? { background: "var(--success-soft)" } : undefined}>
+                    <td><span className={"check" + (sel[r.o.id] ? " on" : "")} onClick={() => setSel(p => ({ ...p, [r.o.id]: !p[r.o.id] }))}/></td>
+                    <td className="mono" style={{ fontSize: 12, cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
+                      {r.o.id}
+                      {w && <div style={{ fontSize: 10, color: "var(--info)" }}>หยิบรวม · {w.rec.stage === "sort" ? "แยกลงออร์เดอร์" : "เดินหยิบ"}</div>}
+                    </td>
+                    <td style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>{r.o.customer || "—"}</td>
+                    <td style={{ fontSize: 12, color: "var(--muted)" }}>{r.o.channel || "—"}</td>
+                    <td className="t-num tnum">{r.totals.lineCount}</td>
+                    <td className="t-num tnum" style={{ fontWeight: 500 }}>{r.totals.need}</td>
+                    <td className="t-num tnum" style={{ color: "var(--muted)" }}>{r.shelves}</td>
+                    <td>
+                      {r.rec ? (
+                        <div className="row" style={{ gap: 8 }}>
+                          <div className={"prog" + (r.totals.complete ? " success" : "")} style={{ flex: 1, height: 5 }}><span style={{ width: r.totals.pct + "%" }}/></div>
+                          <span className="tnum" style={{ fontSize: 11, color: "var(--muted)", flexShrink: 0 }}>{r.totals.got}/{r.totals.need}</span>
+                        </div>
+                      ) : <span style={{ fontSize: 11.5, color: "var(--muted)" }}>ยังไม่เริ่ม</span>}
+                      {r.totals.shortLines > 0 && (
+                        <div style={{ fontSize: 10.5, color: "var(--warning)", marginTop: 3 }}>
+                          <Icons.Warn size={10}/> ของขาด {r.totals.shortLines} รายการ
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{(r.rec && r.rec.by) || "—"}</td>
+                    <td>
+                      <div className="row" style={{ gap: 4 }}>
+                        <button className="btn btn-sm" onClick={() => markPacked([r.o.id])} title="ทำเครื่องหมายพร้อมส่ง">
+                          <Icons.Check size={12}/>
+                        </button>
+                        <button className="btn btn-sm btn-ghost" onClick={() => setOpen(isOpen ? null : r.o.id)}>
+                          <Icons.Chev size={13} style={isOpen ? { transform: "rotate(90deg)" } : undefined}/>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr>
+                      <td colSpan="10" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                        {r.lines.length === 0 ? (
+                          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                            ออร์เดอร์นี้ไม่มีรายการที่ระบุ SKU (ออร์เดอร์เก่า หรือฉลากที่พิมพ์ชื่อสินค้าเอง) — หยิบตามฉลากแทน
+                          </div>
+                        ) : (
+                          <>
+                            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+                              <div className="eyebrow">รายการหยิบ · เรียงตามเส้นทางเดิน</div>
+                              {r.rec && <button className="btn btn-sm btn-ghost" onClick={() => resetProgress(r.o.id)}>ล้างความคืบหน้า</button>}
+                            </div>
+                            <table className="t" style={{ background: "var(--surface)", borderRadius: 8 }}>
+                              <thead><tr>
+                                <th>ตำแหน่ง</th><th>SKU</th><th>ชื่อสินค้า</th>
+                                <th className="t-num">ต้องหยิบ</th><th className="t-num">หยิบแล้ว</th><th className="t-num">ในชั้น</th><th>หมายเหตุ</th>
+                              </tr></thead>
+                              <tbody>
+                                {r.lines.map(l => {
+                                  const picked = (r.rec && r.rec.done && r.rec.done[l.key]) || 0;
+                                  const short = (r.rec && r.rec.short && r.rec.short[l.key]) || "";
+                                  const thin = l.shelfQty < l.qty;
+                                  return (
+                                    <tr key={l.key}>
+                                      <td className="mono" style={{ fontSize: 12, fontWeight: 600 }}>
+                                        {(l.parts && l.parts.pos) || l.loc || "—"}
+                                        <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>
+                                          {l.parts ? `${l.parts.building}${l.parts.floor ? " · " + l.parts.floor : ""}` : ""}
+                                        </div>
+                                      </td>
+                                      <td className="mono" style={{ fontSize: 11.5 }}>{l.sku}</td>
+                                      <td style={{ fontSize: 12.5 }}>{l.name}</td>
+                                      <td className="t-num tnum" style={{ fontWeight: 600 }}>{l.qty}</td>
+                                      <td className="t-num tnum" style={{ color: picked >= l.qty ? "var(--success)" : "var(--muted)" }}>{picked}</td>
+                                      <td className="t-num tnum" style={{ color: thin ? "var(--danger)" : "var(--muted)" }}>{l.shelfQty}</td>
+                                      <td style={{ fontSize: 11 }}>
+                                        {short
+                                          ? <span style={{ color: "var(--warning)" }}>{short}</span>
+                                          : thin ? <span style={{ color: "var(--danger)" }}>ในชั้นไม่พอ</span> : ""}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+            {rows.length === 0 && (
+              <tr><td colSpan="10" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
+                <Icons.Check size={22} style={{ opacity: 0.5, marginBottom: 8, color: "var(--success)" }}/>
+                <div>ไม่มีออร์เดอร์รอแพ็ค</div>
+                <div style={{ fontSize: 11.5, marginTop: 4 }}>ออร์เดอร์จะเข้าคิวนี้อัตโนมัติหลังตัดสต็อก</div>
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel, LocationSelect, PackQueue });

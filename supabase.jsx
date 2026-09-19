@@ -164,12 +164,32 @@ async function dbDeleteProducts(skus) {
    Returns { ok, rows: [{sku, qty}] } with the server-canonical quantities,
    { error: 'RPC_MISSING' } if the migration hasn't been applied yet, or
    { error: 'PERMISSION_OR_MISSING', rows } when RLS blocked some rows. */
-async function dbDeductStock(deductions) {
+/* ── Idempotent replay support ──
+   The 2-arg deduct_stock(deductions, op_id) / adjust_stock(adjustments, op_id)
+   record the op id and skip a movement they have already applied, which is what
+   makes a retry after an uncertain failure safe (supabase/stock-op-idempotency.sql).
+   The original 1-arg functions are left in place by that migration, so the two
+   signatures never collide in PostgREST's overload resolution and an app
+   deployed BEFORE the SQL simply falls back to the un-deduped call once. */
+let _stockOpIdSupported = null;   // null = untested, false = SQL not deployed yet
+async function _rpcStock(fn, argName, items, opId) {
+  if (opId && _stockOpIdSupported !== false) {
+    const res = await sb.rpc(fn, { [argName]: items, op_id: opId });
+    const notFound = res.error && (res.error.code === 'PGRST202' || res.error.code === 'PGRST203');
+    if (!notFound) { if (res.error == null) _stockOpIdSupported = true; return res; }
+    // Migration not applied (or ambiguous) → remember and use the 1-arg form.
+    _stockOpIdSupported = false;
+    console.warn('[DB]', fn, 'has no op_id parameter — run supabase/stock-op-idempotency.sql to make retries duplicate-proof');
+  }
+  return sb.rpc(fn, { [argName]: items });
+}
+
+async function dbDeductStock(deductions, opId) {
   const items = (deductions || [])
     .filter(d => d && d.sku && Number(d.qty) > 0)
     .map(d => ({ sku: d.sku, qty: Number(d.qty) }));
   if (!items.length) return { ok: true, rows: [] };
-  const { data, error } = await sb.rpc('deduct_stock', { deductions: items });
+  const { data, error } = await _rpcStock('deduct_stock', 'deductions', items, opId);
   if (error) {
     console.error('[DB] deduct_stock:', error.message);
     // PGRST202 = function not found → migration not applied; caller falls back
@@ -240,12 +260,12 @@ async function dbUpdateProducts(skus, changes) {
    deduct_stock. One UPDATE per sku with qty = GREATEST(0, qty + delta), so two
    devices receiving/adjusting the same sku serialize on the row lock instead of
    clobbering via a stale absolute write. Same return contract as dbDeductStock. */
-async function dbAdjustStock(adjustments) {
+async function dbAdjustStock(adjustments, opId) {
   const items = (adjustments || [])
     .filter(a => a && a.sku && Number.isFinite(Number(a.delta)) && Number(a.delta) !== 0)
     .map(a => ({ sku: a.sku, delta: Number(a.delta) }));
   if (!items.length) return { ok: true, rows: [] };
-  const { data, error } = await sb.rpc('adjust_stock', { adjustments: items });
+  const { data, error } = await _rpcStock('adjust_stock', 'adjustments', items, opId);
   if (error) {
     console.error('[DB] adjust_stock:', error.message);
     const missing = (error.code === 'PGRST202') || /function|adjust_stock/i.test(error.message || '');
@@ -624,22 +644,29 @@ async function dbLoadLocationImages() {
 /* ═══════════════════════════════════════════
    AUDIT LOG
    ═══════════════════════════════════════════ */
+/* Accepts one entry or an ARRAY of them. A batch (a 5-sku ปรับสต็อก, a stock
+   take, a receiving job) MUST go in as one insert: created_at is assigned by the
+   server on arrival, so N parallel single-row inserts land in race order and the
+   history then reads out of sequence — "0 → 30" printed below "30 → 60" for the
+   same sku, which looks exactly like a duplicated entry even when it isn't.
+   One statement = one created_at + sequential ids, and the list's
+   `created_at desc, id desc` sort replays the batch in true order. */
 async function dbInsertAuditEntry(entry) {
-  const { error } = await sb.from('audit_log').insert({
-    entity:    entry.entity    || '',
-    entity_id: entry.entityId  || '',
-    action:    entry.action    || '',
-    summary:   entry.summary   || '',
-    note:      entry.note      || '',
-    user_name: entry.user?.name || 'ระบบ'
-  });
+  const list = Array.isArray(entry) ? entry : [entry];
+  const rows = list.filter(Boolean).map(e => ({
+    entity:    e.entity    || '',
+    entity_id: e.entityId  || '',
+    action:    e.action    || '',
+    summary:   e.summary   || '',
+    note:      e.note      || '',
+    user_name: e.user?.name || 'ระบบ'
+  }));
+  if (!rows.length) return;
+  const { error } = await sb.from('audit_log').insert(rows);
   if (error) console.error('[DB] insert audit_log:', error.message);
 }
-async function dbLoadAuditLog(limit = 500) {
-  const { data, error } = await sb
-    .from('audit_log').select('*').order('created_at', { ascending: false }).limit(limit);
-  if (error) { console.error('[DB] load audit_log:', error.message); return null; }
-  return data.map(row => ({
+function _auditRowToEntry(row) {
+  return {
     id:       String(row.id),
     ts:       row.created_at,
     user:     { name: row.user_name || 'ระบบ', role: '', avatar: (row.user_name || '?')[0], id: 0 },
@@ -648,7 +675,44 @@ async function dbLoadAuditLog(limit = 500) {
     action:   row.action,
     summary:  row.summary,
     note:     row.note
-  }));
+  };
+}
+// `before` pages FURTHER BACK than the newest `limit` rows. Pass the oldest
+// entry already held as { id } — the identity column is unique, so no row is
+// skipped or repeated even when several share a timestamp — or { ts } when the
+// caller only has a local (not-yet-synced) entry to anchor on.
+async function dbLoadAuditLog(limit = 500, before) {
+  let q = sb.from('audit_log').select('*')
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(limit);
+  if (before && before.id != null)  q = q.lt('id', before.id);
+  else if (before && before.ts)     q = q.lt('created_at', before.ts);
+  const { data, error } = await q;
+  if (error) { console.error('[DB] load audit_log:', error.message); return null; }
+  return data.map(_auditRowToEntry);
+}
+// One Bangkok calendar day, however deep it sits in the log — jumping to an old
+// day costs a single query instead of paging back to it row by row.
+async function dbLoadAuditDay(dateKey, limit = 2000) {
+  const start = new Date(String(dateKey || '') + 'T00:00:00+07:00');
+  if (isNaN(start.getTime())) return null;
+  const end = new Date(start.getTime() + 86400000);
+  const { data, error } = await sb.from('audit_log').select('*')
+    .gte('created_at', start.toISOString())
+    .lt('created_at', end.toISOString())
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(limit);
+  if (error) { console.error('[DB] load audit_log day:', error.message); return null; }
+  return data.map(_auditRowToEntry);
+}
+// Total rows kept, so the UI can say "showing X of Y" instead of implying the
+// loaded page is the whole history. HEAD request — no rows transferred.
+async function dbCountAuditLog() {
+  const { count, error } = await sb.from('audit_log').select('id', { count: 'exact', head: true });
+  if (error) { console.error('[DB] count audit_log:', error.message); return null; }
+  return typeof count === 'number' ? count : null;
 }
 async function dbDeleteAuditLog() {
   // audit_log DELETE is admin-only under RLS; a non-admin gets 0 rows + no error.
@@ -664,15 +728,40 @@ async function dbDeleteAuditLog() {
    Fires custom events so every open browser tab
    and all team members' browsers stay in sync.
    ═══════════════════════════════════════════ */
+/* Every realtime handler refetches a whole list. Two events arriving close
+   together put two requests in flight, and the one that RESPONDS last used to
+   win — so an older snapshot could overwrite newer rows and the entry someone
+   had just made appeared to vanish until the next event. _rtClaim/_rtStale give
+   each list a monotonic ticket: a response older than one already applied is
+   dropped. (PRODUCTS has its own version of this in data.jsx, which also folds
+   queued offline writes back in.) */
+const _rtSeq = {};      // list key → last ticket handed out
+const _rtDone = {};     // list key → last ticket applied
+function _rtClaim(key) { return (_rtSeq[key] = (_rtSeq[key] || 0) + 1); }
+function _rtStale(key, seq) {
+  if (seq < (_rtDone[key] || 0)) return true;
+  _rtDone[key] = seq;
+  return false;
+}
+
 function setupRealtimeSync() {
   sb.channel('ims-sync')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, async () => {
+      // Two events in flight used to race: whichever RESPONSE landed last won,
+      // so a stale snapshot could overwrite newer stock and a staff member saw
+      // their own entry disappear. hydrateProductsFromServer drops an
+      // out-of-order response and folds queued-but-unsynced deltas back in.
+      const seq = (typeof beginProductsFetch === 'function') ? beginProductsFetch() : null;
       const fresh = await dbLoadProducts();
-      if (fresh) { PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p)); }
+      if (typeof hydrateProductsFromServer === 'function') {
+        if (!hydrateProductsFromServer(fresh, seq)) return;   // superseded → its own event already rendered
+      } else if (fresh) { PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p)); }
       window.dispatchEvent(new CustomEvent('ims-products-change'));
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, async () => {
+      const seq = _rtClaim('orders');
       const fresh = await dbLoadOrders();
+      if (_rtStale('orders', seq)) return;
       if (fresh) window._DB_ORDERS = fresh;
       window.dispatchEvent(new CustomEvent('ims-orders-change'));
     })
@@ -687,7 +776,9 @@ function setupRealtimeSync() {
       window.dispatchEvent(new CustomEvent('ims-bundles-change'));
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'labels' }, async () => {
+      const seq = _rtClaim('labels');
       const fresh = await dbLoadLabels();
+      if (_rtStale('labels', seq)) return;
       if (fresh) window._DB_LABELS = fresh;
       window.dispatchEvent(new CustomEvent('ims-labels-change'));
     })
@@ -697,7 +788,9 @@ function setupRealtimeSync() {
       window.dispatchEvent(new CustomEvent('ims-store-change'));
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'product_locations' }, async () => {
+      const seq = _rtClaim('product_locs');
       const fresh = await dbLoadProductLocs();
+      if (_rtStale('product_locs', seq)) return;
       if (fresh) {
         window._DB_PRODUCT_LOCS = fresh;
         try { localStorage.setItem('ims_product_locs', JSON.stringify(fresh)); } catch (e) {}
@@ -705,7 +798,12 @@ function setupRealtimeSync() {
       window.dispatchEvent(new CustomEvent('ims-product-locs-change'));
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_log' }, async () => {
-      const fresh = await dbLoadAuditLog();
+      // Reload at least as deep as the user has already paged back with
+      // "โหลดเพิ่ม", or every extra page would vanish on the next write.
+      const depth = Math.max(500, (window._DB_AUDIT_LOG || []).length);
+      const seq = _rtClaim('audit');
+      const fresh = await dbLoadAuditLog(depth);
+      if (_rtStale('audit', seq)) return;
       if (fresh) window._DB_AUDIT_LOG = fresh;
       window.dispatchEvent(new CustomEvent('ims-audit-change'));
     })
@@ -744,6 +842,7 @@ function setupRealtimeSync() {
                     stock_adj:  ['_DB_STOCK_ADJ',  'ims-stock-adj-change'],
                     woo_catalog: ['_DB_WOO_CATALOG', 'ims-woo-catalog-change'],
                     role_perms: ['_DB_ROLE_PERMS', 'ims-perms-change'],
+                    pack_progress: ['_DB_PACK_PROGRESS', 'ims-pack-change'],
                     order_overrides: ['_DB_ORDER_OVERRIDES', 'ims-orders-change'] };
       const keys = key && map[key] ? [key] : Object.keys(map).filter(k => map[k]);
       for (const k of keys) {
@@ -866,7 +965,7 @@ async function lineBotPreview(command) {
    ═══════════════════════════════════════════ */
 async function dbInit() {
   try {
-    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms, productLocs] = await Promise.all([
+    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms, productLocs, packProgress] = await Promise.all([
       dbLoadProducts(),
       dbLoadOrders(),
       dbLoadBundles(),
@@ -879,14 +978,21 @@ async function dbInit() {
       dbLoadState('order_overrides'),
       dbLoadState('woo_catalog'),
       dbLoadState('role_perms'),
-      dbLoadProductLocs()
+      dbLoadProductLocs(),
+      dbLoadState('pack_progress')
     ]);
 
     /* Hydrate global PRODUCTS array (mutated in-place so existing
        PRODUCTS.find() / PRODUCTS.filter() calls stay valid) */
     if (products) {
-      PRODUCTS.length = 0;
-      products.forEach(p => PRODUCTS.push(p));
+      // Same guard as the realtime path: a relaunch must not hide stock writes
+      // that are still sitting in the offline queue waiting to sync.
+      if (typeof hydrateProductsFromServer === 'function') {
+        hydrateProductsFromServer(products, (typeof beginProductsFetch === 'function') ? beginProductsFetch() : null);
+      } else {
+        PRODUCTS.length = 0;
+        products.forEach(p => PRODUCTS.push(p));
+      }
     }
 
     /* Store shared data in window globals so components can read
@@ -895,6 +1001,8 @@ async function dbInit() {
     if (bundles)       window._DB_BUNDLES   = bundles;
     if (storeSettings) window._DB_STORE     = storeSettings;
     if (auditLog)      window._DB_AUDIT_LOG = auditLog;
+    // A short first page means the whole log fits in it — no "โหลดเพิ่ม" needed.
+    if (auditLog && auditLog.length < 500) { window._AUDIT_END = true; window._AUDIT_TOTAL = auditLog.length; }
     if (Array.isArray(categories)) window._DB_CATEGORIES = categories;
     /* Locations is an OBJECT ({ buildings: [...] }) since the Building→Floor→
        Position model replaced the old flat array. The previous Array.isArray
@@ -912,6 +1020,14 @@ async function dbInit() {
       window.dispatchEvent(new CustomEvent('ims-product-locs-change'));
     }
     if (stockAdj && typeof stockAdj === 'object') window._DB_STOCK_ADJ = stockAdj;
+    /* In-progress แพ็คสินค้า records (per-order tick-off + wave batches). Mirrored
+       locally so a packer who loses signal mid-walk keeps their ticked lines, and
+       announced so an already-mounted pack screen picks up another device's work. */
+    if (packProgress && typeof packProgress === 'object') {
+      window._DB_PACK_PROGRESS = packProgress;
+      try { localStorage.setItem('ims_pack_v1', JSON.stringify(packProgress)); } catch (e) {}
+      window.dispatchEvent(new CustomEvent('ims-pack-change'));
+    }
     if (orderOverrides && typeof orderOverrides === 'object') window._DB_ORDER_OVERRIDES = orderOverrides;
     if (wooCatalog && typeof wooCatalog === 'object') window._DB_WOO_CATALOG = wooCatalog;
     /* Per-role permission overrides (nav + capabilities). Absent = every role
@@ -1128,7 +1244,7 @@ Object.assign(window, {
   dbLoadStoreSettings, dbSaveStoreSettings,
   dbLoadState,         dbSaveState,          dbLoadProductImages,  dbLoadLocationImages,
   dbServerTimeMs,
-  dbInsertAuditEntry,  dbLoadAuditLog,    dbDeleteAuditLog,
+  dbInsertAuditEntry,  dbLoadAuditLog,    dbDeleteAuditLog,  dbLoadAuditDay,  dbCountAuditLog,
   manageUsers,         lineTest,           lineBotPreview,      runCloudBackup,
   // Auth helpers — thin wrappers so auth.jsx / app.jsx never import sb directly
   authSignIn:        (email, password) => sb.auth.signInWithPassword({ email, password }),

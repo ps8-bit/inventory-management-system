@@ -60,11 +60,8 @@ function _onProductWriteResult(res) {
                  : 'บันทึกสินค้าไม่สำเร็จ: ' + res.error
   }));
   if (perm && window.dbLoadProducts) {
-    dbLoadProducts().then(fresh => {
-      if (!fresh) return;
-      PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p));
-      _persistProductsLocal();
-    }).catch(() => {});
+    const seq = beginProductsFetch();
+    dbLoadProducts().then(fresh => hydrateProductsFromServer(fresh, seq)).catch(() => {});
   }
 }
 // FULL-catalog upsert. Kept ONLY as a legacy fallback (when the scoped/atomic DB
@@ -114,22 +111,49 @@ function _syncManyFields(skus, fields) {
 // Persist a qty CHANGE as an atomic server-side delta (concurrent-safe). Falls
 // back to a scoped absolute row write if adjust_stock isn't deployed, and to the
 // offline queue on network failure.
+/* Resolves with what the SERVER actually did, so callers can record the truth
+   instead of the value this device predicted:
+     { ok:true, before, after }  — applied; before/after are server-canonical
+     { queued:true }             — offline/failed, replays later, outcome unknown
+     { blocked:true }            — RLS refused it; nothing moved, log nothing
+     { ok:false }                — no answer (RPC missing → absolute fallback wrote it)
+   `before` needs the 2-arg RPC from supabase/stock-rpc-return-before.sql; without
+   it the field is simply absent and the caller falls back to its own estimate. */
 async function _syncQtyDelta(sku, delta) {
-  if (!delta) return;
-  if (typeof dbAdjustStock !== "function") { _syncProductRows([sku]); return; }
+  if (!delta) return { ok: false };
+  if (typeof dbAdjustStock !== "function") { _syncProductRows([sku]); return { ok: false }; }
+  // ONE op id for this write and every retry of it — a request that timed out
+  // after the server committed is recognised on replay instead of applied twice.
+  const opId = genOpId();
   if (!navigator.onLine) {
-    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }]);
-    return;
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }], opId);
+    return { queued: true };
   }
   try {
-    const res = await dbAdjustStock([{ sku, delta }]);
-    if (res && res.ok) { _applyServerQty(res.rows); return; }
-    if (res && res.error === "RPC_MISSING") { _syncProductRows([sku]); return; }
-    if (res && res.error === "PERMISSION_OR_MISSING") { _applyServerQty(res.rows); _onProductWriteResult(res); return; }
-    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }]);
+    const res = await dbAdjustStock([{ sku, delta }], opId);
+    if (res && res.ok) { _applyServerQty(res.rows); return _serverMove(res.rows, sku); }
+    if (res && res.error === "RPC_MISSING") { _syncProductRows([sku]); return { ok: false }; }
+    if (res && res.error === "PERMISSION_OR_MISSING") {
+      _applyServerQty(res.rows); _onProductWriteResult(res);
+      // If this sku came back it DID move; otherwise RLS refused it and nothing
+      // happened — which must not be logged as a movement.
+      const m = _serverMove(res.rows, sku);
+      return m.ok ? m : { blocked: true };
+    }
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }], opId);
+    return { queued: true };
   } catch (e) {
-    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }]);
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("adjust", [{ sku, delta }], opId);
+    return { queued: true };
   }
+}
+// Pull one sku's server-canonical before/after out of an RPC result.
+function _serverMove(rows, sku) {
+  const row = (Array.isArray(rows) ? rows : []).find(r => r && r.sku === sku);
+  if (!row || typeof row.qty !== "number") return { ok: false };
+  const out = { ok: true, after: row.qty };
+  if (typeof row.before === "number") out.before = row.before;
+  return out;
 }
 function addProductToStore(p) {
   // A blank sku is an unmanageable row: sku is the PK, and the delete/update
@@ -164,12 +188,14 @@ function updateProductInStore(sku, changes) {
 // stale local qty can't corrupt the amount applied to the server.
 function adjustProductQty(sku, delta) {
   const d = Number(delta) || 0;
-  if (!d) return;
+  if (!d) return Promise.resolve({ ok: false });
   const p = PRODUCTS.find(x => x.sku === sku);
-  if (!p) return;
+  if (!p) return Promise.resolve({ ok: false });
   p.qty = Math.max(0, (Number(p.qty) || 0) + d);
   _persistProductsLocal();
-  _syncQtyDelta(sku, d);
+  // Returns the server's verdict (see _syncQtyDelta). Callers that only move
+  // stock can ignore it; callers that RECORD the move must not.
+  return _syncQtyDelta(sku, d);
 }
 // Overwrite a product with ABSOLUTE values (import of an existing sku) — scoped
 // single-row write, correct "these values ARE the truth" semantic. Distinct from
@@ -285,8 +311,9 @@ async function removeProductsFromStore(skus) {
     // Delete didn't persist (no permission, etc.) → restore canonical server
     // state so the UI doesn't lie about what was removed.
     if (window.dbLoadProducts) {
+      const seq = beginProductsFetch();
       const fresh = await dbLoadProducts();
-      if (fresh) { PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p)); }
+      hydrateProductsFromServer(fresh, seq);
     } else {
       removed.forEach(p => PRODUCTS.push(p));
     }
@@ -336,10 +363,22 @@ function loadCategories() {
   return [...new Set(PRODUCTS.map(p => p.cat).filter(Boolean))].sort();
 }
 function saveCategories(cats) {
+  const prev = window._DB_CATEGORIES;
+  const prevMirror = (() => { try { return localStorage.getItem("ims_categories"); } catch (e) { return null; } })();
   try { localStorage.setItem("ims_categories", JSON.stringify(cats)); } catch (e) {}
   window._DB_CATEGORIES = cats;
   window.dispatchEvent(new CustomEvent("ims-categories-change"));
-  if (window.dbSaveState) dbSaveState("categories", cats).catch(() => {});
+  if (!window.dbSaveState) return;
+  dbSaveState("categories", cats).then(res => {
+    if (!res || !res.error) return;
+    window._DB_CATEGORIES = prev;
+    try {
+      if (prevMirror == null) localStorage.removeItem("ims_categories");
+      else localStorage.setItem("ims_categories", prevMirror);
+    } catch (e) {}
+    window.dispatchEvent(new CustomEvent("ims-categories-change"));
+    _blobWriteFailed("หมวดหมู่", res.error);
+  }).catch(e => _blobWriteFailed("หมวดหมู่", String(e && e.message || e)));
 }
 function addCategory(name) {
   const cats = loadCategories();
@@ -397,15 +436,180 @@ function _applyServerQty(rows) {
   if (changed) _persistProductsLocal();
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   STOCK WRITE INTEGRITY — "บันทึกซ้ำ / รายการหาย" (2026-09-19)
+
+   Three distinct failure modes produced the same symptom (a movement counted
+   twice, or one that vanished and got re-entered by hand):
+
+   1. RETRY AFTER AN UNCERTAIN FAILURE. deduct_stock/adjust_stock apply a
+      DELTA. When a request timed out after the server had already committed,
+      the offline queue replayed it and moved the stock a second time. Every
+      call now carries an operation id (genOpId) which the server records once
+      — a replay of the same id returns the current qty instead of re-applying.
+      Before the SQL is deployed the id is simply ignored, so this is safe to
+      ship first (see supabase/stock-op-idempotency.sql).
+
+   2. DOUBLE COMMIT. The count / receive / adjust confirmations had no
+      in-flight latch: a double-tap, or a reload that restored the draft after
+      the write landed, ran the same batch twice. claimCommit() is a
+      synchronous, localStorage-backed latch — immune to React batching and to
+      a page reload — keyed by a fingerprint of the payload.
+
+   3. A PENDING WRITE WIPED OFF THE SCREEN. Every server snapshot replaced
+      PRODUCTS wholesale, so a change still sitting in the offline queue
+      disappeared from the display; staff then entered it again and the queue
+      later replayed the first copy too. hydrateProductsFromServer() re-applies
+      queued deltas on top of the snapshot and refuses an out-of-order response.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Operation id for ONE stock write. Generated before the first attempt and
+   reused by every retry of that same write — that is what makes the retry
+   idempotent server-side. */
+function genOpId() {
+  return "op" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+/* ── Duplicate-commit latch ──
+   claimCommit(key) returns true at most once per COMMIT_GUARD_MS for a given
+   key. Synchronous (a double-tap can't slip between two React renders) and
+   mirrored in localStorage (a reload that restores an inbound draft can't
+   re-commit a batch that already landed). Callers pass a key built from the
+   flow + the payload, so a genuinely different batch is never blocked. */
+const COMMIT_GUARD_KEY = "ims_commit_guard_v1";
+/* Long enough to swallow a double-tap, a double-fired confirm and a reload that
+   races the draft clear; short enough that a deliberate repeat of an identical
+   batch (scan one more of the same sku, close again) just works. */
+const COMMIT_GUARD_MS = 8000;
+const COMMIT_GUARD_MAX = 40;
+function _loadCommitGuard() {
+  try { const o = JSON.parse(localStorage.getItem(COMMIT_GUARD_KEY) || "{}"); return (o && typeof o === "object") ? o : {}; }
+  catch (e) { return {}; }
+}
+/* Stable short fingerprint of a commit payload — same items, same amounts,
+   same key, regardless of row order. */
+function commitFingerprint(flow, rows) {
+  const parts = (Array.isArray(rows) ? rows : [])
+    .map(r => [r && (r.sku || r.id || ""), r && (r.qty != null ? r.qty : r.delta != null ? r.delta : r.to), r && r.ch ? r.ch : ""].join("~"))
+    .sort();
+  let h = 5381;
+  const str = String(flow) + "|" + parts.join("|");
+  for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+  return String(flow) + ":" + h.toString(36) + ":" + parts.length;
+}
+function claimCommit(key) {
+  const now = Date.now();
+  const g = _loadCommitGuard();
+  const last = Number(g[key]) || 0;
+  if (last && now - last < COMMIT_GUARD_MS) return false;
+  g[key] = now;
+  // Prune expired/oldest so the blob can't grow without bound.
+  const live = Object.keys(g).filter(k => now - (Number(g[k]) || 0) < COMMIT_GUARD_MS)
+    .sort((a, b) => g[b] - g[a]).slice(0, COMMIT_GUARD_MAX);
+  const next = {};
+  live.forEach(k => { next[k] = g[k]; });
+  try { localStorage.setItem(COMMIT_GUARD_KEY, JSON.stringify(next)); } catch (e) {}
+  return true;
+}
+// Release a claim that turned out not to have committed (validation refused it),
+// so the user can correct the batch and submit it straight away.
+function releaseCommit(key) {
+  const g = _loadCommitGuard();
+  if (!(key in g)) return;
+  delete g[key];
+  try { localStorage.setItem(COMMIT_GUARD_KEY, JSON.stringify(g)); } catch (e) {}
+}
+function duplicateCommitToast() {
+  window.dispatchEvent(new CustomEvent("ims-toast", {
+    detail: "รายการนี้เพิ่งถูกบันทึกไปเมื่อสักครู่ — ระบบกันบันทึกซ้ำไว้ให้ (ถ้าต้องการบันทึกซ้ำจริง รออีก 8 วินาที)"
+  }));
+}
+
+/* ── Pending (not-yet-synced) stock deltas ──
+   Sum of every queued deduct/adjust, per sku. A server snapshot knows nothing
+   about them, so it must not be shown raw or the staff member sees their own
+   work disappear. */
+function pendingStockDeltas() {
+  const out = {};
+  (typeof loadOfflineQueue === "function" ? loadOfflineQueue() : []).forEach(it => {
+    if (!it || !Array.isArray(it.payload)) return;
+    if (it.type === "deduct") it.payload.forEach(d => {
+      if (d && d.sku) out[d.sku] = (out[d.sku] || 0) - (Number(d.qty) || 0);
+    });
+    else if (it.type === "adjust") it.payload.forEach(a => {
+      if (a && a.sku) out[a.sku] = (out[a.sku] || 0) + (Number(a.delta) || 0);
+    });
+  });
+  return out;
+}
+function applyPendingStockDeltas() {
+  const pend = pendingStockDeltas();
+  let n = 0;
+  Object.keys(pend).forEach(sku => {
+    if (!pend[sku]) return;
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (!p) return;
+    p.qty = Math.max(0, (Number(p.qty) || 0) + pend[sku]);
+    n++;
+  });
+  return n;
+}
+
+/* ── Server snapshot → PRODUCTS, safely ──
+   beginProductsFetch() before the request, hydrateProductsFromServer(rows, seq)
+   with the result. An older response that lands after a newer one is dropped
+   (two realtime events in flight used to leave the stale snapshot winning), and
+   queued-but-unsynced deltas are folded back in so nothing vanishes. */
+let _prodFetchSeq = 0;
+let _prodAppliedSeq = 0;
+function beginProductsFetch() { return ++_prodFetchSeq; }
+function hydrateProductsFromServer(rows, seq) {
+  if (!Array.isArray(rows)) return false;
+  if (seq != null) {
+    if (seq < _prodAppliedSeq) return false;   // a newer snapshot already landed
+    _prodAppliedSeq = seq;
+  }
+  PRODUCTS.length = 0;
+  rows.forEach(r => PRODUCTS.push(r));
+  applyPendingStockDeltas();
+  _persistProductsLocal();
+  return true;
+}
+
+/* ── One movement ledger for every stock write ──
+   stock_adjustments started life as the ปรับสต็อก-only history, which is why
+   the product drawer could show a correction but never the receive or the sale
+   that actually moved the stock — the "รายการหายไป" half of the complaint.
+   Every flow now appends here: รับเข้า, ตัดสต็อก, ตรวจนับ and ปรับสต็อก.
+   Best-effort (the atomic qty write is the authoritative one) and silent on
+   failure: the write path it follows has already surfaced its own toast.
+   entries = [{ sku, delta, reason }] */
+function recordStockMoves(entries, reason) {
+  if (typeof dbInsertStockAdjustment !== "function") return;
+  const rows = (Array.isArray(entries) ? entries : [])
+    .map(e => ({ sku: e && e.sku, delta: Math.trunc(Number(e && e.delta) || 0), reason: (e && e.reason) || reason || "" }))
+    .filter(e => e.sku && e.delta);
+  if (!rows.length) return;
+  dbInsertStockAdjustment(rows).catch(() => {});
+}
+
+/* Same contract as _syncQtyDelta: resolves with what the SERVER did, so the
+   movement ledger records the real quantity rather than the requested one.
+     { ok:true, rows }          — applied; rows carry sku/qty/before
+     { ok:true, rows, partial } — RLS let some rows through, blocked the rest
+     { queued:true }            — offline/failed, replays later
+     { ok:false }               — no usable answer */
 async function _deductRemote(deductions) {
-  if (typeof dbDeductStock !== "function") { saveProductStore(); return; }
+  if (typeof dbDeductStock !== "function") { saveProductStore(); return { ok: false }; }
+  // ONE op id for this deduction and every retry of it (see _syncQtyDelta).
+  const opId = genOpId();
   if (!navigator.onLine) {
-    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions);
-    return;
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions, opId);
+    return { queued: true };
   }
   try {
-    const res = await dbDeductStock(deductions);
-    if (res && res.ok) { _applyServerQty(res.rows); return; }
+    const res = await dbDeductStock(deductions, opId);
+    if (res && res.ok) { _applyServerQty(res.rows); return { ok: true, rows: res.rows }; }
     if (res && res.error === "PERMISSION_OR_MISSING") {
       _applyServerQty(res.rows); // rows RLS did allow are still canonical
       window.dispatchEvent(new CustomEvent("ims-toast", {
@@ -414,42 +618,140 @@ async function _deductRemote(deductions) {
       // Reload canonical server state so the UI stops showing a deduction
       // that didn't persist (mirrors saveProductStore's perm-block path).
       if (window.dbLoadProducts) {
-        dbLoadProducts().then(fresh => {
-          if (!fresh) return;
-          PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p));
-          _persistProductsLocal();
-        }).catch(() => {});
+        const seq = beginProductsFetch();
+        dbLoadProducts().then(fresh => hydrateProductsFromServer(fresh, seq)).catch(() => {});
       }
-      return;
+      // Whatever came back DID move; anything missing was blocked and must not
+      // be written into the ledger as if it had happened.
+      return { ok: true, rows: res.rows, partial: true };
     }
-    if (res && res.error === "RPC_MISSING") { saveProductStore(); return; }
+    if (res && res.error === "RPC_MISSING") { saveProductStore(); return { ok: false }; }
     // Other failure (likely transient network/server) → queue for retry.
-    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions);
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions, opId);
+    return { queued: true };
   } catch (e) {
-    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions);
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("deduct", deductions, opId);
+    return { queued: true };
   }
 }
 
-function deductStockAndPersist(sku, qty) {
+/* ── Turning an RPC answer into "what actually moved, per sku" ──
+   One sku may appear twice in a single cart (sold alone AND inside a bundle), so
+   the RPC returns a row per request entry: first {before:10, qty:8}, then
+   {before:8, qty:5}. The real net movement is the FIRST before to the LAST qty. */
+function _serverMoveMap(rows) {
+  const m = new Map();
+  (Array.isArray(rows) ? rows : []).forEach(r => {
+    if (!r || !r.sku || typeof r.qty !== "number") return;
+    const cur = m.get(r.sku);
+    if (cur) cur.after = r.qty;                       // later entry extends the same move
+    else m.set(r.sku, { before: (typeof r.before === "number") ? r.before : null, after: r.qty });
+  });
+  return m;
+}
+/* The signed delta to record for one sku. `requested` is the sign-correct amount
+   this device asked for, used only when the server can't tell us better (legacy
+   1-arg RPC, or the write is still queued). Returns null = record NOTHING:
+   either the server moved nothing (idempotent replay) or RLS blocked this sku. */
+function _movedDelta(res, sku, requested) {
+  if (res && res.blocked) return null;              // refused — nothing moved
+  if (res && res.ok) {
+    const m = _serverMoveMap(res.rows).get(sku);
+    if (!m) return res.partial ? null : requested;    // blocked → no row; otherwise trust the request
+    if (m.before == null) return requested;           // pre-`before` RPC: best available
+    const d = m.after - m.before;
+    return d === 0 ? null : d;                        // 0 = replay recognised, nothing happened
+  }
+  return requested;                                   // queued / unknown — the move is real, flag it
+}
+function _pendingSuffix(res) { return (res && res.queued) ? " · รอซิงค์" : ""; }
+
+/* `reason` is what the product's movement history will show for this deduction
+   ("ตัดสต็อก · ออร์เดอร์ SO-…", "ขายชุดสินค้า …"). Logging here rather than at
+   each call site means no sell path can forget to leave a trace — that gap is
+   why a sale used to be invisible in the product drawer. */
+function deductStockAndPersist(sku, qty, reason) {
   const p = PRODUCTS.find(x => x.sku === sku);
   if (!p) return;
   p.qty = Math.max(0, p.qty - qty);
   _persistProductsLocal();
-  _deductRemote([{ sku, qty }]);
+  _recordDeduction(_deductRemote([{ sku, qty }]), new Map([[sku, Number(qty) || 0]]), reason || "ตัดสต็อก");
   const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
   if (sku in adj) { delete adj[sku]; if (typeof applyStockAdj === "function") applyStockAdj(adj); }
 }
-function deductManyAndPersist(deductions) {
+function deductManyAndPersist(deductions, reason) {
   deductions.forEach(({ sku, qty }) => {
     const p = PRODUCTS.find(x => x.sku === sku);
     if (p) p.qty = Math.max(0, p.qty - qty);
   });
   _persistProductsLocal();
-  _deductRemote(deductions);
+  // Total asked per sku — a sku can legitimately appear twice in one cart.
+  const wanted = new Map();
+  deductions.forEach(d => {
+    if (!d || !d.sku) return;
+    wanted.set(d.sku, (wanted.get(d.sku) || 0) + (Number(d.qty) || 0));
+  });
+  _recordDeduction(_deductRemote(deductions), wanted, reason || "ตัดสต็อก");
   const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
   let changed = false;
   deductions.forEach(({ sku }) => { if (sku in adj) { delete adj[sku]; changed = true; } });
   if (changed && typeof applyStockAdj === "function") applyStockAdj(adj);
+}
+/* Write the movement ledger once the server has said what really left the shelf.
+   Recording the REQUESTED quantity was wrong in two ways: an oversell that the
+   server floors at 0 removed fewer pieces than asked, and an RLS-blocked sku
+   removed none at all — both used to be logged as if they had gone through. */
+function _recordDeduction(write, wanted, reason) {
+  Promise.resolve(write).then(res => {
+    const suffix = _pendingSuffix(res);
+    const rows = [];
+    wanted.forEach((qty, sku) => {
+      const d = _movedDelta(res, sku, -(Number(qty) || 0));
+      if (d) rows.push({ sku, delta: d, reason: reason + suffix });
+    });
+    recordStockMoves(rows, reason);
+  }).catch(() => {
+    const rows = [];
+    wanted.forEach((qty, sku) => rows.push({ sku, delta: -(Number(qty) || 0), reason }));
+    recordStockMoves(rows, reason);
+  });
+}
+
+/* ── Receiving (+qty) with the same guarantee ──
+   Both Inbound forks used to loop adjustProductQty and then log the quantity
+   they had asked for. This applies the batch SYNCHRONOUSLY (applyReceiveLocs
+   must still see the new p.qty in the same tick — see the _planLocRows
+   contract) and records each line only once the server confirms what it added.
+   `qty` is a SIGNED delta: the receiving screens always pass positives, but the
+   product edit sheet uses this too and can lower a count, so never clamp it to 0.
+   lines = [{ sku, qty, loc }] */
+function receiveStockAndRecord(lines, reason) {
+  const jobs = [];
+  (Array.isArray(lines) ? lines : []).forEach(l => {
+    const qty = Math.round(Number(l && l.qty) || 0);
+    if (!l || !l.sku || !qty) return;
+    if (!PRODUCTS.some(p => p.sku === l.sku)) return;
+    jobs.push({ sku: l.sku, qty, loc: l.loc || "", write: adjustProductQty(l.sku, qty) });
+  });
+  if (!jobs.length) return Promise.resolve();
+  return Promise.all(jobs.map(j =>
+    Promise.resolve(j.write)
+      .then(res => ({ job: j, res }))
+      .catch(() => ({ job: j, res: null }))
+  )).then(results => {
+    const rows = [];
+    results.forEach(({ job, res }) => {
+      // adjust_stock answers per sku, so wrap it in the same shape _movedDelta reads.
+      const d = _movedDelta(
+        (res && res.ok) ? { ok: true, rows: [{ sku: job.sku, qty: res.after, before: res.before }] } : res,
+        job.sku, job.qty
+      );
+      if (!d) return;
+      const where = (job.loc && job.loc !== "—") ? ` → ${job.loc}` : "";
+      rows.push({ sku: job.sku, delta: d, reason: reason + where + _pendingSuffix(res) });
+    });
+    recordStockMoves(rows, reason);
+  });
 }
 
 /* ── Reasoned stock adjustment (ปรับสต็อก) ──
@@ -475,31 +777,59 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
   // but correct when a stale overlay pushed the display below the 0-clamp —
   // ตั้งค่าเป็น still lands on the counted number instead of under-shooting).
   const applied = from + d - (Number(p.qty) || 0);
-  if (applied) adjustProductQty(sku, applied);           // optimistic in-place + atomic RPC + offline queue
+  // Keep the promise: the RPC reports the server's REAL before/after, and that —
+  // not this device's arithmetic — is what the history must show.
+  const write = applied ? adjustProductQty(sku, applied) : Promise.resolve({ ok: false });
   if (sku in adj) { delete adj[sku]; if (typeof applyStockAdj === "function") applyStockAdj(adj); }
   const to = Math.max(0, Number(p.qty) || 0);            // overlay cleared → raw IS the displayed qty
   const eff = to - from;
   const reasonLabel = (reason && reason.label) || String(reason || "");
   const noteText = String(note || "").trim();
   const fullReason = noteText ? `${reasonLabel} — ${noteText}` : reasonLabel;
-  // Record the EFFECTIVE local delta (post-clamp), not the requested one, so the
-  // trail never claims more than happened. Skip both writes when nothing moved.
+
+  /* ── Why the history is written AFTER the server answers ──
+     from/to above are computed from THIS DEVICE's copy of qty, and the server
+     applies the delta to ITS own value. When the local copy is stale (another
+     device just sold some, or a realtime push hasn't landed) the two disagree —
+     and the old code wrote the local guess into the log immediately. Live
+     example: AFG-OT33-BK 2026-09-01 12:11 was recorded as "30 → 29" while the
+     real stock went 60 → 59, so the trail jumped from 29 to 59 with nothing in
+     between. The stock itself was always right (the RPC is atomic); only the
+     RECORD lied, which is what made the history unreadable.
+     Now the row carries the server's own before/after. If the server can't be
+     reached the local estimate is still recorded — the movement is real and
+     queued — but marked "รอซิงค์" so a number that may shift is visible as such. */
   if (eff) {
-    // Audit trail: only summary/note survive to the DB (changes[] stays local),
-    // so sku, ±delta, from→to and the reason are all packed into them.
-    if (typeof recordChange === "function") {
-      recordChange({
-        entity: "product", entityId: sku, action: "adjust",
-        summary: `ปรับสต็อก ${p.name} (${sku}) ${eff > 0 ? "+" : ""}${eff} ชิ้น (${from} → ${to})${source === "mobile" ? " (มือถือ)" : ""}`,
-        changes: [{ label: "จำนวน", from: `${from} ชิ้น`, to: `${to} ชิ้น` }],
-        note: fullReason
-      });
-    }
-    // Structured, queryable history (stock_adjustments table). Best-effort like
-    // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
-    if (typeof dbInsertStockAdjustment === "function") {
-      dbInsertStockAdjustment([{ sku, delta: eff, reason: fullReason }]).catch(() => {});
-    }
+    const writeHistory = (rFrom, rTo, rEff, pendingNote) => {
+      const noteOut = pendingNote ? `${fullReason} · ${pendingNote}` : fullReason;
+      // Audit trail: only summary/note survive to the DB (changes[] stays local),
+      // so sku, ±delta, from→to and the reason are all packed into them.
+      if (typeof recordChange === "function") {
+        recordChange({
+          entity: "product", entityId: sku, action: "adjust",
+          summary: `ปรับสต็อก ${p.name} (${sku}) ${rEff > 0 ? "+" : ""}${rEff} ชิ้น (${rFrom} → ${rTo})${source === "mobile" ? " (มือถือ)" : ""}`,
+          changes: [{ label: "จำนวน", from: `${rFrom} ชิ้น`, to: `${rTo} ชิ้น` }],
+          note: noteOut
+        });
+      }
+      // Structured, queryable history (stock_adjustments table). Best-effort like
+      // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
+      if (typeof dbInsertStockAdjustment === "function") {
+        dbInsertStockAdjustment([{ sku, delta: rEff, reason: noteOut }]).catch(() => {});
+      }
+    };
+    Promise.resolve(write).then(res => {
+      if (res && res.ok && typeof res.after === "number") {
+        const sTo = res.after;
+        const sFrom = (typeof res.before === "number") ? res.before : (sTo - applied);
+        const sEff = sTo - sFrom;
+        // 0 = the server recognised an already-applied operation and moved
+        // nothing. Recording it would invent a movement that never happened.
+        if (sEff) writeHistory(sFrom, sTo, sEff, "");
+        return;
+      }
+      writeHistory(from, to, eff, (res && res.queued) ? "รอซิงค์" : "");
+    }).catch(() => writeHistory(from, to, eff, ""));
   }
   return { ok: true, from, to, eff };
 }
@@ -632,11 +962,38 @@ function loadLocTree() {
   if (!t) t = LOC_SEED();
   return t;
 }
+/* ── Shared-blob writers: optimistic, but NEVER fire-and-forget ──
+   Both of these used to `.catch(() => {})` the DB write. app_state INSERT/UPDATE
+   is admin/manager/staff only, so for a viewer — or on any network failure — the
+   rename/add landed in localStorage and on screen, the cloud never got it, and
+   the change silently reverted at the next reload or realtime push. That is the
+   "I saved it but it didn't change" report. Now the local mirror is rolled back
+   to exactly what it was and the user is told, so what is on screen is always
+   what is actually stored. */
+function _blobWriteFailed(what, err) {
+  window.dispatchEvent(new CustomEvent("ims-toast", {
+    detail: err === "PERMISSION_OR_MISSING"
+      ? `บันทึก${what}ไม่สำเร็จ: บัญชีนี้ไม่มีสิทธิ์แก้ไข — ระบบย้อนกลับให้แล้ว`
+      : `บันทึก${what}ไม่สำเร็จ: ${err || "เชื่อมต่อไม่ได้"} — ระบบย้อนกลับให้แล้ว`
+  }));
+}
 function saveLocTree(tree) {
+  const prev = window._DB_LOCATIONS;
+  const prevMirror = (() => { try { return localStorage.getItem("ims_loc_tree"); } catch (e) { return null; } })();
   try { localStorage.setItem("ims_loc_tree", JSON.stringify(tree)); } catch (e) {}
   window._DB_LOCATIONS = tree;
   window.dispatchEvent(new CustomEvent("ims-locations-change"));
-  if (window.dbSaveState) dbSaveState("locations", tree).catch(() => {});
+  if (!window.dbSaveState) return;
+  dbSaveState("locations", tree).then(res => {
+    if (!res || !res.error) return;
+    window._DB_LOCATIONS = prev;
+    try {
+      if (prevMirror == null) localStorage.removeItem("ims_loc_tree");
+      else localStorage.setItem("ims_loc_tree", prevMirror);
+    } catch (e) {}
+    window.dispatchEvent(new CustomEvent("ims-locations-change"));
+    _blobWriteFailed("ตำแหน่งจัดเก็บ", res.error);
+  }).catch(e => _blobWriteFailed("ตำแหน่งจัดเก็บ", String(e && e.message || e)));
 }
 
 /* Capability: hard-delete of records. Defaults to admin/manager (mirrors the
@@ -1162,7 +1519,18 @@ const channelSalesFor = (sku, days = 30) => {
   for (const o of orders) {
     if (!o || !Array.isArray(o.lineItems) || !o.lineItems.length) continue;
     if (cutoff && o.dateIso && o.dateIso < cutoff) continue;
-    const units = o.lineItems.reduce((s, li) => s + (li && li.sku === sku ? (Number(li.qty) || 0) : 0), 0);
+    /* A multi-item ตัดสต็อก tags every line with its OWN channel (buildIssuePlan),
+       so those units are attributed exactly instead of prorated across the whole
+       order — otherwise "3 ชิ้น A ทาง Shopee + 2 ชิ้น B ทาง Lazada" would smear
+       both channels over both SKUs. Untagged units keep the legacy split path. */
+    let units = 0;
+    o.lineItems.forEach(li => {
+      if (!li || li.sku !== sku) return;
+      const q = Number(li.qty) || 0;
+      if (!q) return;
+      if (li.ch && Object.prototype.hasOwnProperty.call(byId, li.ch)) byId[li.ch] += q;
+      else units += q;
+    });
     if (!units) continue;
     const ded = Array.isArray(o.deductions) ? o.deductions.filter(d => Number(d.qty) > 0) : [];
     if (ded.length) {
@@ -1201,9 +1569,9 @@ const ROLES = [
 /* "adjust" is a mobile-menu-only id (no ALL_NAV entry, so it can never appear
    in the desktop sidebar) — it gates the MMore ปรับสต็อก row per role. */
 const ROLE_NAV = {
-  admin:   ["dashboard","inbound","outbound","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
-  manager: ["dashboard","inbound","outbound","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
-  staff:   ["dashboard","inbound","outbound","finder","inventory","stocktake","adjust","locations","bundles","labels","tracking","handheld"],
+  admin:   ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
+  manager: ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
+  staff:   ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","bundles","labels","tracking","handheld"],
   viewer:  ["dashboard","finder","inventory","locations","bundles","labels","tracking","analytics"]
 };
 
@@ -1363,6 +1731,58 @@ function bangkokDateOf(isoStr) {
   const t = Date.parse(isoStr || "");
   if (!Number.isFinite(t)) return (isoStr || "").slice(0, 10);
   return bangkokDateStr(t);
+}
+// "HH:MM" in Asia/Bangkok for a stored UTC timestamp. Pairs with bangkokDateOf
+// so the clock time always belongs to the day header printed above it — a plain
+// toLocaleTimeString() would drift onto another day on a device set to another
+// time zone, which is exactly what makes an activity feed unreadable.
+function bangkokTimeOf(isoStr) {
+  const t = Date.parse(isoStr || "");
+  if (!Number.isFinite(t)) return "";
+  try {
+    return new Intl.DateTimeFormat("th-TH", {
+      timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit", hour12: false
+    }).format(new Date(t));
+  } catch (e) {
+    return new Date(t).toTimeString().slice(0, 5);
+  }
+}
+// Bangkok "YYYY-MM-DD" shifted by whole days — powers the ◀ ▶ day steppers.
+function shiftDayKey(dateKey, delta) {
+  const t = Date.parse(String(dateKey || "") + "T12:00:00+07:00");
+  if (!Number.isFinite(t)) return bangkokDateStr();
+  return bangkokDateStr(t + delta * 86400000);
+}
+// "วันนี้" / "เมื่อวาน" / "30 ก.ค. 2569" for a Bangkok day key.
+function thaiDayLabel(dateKey) {
+  if (!dateKey) return "";
+  const today = bangkokDateStr();
+  if (dateKey === today) return "วันนี้";
+  if (dateKey === shiftDayKey(today, -1)) return "เมื่อวาน";
+  return isoToThai(dateKey);
+}
+// [[dayKey, entries], ...] — newest day first, entries newest first inside it.
+// Grouping is by BANGKOK day, not by the UTC prefix of the timestamp: anything
+// logged 00:00–06:59 local carries the previous UTC date and would otherwise be
+// filed under the wrong heading.
+function groupAuditByDay(list) {
+  const map = new Map();
+  (list || []).forEach(e => {
+    const k = bangkokDateOf(e && e.ts);
+    if (!map.has(k)) map.set(k, []);
+    map.get(k).push(e);
+  });
+  return Array.from(map.entries());
+}
+// Direction of an audit entry, for the coloured dot: stock in / stock out /
+// neutral edit. Quantity deltas are written into the summary as "-2 ชิ้น".
+function auditTone(e) {
+  const m = /([+-]\d+)\s*ชิ้น/.exec(String((e && e.summary) || ""));
+  if (m) return Number(m[1]) >= 0 ? "in" : "out";
+  const action = (e && e.action) || "";
+  if (action === "create") return "in";
+  if (action === "delete" || action === "bulk-delete") return "out";
+  return "move";
 }
 
 // The raw exception date stored for a user (or null).
@@ -1524,6 +1944,334 @@ function snapLineItem(sku, name, qty, loc) {
   return row;
 }
 
+/* ── ตัดสต็อก cart → one write plan ──────────────────────────────────────
+   The stock-out flow takes SEVERAL lines at once (desktop IssueModal, mobile
+   MIssue). Both forks funnel their cart through here so the deduction list,
+   shelf picks, line items and per-channel split can't diverge.
+
+   lines = [
+     { type: "product", sku, name?, qty, loc?, ch? },
+     { type: "bundle",  id, name, items: [{sku, qty}], qty, ch? }
+   ]
+   `ch` is a CHANNEL_LIST id and is per LINE — the same sku may appear twice on
+   two channels (that's how the old single-sku multi-channel split survives a
+   multi-item cart). Returns:
+     skuDeducts   [{sku, qty}]  — aggregated per sku, for deductManyAndPersist
+     locPicks     [{sku, loc}]  — for applyLocPicks (duplicates are fine)
+     lineItems    snapLineItem rows, each tagged with its own `ch`
+     channelSplit [{id,name,color,qty}] — the order's `deductions` field
+     channelLabel / totalQty / lineCount / hasBundle / bundleNames */
+function buildIssuePlan(lines) {
+  const list = Array.isArray(lines) ? lines : [];
+  const skuMap = new Map();     // sku → total pieces
+  const chMap = new Map();      // channel id → units entered (ชิ้น or ชุด)
+  const locPicks = [];
+  const lineItems = [];
+  const bundleNames = [];
+  let totalQty = 0, lineCount = 0;
+
+  list.forEach(line => {
+    const n = Math.max(0, Math.round(Number(line && line.qty) || 0));
+    if (!line || !n) return;
+    lineCount++;
+    totalQty += n;
+    const ch = line.ch || "";
+    if (ch) chMap.set(ch, (chMap.get(ch) || 0) + n);
+    if (line.type === "bundle") {
+      bundleNames.push(line.name || line.id);
+      (line.items || []).forEach(ci => {
+        const need = (Number(ci.qty) || 0) * n;
+        if (!ci.sku || !need) return;
+        skuMap.set(ci.sku, (skuMap.get(ci.sku) || 0) + need);
+        // Bundle components take their own default shelf — no per-component picker.
+        const cp = PRODUCTS.find(x => x.sku === ci.sku);
+        locPicks.push({ sku: ci.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" });
+        const row = snapLineItem(ci.sku, null, need);
+        if (ch) row.ch = ch;
+        lineItems.push(row);
+      });
+    } else {
+      if (!line.sku) return;
+      skuMap.set(line.sku, (skuMap.get(line.sku) || 0) + n);
+      locPicks.push({ sku: line.sku, loc: line.loc || "" });
+      const row = snapLineItem(line.sku, line.name || null, n, line.loc || "");
+      if (ch) row.ch = ch;
+      lineItems.push(row);
+    }
+  });
+
+  const skuDeducts = [];
+  skuMap.forEach((qty, sku) => skuDeducts.push({ sku, qty }));
+  const channelSplit = CHANNEL_LIST
+    .filter(c => (chMap.get(c.id) || 0) > 0)
+    .map(c => ({ id: c.id, name: c.name, color: c.color, qty: chMap.get(c.id) }));
+  const channelLabel = channelSplit.length === 1 ? channelSplit[0].name
+    : channelSplit.length > 1 ? `${channelSplit.length} ช่องทาง`
+    : "ตัดสต็อก";
+
+  return {
+    skuDeducts, locPicks, lineItems, channelSplit, channelLabel,
+    totalQty, lineCount, hasBundle: bundleNames.length > 0, bundleNames
+  };
+}
+
+/* ── แพ็คสินค้า — pick & pack work lists ────────────────────────────────
+   Stock leaves the system at ตัดสต็อก time (commitIssueOrder / MSell / MIssue),
+   so by the time an order reaches a packer the pieces are ALREADY debited from
+   one specific shelf. These helpers answer exactly one question — "what do I
+   fetch, and from which position" — and never move stock themselves.
+
+   WHY the shelf must come from the ORDER and not from the product: applyLocPicks
+   debited ONE position per sku at sell time. Re-deriving "where does this sku
+   live" at pack time could send the packer to a different pile, and the recorded
+   split would then disagree with the physical shelves forever. So `li.loc` wins;
+   only lines that never carried one (bundle components — buildIssuePlan
+   snapshots them with 3 args) fall back to defaultPickLoc, which is the same
+   choice applyLocPicks made for them.
+
+   Progress lives in ONE app_state blob ("pack_progress", localStorage mirror
+   ims_pack_v1) keyed by order id, with wave/batch records under a "batch:"
+   prefix so both share one hydration path and one realtime subscription:
+     { "SO-X": { done:{ "sku|loc": qty }, short:{ "sku|loc": reason }, by, startedAt },
+       "batch:ABC": { orderIds:[…], stage:"pick"|"sort", done:{…}, by, startedAt },
+       "SO-OLD": null }
+   merge_app_state is a shallow `||` that can ADD keys but never delete them, so
+   a finished record is tombstoned with null and filtered on read. */
+const PACK_KEY = "ims_pack_v1";
+const PACK_STATE_KEY = "pack_progress";
+
+// One pick line = one (sku, shelf) pair. Same sku on two shelves is two lines;
+// same sku twice on ONE shelf (two channels of the same order) is one line.
+function packKey(sku, loc) { return String(sku || "") + "|" + String(loc || ""); }
+
+/* Walk order: the position's index in the live location tree, which is the
+   physical layout the admin arranged — a far better route than alphabetical.
+   Codes missing from the tree (stale/blank) sort last so they can't send
+   someone to a shelf that no longer exists mid-walk. */
+function packLocRank() {
+  const idx = new Map();
+  allPositions().forEach((p, i) => idx.set(p.code, i));
+  return idx;
+}
+function _packSortLines(lines) {
+  const idx = packLocRank();
+  const rank = (l) => (idx.has(l) ? idx.get(l) : Number.MAX_SAFE_INTEGER);
+  return lines.sort((a, b) => rank(a.loc) - rank(b.loc) || String(a.sku).localeCompare(String(b.sku)));
+}
+
+/* The raw {sku, qty, loc} rows to pick for one order. Orders born from
+   ตัดสต็อก/ขาย carry lineItems; label-born orders keep their detail on the LABEL
+   (labelToOrder reduces it to a count), so fall back to that. Custom label lines
+   have no sku — there is nothing in the warehouse to fetch, so they're dropped. */
+function _packSourceItems(order) {
+  if (!order) return [];
+  const own = Array.isArray(order.lineItems) ? order.lineItems.filter(li => li && li.sku) : [];
+  if (own.length) return own;
+  const labels = (typeof loadLabels === "function") ? loadLabels() : [];
+  const idOf = (l) => (typeof orderIdForLabel === "function") ? orderIdForLabel(l) : (l.soId || l.id);
+  const hit = labels.find(l => idOf(l) === order.id);
+  return hit ? (hit.items || []).filter(it => it && it.sku) : [];
+}
+
+/* Shelf-sorted pick lines for one order. `shelfQty` is what the split says is
+   at that position — the number that exposes a physical mismatch before the
+   packer has walked anywhere. */
+function packLinesForOrder(order) {
+  const merged = new Map();
+  _packSourceItems(order).forEach(li => {
+    const sku = li.sku;
+    const qty = Math.max(0, Math.round(Number(li.qty) || 0));
+    if (!sku || !qty) return;
+    const p = PRODUCTS.find(x => x.sku === sku);
+    const loc = li.loc || defaultPickLoc(p) || "";
+    const key = packKey(sku, loc);
+    const prev = merged.get(key);
+    if (prev) { prev.qty += qty; return; }
+    merged.set(key, {
+      key, sku, loc,
+      name: (p && p.name) || li.name || sku,
+      qty,
+      shelfQty: qtyAtLocation(sku, loc),
+      parts: locParts(loc)
+    });
+  });
+  return _packSortLines(Array.from(merged.values()));
+}
+
+/* Combined wave list for several orders: one row per (sku, shelf) summed across
+   the whole wave, each carrying `per` = [{orderId, qty}] so the picker can split
+   the pile into parcels at the packing table afterwards. */
+function packLinesForOrders(orders) {
+  const merged = new Map();
+  (orders || []).forEach(o => {
+    packLinesForOrder(o).forEach(l => {
+      const prev = merged.get(l.key);
+      if (prev) { prev.qty += l.qty; prev.per.push({ orderId: o.id, qty: l.qty }); return; }
+      merged.set(l.key, {
+        key: l.key, sku: l.sku, loc: l.loc, name: l.name, qty: l.qty,
+        shelfQty: l.shelfQty, parts: l.parts,
+        per: [{ orderId: o.id, qty: l.qty }]
+      });
+    });
+  });
+  return _packSortLines(Array.from(merged.values()));
+}
+
+/* Orders waiting to be packed, oldest first so the queue is FIFO. Reads the
+   Tracking model (buildOrders) so it sees exactly what Outbound/Tracking show;
+   falls back to the raw cache if tracking.jsx hasn't loaded. */
+function packQueue() {
+  const list = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+  return (list || [])
+    .filter(o => o && o.status === "picking")
+    .sort((a, b) => String(a.dateIso || "").localeCompare(String(b.dateIso || "")) || String(a.ts || "").localeCompare(String(b.ts || "")));
+}
+
+// Other positions that still hold this sku — offered when a shelf comes up short.
+function packAltPositions(sku, excludeLoc) {
+  const p = PRODUCTS.find(x => x.sku === sku);
+  return productPositions(p)
+    .filter(r => r.loc && r.loc !== excludeLoc && (Number(r.qty) || 0) > 0)
+    .sort((a, b) => b.qty - a.qty);
+}
+
+function loadPackProgress() {
+  let m = null;
+  const cloud = window._DB_PACK_PROGRESS;
+  if (cloud && typeof cloud === "object") m = cloud;
+  if (!m) {
+    try { const s = localStorage.getItem(PACK_KEY); if (s) { const o = JSON.parse(s); if (o && typeof o === "object") m = o; } } catch (e) {}
+  }
+  if (!m) return {};
+  const out = {};
+  Object.keys(m).forEach(id => { if (m[id]) out[id] = m[id]; });  // drop tombstones
+  return out;
+}
+// Always returns a usable shape, so callers never guard for a first-time record.
+function packEntry(id) {
+  const e = loadPackProgress()[id] || {};
+  return {
+    done: e.done || {}, short: e.short || {},
+    by: e.by || "", startedAt: e.startedAt || "",
+    orderIds: e.orderIds || null, stage: e.stage || ""
+  };
+}
+
+const _packSyncTimers = {};
+function _packMirror(map) {
+  window._DB_PACK_PROGRESS = map;
+  try { localStorage.setItem(PACK_KEY, JSON.stringify(map)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-pack-change"));
+}
+/* Write one record. localStorage + the in-memory mirror update synchronously so a
+   tap survives an instant refresh; the cloud write is debounced per id because a
+   packer ticks a dozen lines in a few seconds. The patch sends the COMPLETE
+   record — merge_app_state is a shallow merge, so a partial one would replace it. */
+function savePackEntry(id, entry) {
+  if (!id) return;
+  const map = { ...loadPackProgress() };
+  map[id] = entry;
+  _packMirror(map);
+  if (_packSyncTimers[id]) clearTimeout(_packSyncTimers[id]);
+  _packSyncTimers[id] = setTimeout(() => {
+    delete _packSyncTimers[id];
+    const cur = loadPackProgress()[id];
+    if (!cur) return;
+    if (typeof dbMergeState === "function") {
+      dbMergeState(PACK_STATE_KEY, { [id]: cur }).then(res => {
+        if (res === null && typeof dbSaveState === "function") dbSaveState(PACK_STATE_KEY, loadPackProgress()).catch(() => {});
+      }).catch(() => {});
+    } else if (typeof dbSaveState === "function") {
+      dbSaveState(PACK_STATE_KEY, loadPackProgress()).catch(() => {});
+    }
+  }, 800);
+}
+/* Finish with a null tombstone rather than a delete: merge_app_state can only add
+   keys, so deleting locally then merging would let the stale record come straight
+   back from another device. loadPackProgress filters nulls out on read. */
+function clearPackEntry(id) {
+  if (!id) return;
+  if (_packSyncTimers[id]) { clearTimeout(_packSyncTimers[id]); delete _packSyncTimers[id]; }
+  const map = { ...loadPackProgress() };
+  delete map[id];
+  _packMirror(map);
+  if (typeof dbMergeState === "function") {
+    dbMergeState(PACK_STATE_KEY, { [id]: null }).then(res => {
+      if (res === null && typeof dbSaveState === "function") dbSaveState(PACK_STATE_KEY, map).catch(() => {});
+    }).catch(() => {});
+  } else if (typeof dbSaveState === "function") {
+    dbSaveState(PACK_STATE_KEY, map).catch(() => {});
+  }
+}
+function newPackBatchId() { return "batch:" + Date.now().toString(36).toUpperCase(); }
+
+/* Shared progress math so the phone, the wave view and the desktop queue can't
+   report different numbers for the same order. A line counts as settled when the
+   picked qty covers it OR it has been marked short (a short line is resolved —
+   there is nothing more to fetch — so it must not block completion). */
+function packLineTotals(lines, entry) {
+  const done = (entry && entry.done) || {};
+  const short = (entry && entry.short) || {};
+  let need = 0, got = 0, lineDone = 0, shortLines = 0;
+  (lines || []).forEach(l => {
+    const picked = Math.max(0, Math.min(Number(done[l.key]) || 0, l.qty));
+    need += l.qty; got += picked;
+    if (short[l.key]) shortLines++;
+    if (picked >= l.qty || short[l.key]) lineDone++;
+  });
+  const lineCount = (lines || []).length;
+  return {
+    need, got, lineCount, lineDone, shortLines,
+    remaining: Math.max(0, need - got),
+    pct: need ? Math.round((got / need) * 100) : 0,
+    complete: lineCount > 0 && lineDone >= lineCount
+  };
+}
+
+/* Correct the recorded split when a packer had to take a line from a DIFFERENT
+   shelf than the one the sale debited.
+
+   Only the DISTRIBUTION is wrong here, never the total: products.qty was already
+   reduced correctly at sell time. That is precisely why applyLocPicks cannot be
+   used — it is difference-based and no-ops when p.qty already matches the
+   recorded sum, which it does. saveLocSplit is the right writer: give `fromLoc`
+   its pieces back (they were never taken) and take them off `toLoc` (which
+   really lost them), leaving the sum untouched.
+
+   If toLoc has fewer pieces recorded than were physically taken, that is a real
+   count discrepancy — move what we can and report the shortfall so the UI can
+   point at ปรับสต็อก instead of silently inventing stock. */
+async function repointPackLine(sku, fromLoc, toLoc, qty) {
+  const n = Math.max(0, Math.round(Number(qty) || 0));
+  if (!sku || !toLoc || toLoc === fromLoc || !n) return { ok: false, error: "ข้อมูลไม่ครบ" };
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p) return { ok: false, error: "ไม่พบสินค้า " + sku };
+  const rows = locSplitFor(sku, p.loc);
+  // No recorded split → products.qty is the whole truth and there is no
+  // distribution to correct.
+  if (!rows.length) return { ok: true, moved: 0, shortfall: 0, skipped: true };
+
+  const out = rows.map(r => ({ loc: r.loc, qty: r.qty }));
+  const src = out.find(r => r.loc === toLoc);
+  const moved = Math.min(n, src ? src.qty : 0);
+  const shortfall = n - moved;
+  if (moved > 0) {
+    src.qty -= moved;
+    if (fromLoc) {
+      const dst = out.find(r => r.loc === fromLoc);
+      if (dst) dst.qty += moved; else out.push({ loc: fromLoc, qty: moved });
+    } else {
+      // No original shelf on the line (legacy order): park the pieces on the
+      // product's primary position so the sum still reconciles.
+      const dst = out.find(r => r.loc === p.loc);
+      if (dst) dst.qty += moved; else out.push({ loc: p.loc || toLoc, qty: moved });
+    }
+    const res = await saveLocSplit(sku, out.filter(r => r.qty > 0));
+    if (!res.ok) return { ok: false, error: res.error, moved: 0, shortfall: n };
+  }
+  return { ok: true, moved, shortfall };
+}
+
 /* ── Stock take / cycle count ───────────────────────────────────────────
    The in-progress count ({sku: countedQty}) is kept in localStorage so it
    survives a refresh and is shared between the desktop and mobile screens
@@ -1536,9 +2284,23 @@ function loadStockTake() {
 function saveStockTake(counts) {
   try { localStorage.setItem(STOCKTAKE_KEY, JSON.stringify(counts || {})); } catch (e) {}
 }
-// Reconcile system stock to the physical count. counts = { sku: countedQty }.
-// Returns the list of actual changes [{ sku, name, from, to, delta }] and
-// persists once (localStorage + Supabase) via saveProductStore().
+/* Reconcile system stock to the physical count. counts = { sku: countedQty }.
+   Returns the list of actual changes [{ sku, name, from, to, delta }].
+
+   Three things must happen together, or a count leaves the data worse than it
+   found it — this is the ONE choke point for both forks (StockTake desktop /
+   MStockTake mobile), so keep them here rather than in either UI:
+     1. products.qty ← the counted number (absolute, scoped row write).
+     2. product_locations re-balanced to the new qty. A count used to move
+        products.qty ONLY, so for a split sku the per-shelf rows kept summing to
+        the OLD total: the ตำแหน่งสินค้า page then showed stock that wasn't
+        there, and the split editor refused every later save with
+        "จำนวนรวมทุกตำแหน่ง ไม่เท่ากับสต็อก". applyLocPicks is
+        difference-based and plans before its first await, so calling it here —
+        same tick as the qty write — absorbs the count into the pick-first shelf.
+     3. A movement row per sku, so the count shows up in the product's history
+        next to receives, sales and corrections instead of only as one lumped
+        line in ประวัติการแก้ไข. */
 function applyStockCounts(counts) {
   if (!counts) return [];
   const changes = [];
@@ -1552,9 +2314,26 @@ function applyStockCounts(counts) {
     changes.push({ sku, name: p.name, from: p.qty, to, delta: to - p.qty });
     p.qty = to;
   });
+  if (!changes.length) return changes;
   // Physical count = truth → write the counted skus' absolute qty (scoped rows),
   // not the whole catalog.
-  if (changes.length) _syncProductRows(changes.map(c => c.sku));
+  _syncProductRows(changes.map(c => c.sku));
+  if (typeof applyLocPicks === "function") {
+    const picks = changes.map(c => {
+      const p = PRODUCTS.find(x => x.sku === c.sku);
+      return { sku: c.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(p) : (p && p.loc) || "" };
+    });
+    applyLocPicks(picks).then(res => {
+      if (res && res.errors && res.errors.length) {
+        window.dispatchEvent(new CustomEvent("ims-toast", {
+          detail: `ปรับสต็อกแล้ว แต่ปรับจำนวนตามตำแหน่งไม่สำเร็จ ${res.errors.length} SKU — แก้ได้ที่หน้าสินค้า`
+        }));
+      }
+    }).catch(() => {});
+  }
+  recordStockMoves(changes.map(c => ({
+    sku: c.sku, delta: c.delta, reason: `ตรวจนับสต็อก (${c.from} → ${c.to})`
+  })));
   return changes;
 }
 
@@ -1954,9 +2733,12 @@ function _saveQueue(q) {
   try { localStorage.setItem(IMS_QUEUE_KEY, JSON.stringify(q)); } catch (e) {}
   window.dispatchEvent(new CustomEvent("ims-queue-change", { detail: { count: q.length } }));
 }
-function enqueueOfflineWrite(type, payload) {
+function enqueueOfflineWrite(type, payload, opId) {
   const q = loadOfflineQueue();
-  q.push({ id: "q" + Date.now(), type, payload, ts: new Date().toISOString() });
+  // opId travels WITH the item so the retry replays the SAME operation id the
+  // first attempt used — the server then recognises an already-applied write
+  // instead of moving stock a second time (see supabase/stock-op-idempotency.sql).
+  q.push({ id: "q" + Date.now() + Math.random().toString(36).slice(2, 6), type, payload, opId: opId || "", ts: new Date().toISOString() });
   _saveQueue(q);
 }
 // Remove ONE item from the stored queue by id. Re-reads first so items enqueued
@@ -1989,13 +2771,13 @@ async function flushOfflineQueue() {
           const r = await dbUpsertLabels(item.payload);
           ok = !!(r && r.ok);
         } else if (item.type === "deduct" && typeof dbDeductStock === "function") {
-          const r = await dbDeductStock(item.payload);
+          const r = await dbDeductStock(item.payload, item.opId);
           if (r && r.ok) { _applyServerQty(r.rows); ok = true; }
           // A permission block won't fix itself by retrying — consume the item
           // (canonical state was already reloaded by the caller's error path).
           else if (r && r.error === "PERMISSION_OR_MISSING") ok = true;
         } else if (item.type === "adjust" && typeof dbAdjustStock === "function") {
-          const r = await dbAdjustStock(item.payload);
+          const r = await dbAdjustStock(item.payload, item.opId);
           if (r && r.ok) { _applyServerQty(r.rows); ok = true; }
           else if (r && r.error === "PERMISSION_OR_MISSING") ok = true;
           // NOTE: do NOT consume on RPC_MISSING — that would drop the delta forever
@@ -2196,7 +2978,10 @@ Object.assign(window, {
   STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,
   skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
-  playScanBeep, playScanErrorBeep, genOrderId, snapLineItem,
+  playScanBeep, playScanErrorBeep, genOrderId, snapLineItem, buildIssuePlan,
+  genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
+  pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
+  recordStockMoves, receiveStockAndRecord,
   loadStockTake, saveStockTake, applyStockCounts,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   omit,
@@ -2213,9 +2998,13 @@ Object.assign(window, {
   applyLocPicks, defaultPickLoc, moveStockToLocation, applyReceiveLocs,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
+  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions,
+  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLineTotals, repointPackLine,
+  PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,
   bangkokDateStr, workHoursExceptionDate, hasActiveWorkHoursException, workHoursStatusForUser,
+  bangkokTimeOf, shiftDayKey, thaiDayLabel, groupAuditByDay, auditTone,
   loadOfflineQueue, enqueueOfflineWrite, flushOfflineQueue,
   printBarcodeLabels, openPickListWindow
 });

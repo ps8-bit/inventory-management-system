@@ -6,6 +6,7 @@ const ALL_NAV = [
   { id: "dashboard", label: "หน้าหลัก",       icon: Icons.Dash,    group: "main" },
   { id: "inbound",   label: "รับเข้าสินค้า",   icon: Icons.In,      group: "ops"   },
   { id: "outbound",  label: "จัดส่งสินค้า",    icon: Icons.Out,     group: "ops"   },
+  { id: "pack",      label: "แพ็คสินค้า",      icon: Icons.Box,     group: "ops"   },
   { id: "finder",    label: "ค้นหาสินค้า",     icon: Icons.Search,  group: "ops"   },
   { id: "inventory", label: "สินค้าคงคลัง",    icon: Icons.Box,     group: "stock" },
   { id: "stocktake", label: "ตรวจนับสต็อก",    icon: Icons.Scan,    group: "stock" },
@@ -32,6 +33,7 @@ const CRUMB_MAP = {
   dashboard: "หน้าหลัก",
   inbound: "รับเข้าสินค้า",
   outbound: "จัดส่งสินค้า",
+  pack: "แพ็คสินค้า",
   finder: "ค้นหาสินค้า",
   inventory: "สินค้าคงคลัง",
   stocktake: "ตรวจนับสต็อก",
@@ -66,7 +68,11 @@ function computeBadges() {
   const inbound = PRODUCTS.filter(p => p.qty <= p.reorder).length;
 
   // --- outbound: orders not yet shipped (Tracking-model view) ---
-  const outbound = ordersSnapshot().filter(o => o.status === "picking" || o.status === "packed").length;
+  const snap = ordersSnapshot();
+  const outbound = snap.filter(o => o.status === "picking" || o.status === "packed").length;
+
+  // --- pack: orders whose stock is cut but nothing has been fetched off the shelf yet ---
+  const pack = snap.filter(o => o.status === "picking").length;
 
   // --- labels: items in print queue (prefer Supabase cache) ---
   let labelsArr = window._DB_LABELS || SAMPLE_LABELS;
@@ -81,6 +87,7 @@ function computeBadges() {
   return {
     inbound:  inbound  > 0 ? inbound  : null,
     outbound: outbound > 0 ? outbound : null,
+    pack:     pack     > 0 ? pack     : null,
     labels:   labels   > 0 ? labels   : null,
   };
 }
@@ -950,6 +957,7 @@ function App({ user, onLogout, onSwitchUser }) {
           {page === "dashboard" && <Dashboard density={t.density} goTo={goTo}/>}
           {page === "inbound"   && <Inbound goTo={goTo} pushToast={pushToast}/>}
           {page === "outbound"  && <Outbound goTo={goTo} pushToast={pushToast} focus={focusFor("outbound")}/>}
+          {page === "pack"      && <PackQueue pushToast={pushToast} goTo={goTo} user={user}/>}
           {page === "finder"    && <ProductFinder pushToast={pushToast} goTo={goTo} focus={focusFor("finder")}/>}
           {page === "inventory" && <Inventory pushToast={pushToast} density={t.density} goTo={goTo} focus={focusFor("inventory")}/>}
           {page === "stocktake" && <StockTake pushToast={pushToast}/>}

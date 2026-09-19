@@ -372,6 +372,7 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
   );
   const [showConfirm, setShowConfirm] = useBndState(false);
   const [stockKey, setStockKey] = useBndState(0);
+  const sellBusyRef = useBndRef(false);
 
   useBndEffect(() => {
     const refresh = () => setStockKey(k => k + 1);
@@ -401,11 +402,16 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
   const selectedChannels = CHANNEL_LIST.filter(c => channels[c.id].on && channels[c.id].qty > 0)
     .map(c => ({ ...c, qty: channels[c.id].qty }));
 
+  /* Synchronous double-submit latch — see SellProductModal in screens.jsx for
+     why a state flag isn't enough (this awaits applyLocPicks before closing). */
   const confirmSell = async () => {
+    if (sellBusyRef.current) return;
+    sellBusyRef.current = true;
     // Capture before-qtys BEFORE deducting so the audit shows the true from→to
     // (the old code read qty AFTER deduction, which is wrong when a deduct clamps at 0).
     const before = Object.fromEntries(bundle.items.map(it => [it.sku, getEffectiveQty(it.sku)]));
-    deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })));
+    deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })),
+      `ขายชุดสินค้า ${bundle.name} ×${sellQty}`);
     /* Third sell path (shared by both forks) — without this every component of a
        bundle sale drifts its per-position split. No per-component picker: each
        takes its own pick-first shelf, the SAME default the other flows use. */
@@ -462,6 +468,8 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
       });
     }
     setShowConfirm(false);
+    // The panel stays mounted for the next sale, so release the latch here.
+    sellBusyRef.current = false;
     pushToast(`ขายชุด "${bundle.name}" ${sellQty} ชุดสำเร็จ`);
     setStockKey(k => k + 1);
     setQty(1);

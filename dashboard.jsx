@@ -76,27 +76,119 @@ function KPIWidget({ goTo }) {
   );
 }
 
-function ActivityWidget() {
-  const log = typeof loadAuditLog === "function" ? loadAuditLog().slice(0, 6) : [];
-  if (!log.length) return (
-    <div style={{ padding: "32px 18px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-      ยังไม่มีกิจกรรม — จะแสดงเมื่อเริ่มรับเข้า/ตัดสต็อก
-    </div>
-  );
+/* Recent activity, day-aware.
+   Two modes: "ล่าสุด" walks back through the loaded log grouped by Bangkok day
+   (โหลดเพิ่ม pulls the next page of older rows out of the DB), and a day mode
+   where ◀ ▶ / the date box open ONE past day — fetched with a single query, so
+   a day from months ago costs the same as yesterday. */
+const ACTIVITY_STEP = 12;
+
+function ActivityWidget({ goTo }) {
+  const [tick, setTick]     = useStateDash(0);
+  const [shown, setShown]   = useStateDash(ACTIVITY_STEP);
+  const [day, setDay]       = useStateDash(null);      // null = ล่าสุด (ทุกวัน)
+  const [dayRows, setDayRows] = useStateDash(null);
+  const [busy, setBusy]     = useStateDash(false);
+
+  const today = typeof todayIso === "function" ? todayIso() : new Date().toISOString().slice(0, 10);
+
+  useEffectDash(() => {
+    const refresh = () => setTick(t => t + 1);
+    window.addEventListener("ims-audit-change", refresh);
+    // Knowing the DB row count keeps "โหลดเพิ่ม" honest about what's left.
+    if (typeof refreshAuditTotal === "function") refreshAuditTotal();
+    return () => window.removeEventListener("ims-audit-change", refresh);
+  }, []);
+
+  useEffectDash(() => {
+    if (!day) { setDayRows(null); return; }
+    let alive = true;
+    setBusy(true);
+    Promise.resolve(typeof loadAuditDay === "function" ? loadAuditDay(day) : [])
+      .then(rows => { if (alive) setDayRows(rows || []); })
+      .catch(() => { if (alive) setDayRows([]); })
+      .then(() => { if (alive) setBusy(false); });
+    return () => { alive = false; };
+  }, [day]);
+
+  const full = useMemoDash(() => (typeof loadAuditLog === "function" ? loadAuditLog() : []), [tick]);
+  const list = day ? (dayRows || []) : full.slice(0, shown);
+  const groups = groupAuditByDay(list);
+  const hasMore = !day && (shown < full.length || (typeof auditHasMore === "function" && auditHasMore()));
+
+  const jumpDay = (delta) => {
+    const next = shiftDayKey(day || today, delta);
+    if (next > today) return;                          // no future days
+    setDay(next);
+  };
+
+  const showMore = async () => {
+    if (shown + ACTIVITY_STEP <= full.length) { setShown(shown + ACTIVITY_STEP); return; }
+    if (typeof loadMoreAuditLog === "function") {      // cache exhausted — page the DB
+      setBusy(true);
+      await loadMoreAuditLog();
+      setBusy(false);
+    }
+    setShown(s => s + ACTIVITY_STEP);
+  };
+
+  const navBtn = { height: 28, padding: "0 8px" };
+
   return (
-    <div style={{ padding: "6px 12px 12px" }}>
-      {log.map((e, i) => {
-        const t = e.ts ? new Date(e.ts).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "";
-        const type = e.action === "delete" ? "out" : e.entity === "inbound" ? "in" : "out";
-        return (
-          <div key={e.id || i} style={{ display: "grid", gridTemplateColumns: "52px 24px 1fr auto", gap: 10, alignItems: "center", padding: "9px 8px", borderBottom: i < log.length - 1 ? "1px solid var(--border)" : "none" }}>
-            <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{t}</div>
-            <ActivityDot type={type}/>
-            <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.summary || e.entityId}</div>
-            <div style={{ fontSize: 11, color: "var(--muted)" }}>{e.user?.name || "ระบบ"}</div>
+    <div>
+      <div className="row" style={{ gap: 6, padding: "8px 12px", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+        <button className="btn btn-sm" style={navBtn} onClick={() => jumpDay(-1)} title="วันก่อนหน้า">
+          <Icons.Chev size={11} style={{ transform: "rotate(180deg)" }}/>
+        </button>
+        <input className="input" type="date" value={day || ""} max={today}
+          onChange={e => setDay(e.target.value || null)}
+          style={{ width: 150, height: 28, padding: "0 8px", fontSize: 12 }}/>
+        <button className="btn btn-sm" style={navBtn} disabled={!day || day >= today} onClick={() => jumpDay(1)} title="วันถัดไป">
+          <Icons.Chev size={11}/>
+        </button>
+        {day && <button className="btn btn-sm" style={navBtn} onClick={() => setDay(null)}>ล่าสุด</button>}
+        <div className="spacer"/>
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>
+          {busy ? "กำลังโหลด…" : day ? `${thaiDayLabel(day)} · ${list.length} รายการ` : `${list.length} รายการล่าสุด`}
+        </span>
+        {typeof canOpenPage === "function" && canOpenPage("history") && (
+          <button className="btn btn-sm" style={navBtn} onClick={() => goTo && goTo("history")}>ดูทั้งหมด <Icons.Chev size={11}/></button>
+        )}
+      </div>
+
+      <div style={{ maxHeight: 340, overflowY: "auto", padding: "4px 12px 8px" }}>
+        {list.length === 0 && (
+          <div style={{ padding: "32px 18px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+            {busy ? "กำลังโหลด…"
+              : day ? `ไม่มีกิจกรรมใน${thaiDayLabel(day)}`
+              : "ยังไม่มีกิจกรรม — จะแสดงเมื่อเริ่มรับเข้า/ตัดสต็อก"}
           </div>
-        );
-      })}
+        )}
+        {groups.map(([dayKey, entries]) => (
+          <div key={dayKey}>
+            {/* The date header is what makes an old entry readable — without it
+                a 00:01 row from last week looks like it happened today. */}
+            <div className="row" style={{ gap: 8, alignItems: "center", padding: "10px 4px 6px", position: "sticky", top: 0, background: "var(--surface)", zIndex: 1 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "var(--fg-2)" }}>{thaiDayLabel(dayKey)}</span>
+              <span style={{ flex: 1, height: 1, background: "var(--border)" }}/>
+              <span style={{ fontSize: 10, color: "var(--muted)" }}>{entries.length} รายการ</span>
+            </div>
+            {entries.map((e, i) => (
+              <div key={e.id || (dayKey + i)} style={{ display: "grid", gridTemplateColumns: "48px 24px 1fr auto", gap: 10, alignItems: "center", padding: "9px 4px", borderBottom: i < entries.length - 1 ? "1px solid var(--border)" : "none" }}>
+                <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{bangkokTimeOf(e.ts)}</div>
+                <ActivityDot type={auditTone(e)}/>
+                <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={e.summary || e.entityId}>{e.summary || e.entityId}</div>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>{e.user?.name || "ระบบ"}</div>
+              </div>
+            ))}
+          </div>
+        ))}
+        {hasMore && (
+          <div style={{ textAlign: "center", padding: "10px 0 4px" }}>
+            <button className="btn btn-sm" onClick={showMore} disabled={busy}>{busy ? "กำลังโหลด…" : "โหลดเพิ่ม"}</button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
