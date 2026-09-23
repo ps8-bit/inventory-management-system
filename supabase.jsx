@@ -256,6 +256,28 @@ async function dbUpdateProducts(skus, changes) {
   }
   return { ok: true };
 }
+/* Rename a product's SKU (the primary key) — supabase/rename-sku-cascade.sql.
+   Server-side RPC only: bundle_items/stock_adjustments/product_locations follow
+   via ON UPDATE CASCADE, restricted to admin/manager (moves stock's own address,
+   not a display field). Error codes map onto the same shape the rest of this
+   file uses so the caller's toast logic doesn't need a special case. */
+async function dbRenameSku(oldSku, newSku) {
+  const from = String(oldSku || '').trim();
+  const to = String(newSku || '').trim();
+  if (!from || !to) return { error: 'INVALID' };
+  if (from === to) return { ok: true, sku: to };
+  const { data, error } = await sb.rpc('rename_product_sku', { p_old_sku: from, p_new_sku: to });
+  if (error) {
+    console.error('[DB] rename_product_sku:', error.message);
+    if (error.code === 'PGRST202' || error.code === 'PGRST203') return { error: 'RPC_MISSING' };
+    if (error.code === '42501') return { error: 'PERMISSION_OR_MISSING' };
+    if (error.code === '23505') return { error: 'DUPLICATE' };
+    if (error.code === 'P0002') return { error: 'NOT_FOUND' };
+    return { error: error.message };
+  }
+  return { ok: true, sku: (data && data.sku) || to };
+}
+
 /* Atomic signed stock adjustment (adjust-stock.sql) — the inbound/adjust twin of
    deduct_stock. One UPDATE per sku with qty = GREATEST(0, qty + delta), so two
    devices receiving/adjusting the same sku serialize on the row lock instead of
@@ -1235,7 +1257,7 @@ Object.assign(window, {
   sb, readProductNameFromImage, resolveWebImages, buildBackupSnapshot, downloadBackup,
   dbInit, setupRealtimeSync,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
-  dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,
+  dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,     dbRenameSku,
   dbInsertStockAdjustment, dbLoadStockAdjustments,
   dbLoadProductLocs,   dbSaveProductLocs,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,

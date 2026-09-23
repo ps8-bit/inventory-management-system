@@ -182,6 +182,48 @@ function updateProductInStore(sku, changes) {
   if ('qty' in changes) _syncProductRows([sku]);
   else _syncProductFields(sku, changes);
 }
+/* Rename a product's SKU (the primary key) — a rare, deliberate admin/manager
+   action to correct a wrong code, not a routine field edit. Goes through the
+   rename_product_sku RPC (supabase/rename-sku-cascade.sql): bundle_items,
+   stock_adjustments and product_locations follow via ON UPDATE CASCADE, so
+   this function only has to fix up the client-side state that ISN'T FK-linked —
+   the in-memory PRODUCTS row (mutated in place, same object) and the per-sku
+   product photo (app_state key "img:<sku>"). A sku that only exists as a
+   historical SNAPSHOT (orders.lineItems, past audit entries) is left alone on
+   purpose — those describe what happened under the old code, not live state. */
+async function renameProductSku(oldSku, newSku) {
+  const from = String(oldSku || "").trim();
+  const to = String(newSku || "").trim();
+  if (!from || !to || from === to) return { ok: false, error: "INVALID" };
+  if (PRODUCTS.some(p => p.sku === to)) {
+    try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: `รหัส ${to} มีอยู่แล้ว` })); } catch (e) {}
+    return { ok: false, error: "DUPLICATE" };
+  }
+  if (typeof dbRenameSku !== "function") return { ok: false, error: "OFFLINE" };
+
+  const res = await dbRenameSku(from, to);
+  if (!res || !res.ok) {
+    const err = res && res.error;
+    const msg = err === "DUPLICATE" ? `รหัส ${to} มีอยู่แล้ว`
+      : err === "PERMISSION_OR_MISSING" ? "ไม่มีสิทธิ์เปลี่ยนรหัส SKU (ต้องเป็นผู้ดูแลระบบหรือผู้จัดการ)"
+      : err === "NOT_FOUND" ? `ไม่พบสินค้า ${from}`
+      : err === "RPC_MISSING" ? "ยังไม่ได้ติดตั้งฟังก์ชันเปลี่ยน SKU บนเซิร์ฟเวอร์ (rename-sku-cascade.sql)"
+      : "เปลี่ยนรหัส SKU ไม่สำเร็จ";
+    try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: msg })); } catch (e) {}
+    return { ok: false, error: err || "UNKNOWN" };
+  }
+
+  const finalSku = res.sku || to;
+  const p = PRODUCTS.find(x => x.sku === from);
+  if (p) p.sku = finalSku;
+  // The photo is keyed by sku in app_state, not FK-linked — carry it across by hand.
+  if (typeof loadProductImages === "function" && typeof setProductImage === "function") {
+    const img = loadProductImages()[from];
+    if (img) { setProductImage(finalSku, img); setProductImage(from, null); }
+  }
+  _persistProductsLocal();   // also fires ims-products-change
+  return { ok: true, sku: finalSku };
+}
 // Apply a RELATIVE stock change (inbound receive, manual adjust) as an atomic
 // server-side delta. Callers pass the RAW delta — no absolute round-trip for the
 // client to reverse-engineer, so a pending display overlay (ims_stock_adj) or a
@@ -1596,16 +1638,17 @@ const CAPS = [
   { id: "adjustStock", label: "ปรับสต็อก",           desc: "แก้ยอดคงเหลือด้วยมือ (นับผิด เสียหาย ขายนอกระบบ)", server: ["admin", "manager", "staff"] },
   { id: "addProduct",  label: "เพิ่มสินค้าใหม่",     desc: "สร้าง SKU ใหม่ และนำเข้าจาก Excel", server: ["admin", "manager", "staff"] },
   { id: "editProduct", label: "แก้ไขข้อมูลสินค้า",   desc: "แก้ชื่อ ราคา หมวดหมู่ และตำแหน่งจัดเก็บ", server: ["admin", "manager", "staff"] },
+  { id: "renameSku",   label: "แก้ไขรหัส SKU",       desc: "เปลี่ยนรหัส SKU ของสินค้าเดิม (ย้ายสต็อก ตำแหน่ง และชุดสินค้าไปรหัสใหม่ทันที)", server: ["admin", "manager"] },
   { id: "deleteData",  label: "ลบข้อมูล",            desc: "ลบสินค้า ออร์เดอร์ และอาคาร/ชั้น/ตำแหน่ง", server: ["admin", "manager"] },
   { id: "exportData",  label: "ส่งออก/พิมพ์รายงาน",  desc: "ดาวน์โหลด CSV รายงาน Excel และพิมพ์รายงาน" }
 ];
 
 const DEFAULT_ROLE_CAPS = {
-  admin:   { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  deleteData: true,  exportData: true },
-  manager: { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  deleteData: true,  exportData: true },
+  admin:   { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: true,  deleteData: true,  exportData: true },
+  manager: { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: true,  deleteData: true,  exportData: true },
   // Warehouse staff work the floor: they move stock but never see money.
-  staff:   { viewCost: false, viewSales: false, sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  deleteData: false, exportData: true },
-  viewer:  { viewCost: true,  viewSales: true,  sell: false, adjustStock: false, addProduct: false, editProduct: false, deleteData: false, exportData: true }
+  staff:   { viewCost: false, viewSales: false, sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: false, deleteData: false, exportData: true },
+  viewer:  { viewCost: true,  viewSales: true,  sell: false, adjustStock: false, addProduct: false, editProduct: false, renameSku: false, deleteData: false, exportData: true }
 };
 
 const ROLE_PERMS_KEY = "ims_role_perms";
@@ -3014,7 +3057,7 @@ Object.assign(window, {
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, todayIso, bangkokDateOf, isoToThai,
   CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canOpenPage, canDo, capServerLocked, currentRoleId,
-  saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, importProductsBulk, removeProductsFromStore, resetProductStore,
+  saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, importProductsBulk, removeProductsFromStore, resetProductStore, renameProductSku,
   deductStockAndPersist, deductManyAndPersist,
   applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock,
   loadOrders, saveOrders, appendOrder,

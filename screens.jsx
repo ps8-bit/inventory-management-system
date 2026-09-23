@@ -3743,6 +3743,7 @@ function LocationSplitPanel({ product, pushToast }) {
 function ProductDrawer({ product, onClose, pushToast }) {
   const [editOpen, setEditOpen] = useState(false);
   const [adjOpen, setAdjOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const s = stockStatus(product);
   const avail = product.qty - product.reserved;
 
@@ -3807,7 +3808,16 @@ function ProductDrawer({ product, onClose, pushToast }) {
           <ProductImageUpload sku={product.sku} productName={product.name} pushToast={pushToast || (() => {})}/>
 
           <div className="grid-2" style={{ gap: 12, marginTop: 18 }}>
-            <Stat label="SKU" value={<span className="mono">{product.sku}</span>}/>
+            <Stat label="SKU" value={
+              <span className="row" style={{ gap: 6, alignItems: "center" }}>
+                <span className="mono">{product.sku}</span>
+                {canDo("renameSku") && (
+                  <button className="btn btn-ghost btn-icon" style={{ width: 22, height: 22 }} title="แก้ไขรหัส SKU" onClick={() => setRenameOpen(true)}>
+                    <Icons.Tag size={12}/>
+                  </button>
+                )}
+              </span>
+            }/>
             <Stat label="หมวดหมู่" value={product.cat}/>
             <Stat label="ตำแหน่ง" value={locIsStored(product.loc)
               ? <span>
@@ -3965,6 +3975,24 @@ function ProductDrawer({ product, onClose, pushToast }) {
           onApply={() => { setAdjOpen(false); onClose(); }}
         />
       )}
+      {renameOpen && typeof RenameSkuModal === "function" && (
+        <RenameSkuModal
+          sku={product.sku}
+          pushToast={pushToast}
+          onClose={() => setRenameOpen(false)}
+          onRenamed={(newSku) => {
+            if (typeof recordChange === "function") {
+              recordChange({
+                entity: "product", entityId: newSku, action: "update",
+                summary: `เปลี่ยนรหัส SKU ${product.sku} → ${newSku}`,
+                changes: [{ label: "sku", from: product.sku, to: newSku }]
+              });
+            }
+            setRenameOpen(false);
+            onClose();
+          }}
+        />
+      )}
     </>
   );
 }
@@ -4069,6 +4097,69 @@ function ProductEditModal({ product, onClose, onSave }) {
           <button className="btn" onClick={onClose}>ยกเลิก</button>
           <button className="btn btn-primary" disabled={!canSave} onClick={save} style={!canSave ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
             <Icons.Check size={14}/> บันทึก
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ── RenameSkuModal — correct a wrong SKU code on an existing product ──────
+   sku is the primary key, so renaming it is not a normal field edit: it goes
+   through the rename_product_sku RPC (supabase/rename-sku-cascade.sql), which
+   cascades to bundle_items/product_locations/stock_adjustments server-side and
+   is restricted to admin/manager (CAPS.renameSku). A useRef latch (not just a
+   state flag) blocks a second tap while the await is in flight — the same
+   double-submit hazard as every other stock-moving/PK write in this app.
+   Shared with the mobile fork — defined here because screens.jsx loads before
+   handheld.jsx (same as QtyStepper/CameraScanner). */
+function RenameSkuModal({ sku, onClose, onRenamed, pushToast }) {
+  const [value, setValue] = useState(sku);
+  const [busy, setBusy] = useState(false);
+  const lock = useRef(false);
+  const trimmed = value.trim();
+  const changed = trimmed !== sku;
+  const dup = changed && PRODUCTS.some(p => p.sku === trimmed);
+  const canSave = trimmed && changed && !dup;
+
+  const save = async () => {
+    if (!canSave || lock.current) return;
+    lock.current = true; setBusy(true);
+    const res = await renameProductSku(sku, trimmed);
+    lock.current = false; setBusy(false);
+    if (res && res.ok) {
+      pushToast(`เปลี่ยนรหัสเป็น ${res.sku} แล้ว`);
+      onRenamed(res.sku);
+    }
+    // A failure already toasted inside renameProductSku — stay open to retry/edit.
+  };
+
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 320 }}/>
+      <div className="modal" style={{ maxWidth: 420, zIndex: 321 }}>
+        <div className="modal-head">
+          <div>
+            <h3>เปลี่ยนรหัส SKU</h3>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>รหัสเดิม <span className="mono">{sku}</span></div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
+        </div>
+        <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div className="field">
+            <label>รหัส SKU ใหม่</label>
+            <input className="input mono" value={value} onChange={e => setValue(e.target.value)} autoFocus/>
+            {dup && <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>มีรหัสนี้ในคลังแล้ว</div>}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+            สต็อก ตำแหน่งจัดเก็บ ชุดสินค้า และประวัติการเคลื่อนไหวจะย้ายไปใช้รหัสใหม่ทันที
+            ส่วนออร์เดอร์เก่าที่บันทึกรหัสเดิมไว้แล้วจะยังแสดงรหัสเดิม
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn" onClick={onClose} disabled={busy}>ยกเลิก</button>
+          <button className="btn btn-primary" disabled={!canSave || busy} onClick={save} style={(!canSave || busy) ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+            <Icons.Check size={14}/> {busy ? "กำลังบันทึก…" : "บันทึก"}
           </button>
         </div>
       </div>

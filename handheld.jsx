@@ -1531,6 +1531,7 @@ function MBulkEdit({ count, categories, products, onClose, onApply }) {
 function MProductDetail({ ctx }) {
   const [stockKey, setStockKey] = useStateM(0);
   const [editOpen, setEditOpen] = useStateM(false);
+  const [renameOpen, setRenameOpen] = useStateM(false);
   useEffectM(() => {
     const refresh = () => setStockKey(k => k + 1);
     window.addEventListener("ims-products-change", refresh);
@@ -1605,6 +1606,7 @@ function MProductDetail({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub" style={{ fontSize: 14 }}>{p.sku}</div>
+        {canDo("renameSku") && <button className="m-action" title="แก้ไขรหัส SKU" onClick={() => setRenameOpen(true)}><Icons.Tag size={14}/></button>}
         {canDo("editProduct") && <button className="m-action" onClick={() => setEditOpen(true)}><Icons.Edit size={14}/></button>}
       </div>
       <div className="m-content">
@@ -1792,6 +1794,24 @@ function MProductDetail({ ctx }) {
       </div>
       {editOpen && (
         <MAddSku categories={cats} products={PRODUCTS} editing={base} onClose={() => setEditOpen(false)} onAdd={doEdit}/>
+      )}
+      {renameOpen && typeof RenameSkuModal === "function" && (
+        <RenameSkuModal
+          sku={p.sku}
+          pushToast={ctx.pushToast}
+          onClose={() => setRenameOpen(false)}
+          onRenamed={(newSku) => {
+            if (typeof recordChange === "function") {
+              recordChange({
+                entity: "product", entityId: newSku, action: "update",
+                summary: `เปลี่ยนรหัส SKU ${p.sku} → ${newSku} (มือถือ)`,
+                changes: [{ label: "sku", from: p.sku, to: newSku }]
+              });
+            }
+            setRenameOpen(false);
+            ctx.back();
+          }}
+        />
       )}
     </>
   );
