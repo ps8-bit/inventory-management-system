@@ -1227,6 +1227,16 @@ function Inbound({ goTo, pushToast }) {
   // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
   const setReceivedLoc = (idx, locV) =>
     setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
+  // Drop a line from this round's draft — a mis-scan, or a stale entry left over
+  // from a job that never got closed. Only touches the in-memory draft; nothing
+  // has been written to stock yet, so no confirm dialog beyond the click itself.
+  const removeReceived = (idx) => {
+    setReceived(prev => {
+      const r = prev[idx];
+      if (r && pushToast) pushToast(`ลบ ${r.sku} ออกจากรายการแล้ว`);
+      return prev.filter((_, i) => i !== idx);
+    });
+  };
 
   const submitScan = (override) => {
     const code = (override ?? scan).trim();
@@ -1494,7 +1504,19 @@ function Inbound({ goTo, pushToast }) {
                         noneLabel="— ยังไม่ระบุ —" style={{ padding: "6px 8px", fontSize: 12, width: "100%" }}/>}
                 </td>
                 <td className="t-num tnum"><span style={{ fontWeight: 500 }}>{r.qty}</span></td>
-                <td><button className="btn btn-ghost btn-icon" title={`แก้ไข ${r.sku}`} onClick={() => pushToast(`แก้ไข ${r.sku} — ใช้หน้า สินค้าคงคลัง เพื่อปรับจำนวน`)}><Icons.Edit size={14}/></button></td>
+                <td>
+                  <div className="row" style={{ gap: 2 }}>
+                    <button className="btn btn-ghost btn-icon" title={`แก้ไข ${r.sku}`} onClick={() => pushToast(`แก้ไข ${r.sku} — ใช้หน้า สินค้าคงคลัง เพื่อปรับจำนวน`)}><Icons.Edit size={14}/></button>
+                    {!closed && (
+                      <button className="btn btn-ghost btn-icon" title={`ลบ ${r.sku} ออกจากรายการ`} onClick={() => {
+                        if (!confirm(`ลบ ${r.sku} ออกจากรายการรับเข้ารอบนี้?`)) return;
+                        removeReceived(i);
+                      }}>
+                        <Icons.Trash size={14}/>
+                      </button>
+                    )}
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>

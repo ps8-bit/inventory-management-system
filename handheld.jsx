@@ -488,6 +488,15 @@ function MInbound({ ctx }) {
   // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
   const setReceivedLoc = (idx, locV) =>
     setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
+  // Drop a line from this round's draft — a mis-scan, or a stale entry left over
+  // from a job that never got closed. Only touches the in-memory draft.
+  const removeReceived = (idx) => {
+    setReceived(prev => {
+      const r = prev[idx];
+      if (r && ctx && ctx.pushToast) ctx.pushToast(`ลบ ${r.sku} ออกจากรายการแล้ว`);
+      return prev.filter((_, i) => i !== idx);
+    });
+  };
 
   const submit = (override) => {
     if (closed) return;
@@ -744,6 +753,16 @@ function MInbound({ ctx }) {
                       noneLabel="— จัดเก็บที่… —" style={{ marginTop: 4, height: 34, fontSize: 12, padding: "0 8px" }}/>}
               </div>
               <div className="tnum" style={{ fontWeight: 600, fontSize: 15 }}>×{r.qty}</div>
+              {!closed && (
+                <button
+                  className="m-action"
+                  style={{ width: 30, height: 30, flexShrink: 0, background: "var(--danger-soft)", color: "var(--danger)", marginLeft: 4 }}
+                  title={`ลบ ${r.sku} ออกจากรายการ`}
+                  onClick={() => { if (!confirm(`ลบ ${r.sku} ออกจากรายการรับเข้ารอบนี้?`)) return; removeReceived(i); }}
+                >
+                  <Icons.Trash size={13}/>
+                </button>
+              )}
             </div>
           ))}
           {received.length === 0 && <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>สแกนบาร์โค้ดหรือพิมพ์ SKU เพื่อเริ่มนับ</div>}
