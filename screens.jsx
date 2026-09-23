@@ -1227,6 +1227,13 @@ function Inbound({ goTo, pushToast }) {
   // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
   const setReceivedLoc = (idx, locV) =>
     setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
+  // Manual qty correction for an already-scanned line (e.g. one scan actually
+  // covered a multi-pack, or a rescan-to-bump would be slower than just typing
+  // the count). Keyed by sku, not index — `received` reorders on every new scan
+  // (most-recent first), so an index captured at render time can't be trusted
+  // across a state update the way the sku can.
+  const setReceivedQty = (sku, n) =>
+    setReceived(prev => prev.map(r => (r.sku === sku ? { ...r, qty: n } : r)));
   // Drop a line from this round's draft — a mis-scan, or a stale entry left over
   // from a job that never got closed. Only touches the in-memory draft; nothing
   // has been written to stock yet, so no confirm dialog beyond the click itself.
@@ -1503,7 +1510,21 @@ function Inbound({ goTo, pushToast }) {
                     : <LocationSelect value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
                         noneLabel="— ยังไม่ระบุ —" style={{ padding: "6px 8px", fontSize: 12, width: "100%" }}/>}
                 </td>
-                <td className="t-num tnum"><span style={{ fontWeight: 500 }}>{r.qty}</span></td>
+                <td className="t-num tnum">
+                  {closed
+                    ? <span style={{ fontWeight: 500 }}>{r.qty}</span>
+                    : <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                        <QtyStepper small min={1}
+                          value={qtyEdit && qtyEdit.sku === r.sku ? qtyEdit.val : String(r.qty)}
+                          onChange={v => {
+                            setQtyEdit({ sku: r.sku, val: v });
+                            const n = parseInt(v, 10);
+                            if (Number.isFinite(n) && n >= 1) setReceivedQty(r.sku, n);
+                          }}
+                          onBlur={() => setQtyEdit(null)}
+                          title={`จำนวน ${r.sku}`}/>
+                      </div>}
+                </td>
                 <td>
                   <div className="row" style={{ gap: 2 }}>
                     <button className="btn btn-ghost btn-icon" title={`แก้ไข ${r.sku}`} onClick={() => pushToast(`แก้ไข ${r.sku} — ใช้หน้า สินค้าคงคลัง เพื่อปรับจำนวน`)}><Icons.Edit size={14}/></button>
@@ -4064,7 +4085,7 @@ function ProductEditModal({ product, onClose, onSave }) {
    `value` stays a STRING so the field can be emptied while typing; callers
    already treat it that way (r.amount). Shared with the mobile fork — defined
    here because screens.jsx loads before handheld.jsx (same as CameraScanner). */
-function QtyStepper({ value, onChange, min = 0, max, small, title }) {
+function QtyStepper({ value, onChange, onBlur, min = 0, max, small, title }) {
   const raw = String(value == null ? "" : value);
   const parsed = parseInt(raw, 10);
   const base = Number.isFinite(parsed) ? parsed : 0;
@@ -4084,6 +4105,7 @@ function QtyStepper({ value, onChange, min = 0, max, small, title }) {
         type="text" inputMode="numeric" pattern="[0-9]*" value={raw} placeholder="0"
         onChange={e => onChange(e.target.value.replace(/[^\d]/g, ""))}
         onFocus={e => e.target.select()}
+        onBlur={onBlur}
         aria-label={title || "จำนวน"}/>
       <button type="button" tabIndex={-1} disabled={atMax} onClick={() => bump(1)} aria-label="เพิ่มจำนวน">+</button>
     </div>

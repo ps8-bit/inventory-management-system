@@ -463,6 +463,7 @@ function MInbound({ ctx }) {
   const [similar, setSimilar] = useStateM(null); // null | { code, candidates } — near-duplicate prompt
   const [closed, setClosed] = useStateM(false);
   const [grQueue, setGRQueue] = useStateM(() => typeof loadGRQueue === "function" ? loadGRQueue() : []);
+  const [qtyEdit, setQtyEdit] = useStateM(null); // null | { sku, val } — raw text while a count is being typed
   const inputRef = useRefM(null);
   // Persist the receiving draft on every change; clear it once the job is committed.
   useEffectM(() => { if (typeof saveInboundDraft === "function") saveInboundDraft(closed ? [] : received); }, [received, closed]);
@@ -488,6 +489,10 @@ function MInbound({ ctx }) {
   // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
   const setReceivedLoc = (idx, locV) =>
     setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
+  // Manual qty correction for an already-scanned line — keyed by sku, not index,
+  // since `received` reorders on every new scan (most-recent first).
+  const setReceivedQty = (sku, n) =>
+    setReceived(prev => prev.map(r => (r.sku === sku ? { ...r, qty: n } : r)));
   // Drop a line from this round's draft — a mis-scan, or a stale entry left over
   // from a job that never got closed. Only touches the in-memory draft.
   const removeReceived = (idx) => {
@@ -752,7 +757,17 @@ function MInbound({ ctx }) {
                   : <LocationSelect mobile value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
                       noneLabel="— จัดเก็บที่… —" style={{ marginTop: 4, height: 34, fontSize: 12, padding: "0 8px" }}/>}
               </div>
-              <div className="tnum" style={{ fontWeight: 600, fontSize: 15 }}>×{r.qty}</div>
+              {closed
+                ? <div className="tnum" style={{ fontWeight: 600, fontSize: 15 }}>×{r.qty}</div>
+                : <QtyStepper small min={1}
+                    value={qtyEdit && qtyEdit.sku === r.sku ? qtyEdit.val : String(r.qty)}
+                    onChange={v => {
+                      setQtyEdit({ sku: r.sku, val: v });
+                      const n = parseInt(v, 10);
+                      if (Number.isFinite(n) && n >= 1) setReceivedQty(r.sku, n);
+                    }}
+                    onBlur={() => setQtyEdit(null)}
+                    title={`จำนวน ${r.sku}`}/>}
               {!closed && (
                 <button
                   className="m-action"
