@@ -1519,6 +1519,7 @@ const CHANNEL_LIST = [
   { id: "tiktok", name: "TikTok Shop",   color: "oklch(0.35 0.04 220)", short: "TT" },
   { id: "line",   name: "LINE Shopping", color: "oklch(0.6 0.18 145)", short: "LN" },
   { id: "web",    name: "เว็บไซต์",      color: "oklch(0.55 0.13 235)", short: "WB" },
+  { id: "facebook", name: "Facebook",    color: "oklch(0.52 0.19 260)", short: "FB" },
   { id: "other",  name: "ออฟไลน์ / อื่นๆ", color: "oklch(0.55 0.01 80)", short: "OT" }
 ];
 
@@ -1541,6 +1542,7 @@ const CHANNELS = [
   { id: "tiktok", name: "TikTok Shop",     today: 0, pct: 0 },
   { id: "web",    name: "เว็บไซต์",        today: 0, pct: 0 },
   { id: "line",   name: "LINE Shopping",   today: 0, pct: 0 },
+  { id: "facebook", name: "Facebook",      today: 0, pct: 0 },
   { id: "other",  name: "ออฟไลน์ / อื่นๆ", today: 0, pct: 0 }
 ];
 
@@ -2056,6 +2058,96 @@ function buildIssuePlan(lines) {
     skuDeducts, locPicks, lineItems, channelSplit, channelLabel,
     totalQty, lineCount, hasBundle: bundleNames.length > 0, bundleNames
   };
+}
+
+/* ตัดสต็อก opens on the channel this device last used — most manual cuts in a
+   row come from the same place (e.g. a run of Facebook chat sales). Per device
+   on purpose: two staff on two channels shouldn't fight over one shared value. */
+const ISSUE_CH_KEY = "ims_issue_last_ch";
+function lastIssueChannel() {
+  let v = "";
+  try { v = localStorage.getItem(ISSUE_CH_KEY) || ""; } catch (e) {}
+  return CHANNEL_LIST.some(c => c.id === v) ? v : "shopee";
+}
+function rememberIssueChannel(ch) {
+  if (!CHANNEL_LIST.some(c => c.id === ch)) return;
+  try { localStorage.setItem(ISSUE_CH_KEY, ch); } catch (e) {}
+}
+
+/* Optional shipping details typed at ตัดสต็อก time. A tracking number means the
+   parcel is already handed to the courier, so the order starts as "shipped"
+   instead of entering the pack queue. */
+const ISSUE_CARRIERS = ["KEX", "Flash Express", "J&T Express", "ไปรษณีย์ไทย", "Ninja Van", "DHL", "Best Express", "SCG Express", "Alpha Fast", "Lalamove"];
+function issueShipFields(ship) {
+  const s = ship || {};
+  const tracking = String(s.tracking || "").trim();
+  const carrier = String(s.carrier || "").trim();
+  const phone = String(s.phone || "").trim();
+  return { tracking, carrier, phone, status: tracking ? "shipped" : "picking" };
+}
+
+/* ── ยกเลิกออร์เดอร์ + คืนสต็อก ──
+   The reverse of a ตัดสต็อก: every piece goes back to the SHELF the sale took
+   it from (packLinesForOrder prefers lineItems[].loc — the same resolver the
+   packer uses), through the receive choke point so the movement ledger records
+   what the server really added. Then the order is removed exactly like the
+   existing delete, so analytics stop counting the sale.
+   Only admin/manager may delete orders (RLS), so the delete runs FIRST and a
+   blocked delete aborts before any stock moves — otherwise staff could put
+   stock back while the sale stayed on the books. An override `restockedAt`
+   stamp plus the commit latch make a second tap / second device a no-op.
+   Returns { ok, restocked:[ids], skipped:[ids], blocked?, pieces }. */
+async function cancelOrdersAndRestock(orders, reasonNote) {
+  const list = (Array.isArray(orders) ? orders : []).filter(Boolean);
+  const out = { ok: true, restocked: [], skipped: [], pieces: 0 };
+  if (!list.length) return out;
+  const overrides = (typeof loadOrderOverrides === "function") ? loadOrderOverrides() : {};
+  // An order with no resolvable lines (custom sku-less items only) is left alone:
+  // deleting it would drop the sale without anything to put back.
+  const lines = [];
+  const todo = [];
+  list.forEach(o => {
+    if (overrides[o.id] && overrides[o.id].restockedAt) { out.skipped.push(o.id); return; }
+    const got = packLinesForOrder(o);
+    if (!got.length) { out.skipped.push(o.id); return; }
+    got.forEach(l => lines.push({ sku: l.sku, qty: l.qty, loc: l.loc }));
+    todo.push(o);
+  });
+  if (!todo.length) return out;
+
+  const ids = todo.map(o => o.id);
+  const key = commitFingerprint("cancel-restock", ids.map(id => ({ id, qty: 1 })));
+  if (!claimCommit(key)) { duplicateCommitToast(); return { ...out, ok: false }; }
+
+  if (typeof deleteOrdersFromDb === "function") {
+    const res = await deleteOrdersFromDb(ids);
+    if (res && res.blocked) { releaseCommit(key); return { ...out, ok: false, blocked: true }; }
+  }
+  out.restocked = ids.slice();
+  out.pieces = lines.reduce((s, l) => s + l.qty, 0);
+
+  const at = new Date().toISOString();
+  if (typeof setOrderField === "function") {
+    ids.forEach(id => setOrderField(id, { deleted: true, restockedAt: at }));
+  }
+  if (lines.length) {
+    const note = String(reasonNote || "").trim();
+    const reason = `ยกเลิกออร์เดอร์ ${out.restocked.join(", ")} — คืนสต็อก${note ? " · " + note : ""}`;
+    // Same tick: applyReceiveLocs must see the new p.qty (the _planLocRows contract).
+    receiveStockAndRecord(lines, reason);
+    const r = await applyReceiveLocs(lines);
+    if (r && r.errors && r.errors.length) out.locError = r.errors[0].error;
+  }
+  if (typeof recordChange === "function") {
+    recordChange({
+      entity: "order", action: "cancel-restock",
+      summary: `ยกเลิก ${ids.length} ออร์เดอร์ และคืนสต็อก ${out.pieces} ชิ้น`,
+      count: ids.length,
+      changes: lines.map(l => ({ label: l.sku, to: `+${l.qty} ชิ้น${l.loc ? " → " + l.loc : ""}` })),
+      note: `ออร์เดอร์: ${ids.join(", ")}`
+    });
+  }
+  return out;
 }
 
 /* ── แพ็คสินค้า — pick & pack work lists ────────────────────────────────
@@ -3048,6 +3140,7 @@ Object.assign(window, {
   skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem, buildIssuePlan,
+  lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, ISSUE_CARRIERS,
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, receiveStockAndRecord,

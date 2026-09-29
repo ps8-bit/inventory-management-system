@@ -108,7 +108,7 @@ function appendLabel(label) {
   });
 }
 
-function createSaleLabel({ orderId, name, phone, addr1, addr2, tambon, amphoe, province, postal, carrier, cod, items, created_at }) {
+function createSaleLabel({ orderId, name, phone, addr1, addr2, tambon, amphoe, province, postal, carrier, tracking, cod, items, created_at }) {
   const existing = (typeof loadLabels === "function") ? loadLabels() : [];
   const base = (typeof makeBlankLabel === "function")
     ? makeBlankLabel(existing)
@@ -119,6 +119,8 @@ function createSaleLabel({ orderId, name, phone, addr1, addr2, tambon, amphoe, p
     created_at: created_at || new Date().toISOString(),
     recipient: { name: name || "", phone: phone || "", addr1: addr1 || "", addr2: addr2 || "", tambon: tambon || "", amphoe: amphoe || "", province: province || "", postal: postal || "" },
     carrier: carrier || "",
+    // labelToOrder derives status from this — a tracking number = ส่งแล้ว.
+    ...(tracking ? { tracking: String(tracking) } : {}),
     cod: (typeof cod === "number" && cod > 0) ? cod : 0,
     items: (items || []).map(it => ({ sku: it.sku, name: it.name, qty: it.qty })),
   };

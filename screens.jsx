@@ -1784,6 +1784,30 @@ function Outbound({ goTo, pushToast, focus }) {
       }
     });
   };
+  // Cancel = delete + put every piece back on the shelf the sale took it from.
+  const bulkCancelRestock = () => {
+    const sel = orders.filter(o => picked[o.id]);
+    const pieces = sel.reduce((s, o) => s + ((typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []).reduce((n, l) => n + l.qty, 0), 0);
+    setObBulkConfirm({
+      title: "ยกเลิกออร์เดอร์ + คืนสต็อก",
+      description: `ยกเลิก ${pickedCount} ออร์เดอร์ และคืนสินค้า ${pieces} ชิ้นกลับเข้าตำแหน่งเดิม`,
+      count: pickedCount,
+      changes: [{ label: "คืนสต็อก", to: `+${pieces} ชิ้น` }],
+      action: "ยกเลิก + คืนสต็อก",
+      danger: true,
+      onConfirm: async () => {
+        const r = await cancelOrdersAndRestock(sel);
+        setObBulkConfirm(null);
+        if (r.blocked) { pushToast("ยกเลิกไม่ได้ — ต้องมีสิทธิ์ลบข้อมูล"); return; }
+        if (!r.ok) return;
+        let msg = `ยกเลิก ${r.restocked.length} ออร์เดอร์ — คืนสต็อก ${r.pieces} ชิ้น`;
+        if (r.skipped.length) msg += ` · ข้าม ${r.skipped.length} (ไม่มีรายการสินค้า/คืนไปแล้ว)`;
+        if (r.locError) msg += " · ปรับตำแหน่งไม่สำเร็จ: " + r.locError;
+        pushToast(msg);
+        clearPicked();
+      }
+    });
+  };
   const bulkDeleteOrders = () => {
     setObBulkConfirm({
       title: "ยืนยันการลบออร์เดอร์",
@@ -1848,7 +1872,7 @@ function Outbound({ goTo, pushToast, focus }) {
           </div>
           {canOpenPage("analytics") && <button className="btn btn-ghost btn-sm" onClick={() => goTo && goTo("analytics")}>ดูรายงาน <Icons.Chev size={14}/></button>}
         </div>
-        <div style={{ padding: "12px 18px 18px", display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12 }}>
+        <div style={{ padding: "12px 18px 18px", display: "grid", gridTemplateColumns: `repeat(${CHANNELS.length}, 1fr)`, gap: 12 }}>
           {CHANNELS.map(c => {
             const meta = CHANNEL_LIST.find(x => x.id === c.id) || {};
             return (
@@ -2010,6 +2034,7 @@ function Outbound({ goTo, pushToast, focus }) {
               </body></html>`);
               w.document.close();
             }}/>
+            {canDeleteData() && <BulkBtn icon={<Icons.Refresh size={13}/>} label="ยกเลิก + คืนสต็อก" onClick={bulkCancelRestock}/>}
             {canDeleteData() && <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDeleteOrders} danger/>}
             {obBulkMenu === "status" && (
               <div ref={obBulkMenuRef} style={{
@@ -2293,14 +2318,18 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
     price: b.price, items: b.items, qty: 1, ch
   });
 
+  const [startCh] = useState(() => (typeof lastIssueChannel === "function") ? lastIssueChannel() : ISSUE_DEFAULT_CH);
   const [cart, setCart] = useState(() =>
     (Array.isArray(presetSkus) ? presetSkus : [])
       .map(s => PRODUCTS.find(p => p.sku === s))
       .filter(Boolean)
-      .map(p => productLine(p, ISSUE_DEFAULT_CH))
+      .map(p => productLine(p, startCh))
   );
-  const [defCh, setDefCh] = useState(ISSUE_DEFAULT_CH);
+  const [defCh, setDefChRaw] = useState(startCh);
+  const setDefCh = (ch) => { setDefChRaw(ch); if (typeof rememberIssueChannel === "function") rememberIssueChannel(ch); };
   const [customer, setCustomer] = useState("");
+  const [ship, setShip] = useState({ phone: "", carrier: "", tracking: "" });
+  const [camOpen, setCamOpen] = useState(false);
   const [tab, setTab] = useState("product");   // picker tab: product | bundle
   const [q, setQ] = useState("");
   const [showN, setShowN] = useState(30);
@@ -2396,7 +2425,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
   const submit = async () => {
     if (!canSubmit) return;
     setBusy(true);
-    try { await onSubmit({ customer, lines: cart }); }
+    try { await onSubmit({ customer, ship, lines: cart }); }
     finally { setBusy(false); }
   };
 
@@ -2422,6 +2451,16 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
             <input ref={scanRef} className="input" value={scan} onChange={e => setScan(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") submitScan(); }}
               placeholder="ยิงบาร์โค้ดหรือพิมพ์ SKU แล้วกด Enter" autoFocus/>
+            {!camOpen && (
+              <button className="btn btn-sm" style={{ marginTop: 6 }} onClick={() => setCamOpen(true)}>
+                <Icons.Camera size={13}/> สแกนด้วยกล้อง
+              </button>
+            )}
+            {camOpen && typeof CameraScanner === "function" && (
+              <div style={{ marginTop: 8 }}>
+                <CameraScanner continuous onScan={code => submitScan(code)} onClose={() => setCamOpen(false)}/>
+              </div>
+            )}
           </div>
 
           {/* Default channel — new lines inherit it, so a 10-line Shopee batch is one click */}
@@ -2605,6 +2644,26 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
             <input className="input" placeholder="เช่น คุณ ปวีณา ท. / Shopee #2025-119283" value={customer} onChange={e => setCustomer(e.target.value)}/>
           </div>
 
+          {/* Optional shipping details — a tracking number marks the order ส่งแล้ว
+              straight away and shows it on the customer tracking page. */}
+          <div className="row" style={{ gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div className="field" style={{ flex: "1 1 140px", margin: 0 }}>
+              <label>เบอร์โทร <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span></label>
+              <input className="input" inputMode="tel" value={ship.phone} onChange={e => setShip(s => ({ ...s, phone: e.target.value }))} placeholder="08x-xxx-xxxx"/>
+            </div>
+            <div className="field" style={{ flex: "1 1 130px", margin: 0 }}>
+              <label>ขนส่ง</label>
+              <select className="input" value={ship.carrier} onChange={e => setShip(s => ({ ...s, carrier: e.target.value }))}>
+                <option value="">— ไม่ระบุ —</option>
+                {(typeof ISSUE_CARRIERS !== "undefined" ? ISSUE_CARRIERS : []).map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="field" style={{ flex: "2 1 180px", margin: 0 }}>
+              <label>เลขพัสดุ <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ใส่แล้ว = ส่งแล้ว)</span></label>
+              <input className="input mono" value={ship.tracking} onChange={e => setShip(s => ({ ...s, tracking: e.target.value }))} placeholder="เช่น TH0123456789"/>
+            </div>
+          </div>
+
           {shortages.length > 0 && (
             <div style={{ padding: "10px 12px", background: "var(--danger-soft)", color: "var(--danger)", borderRadius: 10, fontSize: 12, marginBottom: 12 }}>
               <div style={{ fontWeight: 600, marginBottom: 4 }}>สต็อกไม่พอ</div>
@@ -2683,9 +2742,13 @@ async function commitIssueOrder(data, pushToast) {
     });
   }
 
+  const sf = (typeof issueShipFields === "function")
+    ? issueShipFields(data.ship)
+    : { tracking: "", carrier: "", phone: "", status: "picking" };
   const res = await appendOrder({
     id, channel: plan.channelLabel, customer: data.customer || "ลูกค้าใหม่",
-    items: plan.lineCount, status: "picking", carrier: "", tracking: "",
+    items: plan.lineCount, status: sf.status, carrier: sf.carrier, tracking: sf.tracking,
+    ...(sf.phone ? { phone: sf.phone } : {}),
     ts, dateIso, deductions: plan.channelSplit,
     isBundle: plan.hasBundle,
     bundleName: plan.hasBundle ? plan.bundleNames.join(", ") : undefined,

@@ -863,6 +863,20 @@ function MOutbound({ ctx }) {
     ctx.pushToast(`อัปเดต ${selectedCount} ออร์เดอร์`);
     clear();
   };
+  // Cancel = delete + put every piece back on the shelf the sale took it from.
+  const bulkCancelRestock = async () => {
+    const sel = orders.filter(o => selected[o.id]);
+    const pieces = sel.reduce((s, o) => s + ((typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []).reduce((n, l) => n + l.qty, 0), 0);
+    if (!confirm(`ยกเลิก ${selectedCount} ออร์เดอร์ และคืนสต็อก ${pieces} ชิ้นกลับเข้าตำแหน่งเดิม?`)) return;
+    const r = await cancelOrdersAndRestock(sel);
+    if (r.blocked) { ctx.pushToast("ยกเลิกไม่ได้ — ต้องมีสิทธิ์ลบข้อมูล"); return; }
+    if (!r.ok) return;
+    let msg = `ยกเลิก ${r.restocked.length} ออร์เดอร์ — คืน ${r.pieces} ชิ้น`;
+    if (r.skipped.length) msg += ` · ข้าม ${r.skipped.length}`;
+    if (r.locError) msg += " · ปรับตำแหน่งไม่สำเร็จ";
+    ctx.pushToast(msg);
+    clear();
+  };
   const bulkDelete = async () => {
     if (!confirm(`ลบ ${selectedCount} ออร์เดอร์ที่เลือก?`)) return;
     let res = null;
@@ -1012,6 +1026,7 @@ function MOutbound({ ctx }) {
           <span style={{ fontSize: 12, flex: 1 }}>เลือก {selectedCount} ออร์เดอร์</span>
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkMenu(bulkMenu === "status" ? null : "status")}><Icons.Truck size={14}/></button>
           <button className="m-action" style={{ background: "rgba(90,180,255,0.3)", color: "white", width: 36, height: 36 }} title="ฉลากของออร์เดอร์ที่เลือก" onClick={openSelectedLabels}><Icons.Tag size={14}/></button>
+          {canDeleteData() && <button className="m-action" style={{ background: "rgba(255,170,60,0.35)", color: "white", width: 36, height: 36 }} title="ยกเลิก + คืนสต็อก" onClick={bulkCancelRestock}><Icons.Refresh size={14}/></button>}
           {canDeleteData() && <button className="m-action" style={{ background: "rgba(255,90,90,0.3)", color: "white", width: 36, height: 36 }} onClick={bulkDelete}><Icons.Trash size={14}/></button>}
           {bulkMenu === "status" && (
             <div style={{
@@ -2167,16 +2182,20 @@ function MIssue({ ctx }) {
     price: b.price, items: b.items, qty: 1, ch
   });
 
+  const [startCh] = useStateM(() => (typeof lastIssueChannel === "function") ? lastIssueChannel() : M_ISSUE_DEFAULT_CH);
   const [cart, setCart] = useStateM(() => {
     const wantSku = ctx.route.params?.sku;
     const wantBundle = ctx.route.params?.bundleId;
     const b = wantBundle && bundles.find(x => x.id === wantBundle);
-    if (b) return [bundleLine(b, M_ISSUE_DEFAULT_CH)];
+    if (b) return [bundleLine(b, startCh)];
     const p = wantSku && PRODUCTS.find(x => x.sku === wantSku);
-    return p ? [productLine(p, M_ISSUE_DEFAULT_CH)] : [];
+    return p ? [productLine(p, startCh)] : [];
   });
-  const [defCh, setDefCh] = useStateM(M_ISSUE_DEFAULT_CH);
+  const [defCh, setDefChRaw] = useStateM(startCh);
+  const setDefCh = (ch) => { setDefChRaw(ch); if (typeof rememberIssueChannel === "function") rememberIssueChannel(ch); };
   const [customer, setCustomer] = useStateM("");
+  const [ship, setShip] = useStateM({ phone: "", carrier: "", tracking: "" });
+  const [shipOpen, setShipOpen] = useStateM(false);
   const [pickOpen, setPickOpen] = useStateM(false);
   const [tab, setTab] = useStateM("product");   // picker tab: product | bundle
   const [q, setQ] = useStateM("");
@@ -2274,6 +2293,9 @@ function MIssue({ ctx }) {
     // can name the order it belongs to (same order as desktop commitIssueOrder).
     const id = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
     const pieces = plan.skuDeducts.reduce((s, d) => s + d.qty, 0);
+    const sf = (typeof issueShipFields === "function")
+      ? issueShipFields(ship)
+      : { tracking: "", carrier: "", phone: "", status: "picking" };
 
     deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก (มือถือ) · ออร์เดอร์ ${id} (${plan.channelLabel})`);
     // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
@@ -2286,7 +2308,7 @@ function MIssue({ ctx }) {
     // for ติดตามพัสดุ / จัดส่ง). No customer address here, so recipient is name-only.
     if (typeof createSaleLabel === "function") {
       try {
-        createSaleLabel({ orderId: id, name: customer || "ลูกค้าใหม่", items: plan.lineItems });
+        createSaleLabel({ orderId: id, name: customer || "ลูกค้าใหม่", items: plan.lineItems, phone: sf.phone, carrier: sf.carrier, tracking: sf.tracking });
       } catch (e) {}
     }
 
@@ -2297,9 +2319,10 @@ function MIssue({ ctx }) {
       channel: plan.channelLabel,
       customer: customer || "ลูกค้าใหม่",
       items: plan.lineCount,
-      status: "picking",
-      carrier: "",
-      tracking: "",
+      status: sf.status,
+      carrier: sf.carrier,
+      tracking: sf.tracking,
+      ...(sf.phone ? { phone: sf.phone } : {}),
       ts: new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }),
       dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
       deductions: plan.channelSplit,
@@ -2432,6 +2455,25 @@ function MIssue({ ctx }) {
 
         <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>ลูกค้า / อ้างอิง (ไม่จำเป็น)</div>
         <input className="m-input" placeholder="เช่น คุณ ปวีณา / Shopee #2025-119283" value={customer} onChange={e => setCustomer(e.target.value)} style={{ marginBottom: 8 }}/>
+
+        {/* Optional shipping details — collapsed so a quick cut stays one screen. */}
+        {!shipOpen && !ship.tracking ? (
+          <button onClick={() => setShipOpen(true)}
+            style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 12, cursor: "pointer", padding: "0 4px 10px", fontFamily: "inherit" }}>
+            + เบอร์โทร / ขนส่ง / เลขพัสดุ
+          </button>
+        ) : (
+          <div className="m-card" style={{ marginBottom: 8 }}>
+            <input className="m-input" inputMode="tel" placeholder="เบอร์โทร (ไม่จำเป็น)" value={ship.phone}
+              onChange={e => setShip(s => ({ ...s, phone: e.target.value }))} style={{ marginBottom: 8 }}/>
+            <select className="m-input" value={ship.carrier} onChange={e => setShip(s => ({ ...s, carrier: e.target.value }))} style={{ marginBottom: 8 }}>
+              <option value="">ขนส่ง — ไม่ระบุ</option>
+              {(typeof ISSUE_CARRIERS !== "undefined" ? ISSUE_CARRIERS : []).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <input className="m-input mono" placeholder="เลขพัสดุ (ใส่แล้ว = ส่งแล้ว)" value={ship.tracking}
+              onChange={e => setShip(s => ({ ...s, tracking: e.target.value }))} style={{ marginBottom: 0 }}/>
+          </div>
+        )}
 
         {shortages.length > 0 && (
           <div className="m-card" style={{ background: "var(--danger-soft)", color: "var(--danger)", fontSize: 12 }}>
