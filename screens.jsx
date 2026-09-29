@@ -2330,6 +2330,8 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
   const [customer, setCustomer] = useState("");
   const [ship, setShip] = useState({ phone: "", carrier: "", tracking: "" });
   const [camOpen, setCamOpen] = useState(false);
+  const todayStr = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+  const [orderDate, setOrderDate] = useState(todayStr);
   const [tab, setTab] = useState("product");   // picker tab: product | bundle
   const [q, setQ] = useState("");
   const [showN, setShowN] = useState(30);
@@ -2425,7 +2427,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
   const submit = async () => {
     if (!canSubmit) return;
     setBusy(true);
-    try { await onSubmit({ customer, ship, lines: cart }); }
+    try { await onSubmit({ customer, ship, orderDate, lines: cart }); }
     finally { setBusy(false); }
   };
 
@@ -2639,6 +2641,21 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
             </div>
           )}
 
+          {/* Sale date — backdating files a late-keyed order under the day it sold. */}
+          <div className="field" style={{ marginBottom: 14 }}>
+            <label>วันที่ขาย</label>
+            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <input type="date" className="input" style={{ width: 170 }} value={orderDate} max={todayStr}
+                onChange={e => setOrderDate(e.target.value || todayStr)}/>
+              {orderDate !== todayStr
+                ? <>
+                    <span className="badge badge-warning" style={{ fontSize: 11 }}>ออร์เดอร์ย้อนหลัง · {typeof isoToThai === "function" ? isoToThai(orderDate) : orderDate}</span>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setOrderDate(todayStr)}>กลับเป็นวันนี้</button>
+                  </>
+                : <span style={{ fontSize: 12, color: "var(--muted)" }}>วันนี้</span>}
+            </div>
+          </div>
+
           <div className="field" style={{ marginBottom: 14 }}>
             <label>ลูกค้า / เลขที่อ้างอิง <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span></label>
             <input className="input" placeholder="เช่น คุณ ปวีณา ท. / Shopee #2025-119283" value={customer} onChange={e => setCustomer(e.target.value)}/>
@@ -2716,12 +2733,16 @@ async function commitIssueOrder(data, pushToast) {
   if (!plan || !plan.skuDeducts.length) { toast("ยังไม่ได้เลือกสินค้า"); return null; }
 
   const id = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
-  const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
-  const dateIso = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+  const od = (typeof issueOrderDate === "function")
+    ? issueOrderDate(data.orderDate)
+    : { dateIso: new Date().toISOString().slice(0, 10), ts: "", backdated: false };
+  const ts = od.ts;
+  const dateIso = od.dateIso;
+  const dateNote = od.backdated ? ` · ขายวันที่ ${typeof isoToThai === "function" ? isoToThai(dateIso) : dateIso}` : "";
 
   const pieces = plan.skuDeducts.reduce((s, d) => s + d.qty, 0);
 
-  deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก · ออร์เดอร์ ${id} (${plan.channelLabel})`);
+  deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก · ออร์เดอร์ ${id} (${plan.channelLabel})${dateNote}`);
   // Same tick as the qty write, before any other await — applyLocPicks re-reads p.qty.
   if (typeof applyLocPicks === "function") {
     const r = await applyLocPicks(plan.locPicks);
@@ -2738,11 +2759,11 @@ async function commitIssueOrder(data, pushToast) {
         label: l.type === "bundle" ? `ชุด: ${l.name}` : l.name,
         to: `−${l.qty} ${l.type === "bundle" ? "ชุด" : "ชิ้น"}`
       })),
-      note: `ออร์เดอร์ ${id} · ${plan.channelLabel}`
+      note: `ออร์เดอร์ ${id} · ${plan.channelLabel}${dateNote}`
     });
   }
 
-  const sf = (typeof issueShipFields === "function")
+  const sf =(typeof issueShipFields === "function")
     ? issueShipFields(data.ship)
     : { tracking: "", carrier: "", phone: "", status: "picking" };
   const res = await appendOrder({

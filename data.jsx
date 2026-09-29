@@ -2077,6 +2077,22 @@ function rememberIssueChannel(ch) {
 /* Optional shipping details typed at ตัดสต็อก time. A tracking number means the
    parcel is already handed to the courier, so the order starts as "shipped"
    instead of entering the pack queue. */
+/* Order date for ตัดสต็อก — staff often key in yesterday's sales, and the order
+   must be filed under the day it was SOLD, not the day it was typed. A future
+   date is refused (clamped to today). Returns { dateIso, ts, createdAt, backdated }:
+   a backdated order gets no clock time (unknown) and a label timestamp of noon
+   Bangkok so bangkokDateOf() lands on the chosen day. */
+function issueOrderDate(picked) {
+  const today = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(String(picked || "")) ? String(picked) : today;
+  const dateIso = d > today ? today : d;
+  const backdated = dateIso !== today;
+  return {
+    dateIso, backdated,
+    ts: backdated ? "" : new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }),
+    createdAt: backdated ? new Date(dateIso + "T12:00:00+07:00").toISOString() : new Date().toISOString()
+  };
+}
 const ISSUE_CARRIERS = ["KEX", "Flash Express", "J&T Express", "ไปรษณีย์ไทย", "Ninja Van", "DHL", "Best Express", "SCG Express", "Alpha Fast", "Lalamove"];
 function issueShipFields(ship) {
   const s = ship || {};
@@ -3140,7 +3156,7 @@ Object.assign(window, {
   skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem, buildIssuePlan,
-  lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, ISSUE_CARRIERS,
+  lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, ISSUE_CARRIERS, issueOrderDate,
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, receiveStockAndRecord,

@@ -2196,6 +2196,8 @@ function MIssue({ ctx }) {
   const [customer, setCustomer] = useStateM("");
   const [ship, setShip] = useStateM({ phone: "", carrier: "", tracking: "" });
   const [shipOpen, setShipOpen] = useStateM(false);
+  const todayStr = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+  const [orderDate, setOrderDate] = useStateM(todayStr);
   const [pickOpen, setPickOpen] = useStateM(false);
   const [tab, setTab] = useStateM("product");   // picker tab: product | bundle
   const [q, setQ] = useStateM("");
@@ -2296,8 +2298,12 @@ function MIssue({ ctx }) {
     const sf = (typeof issueShipFields === "function")
       ? issueShipFields(ship)
       : { tracking: "", carrier: "", phone: "", status: "picking" };
+    const od = (typeof issueOrderDate === "function")
+      ? issueOrderDate(orderDate)
+      : { dateIso: todayStr, ts: "", backdated: false, createdAt: new Date().toISOString() };
+    const dateNote = od.backdated ? ` · ขายวันที่ ${typeof isoToThai === "function" ? isoToThai(od.dateIso) : od.dateIso}` : "";
 
-    deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก (มือถือ) · ออร์เดอร์ ${id} (${plan.channelLabel})`);
+    deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก (มือถือ) · ออร์เดอร์ ${id} (${plan.channelLabel})${dateNote}`);
     // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
     if (typeof applyLocPicks === "function") {
       const r = await applyLocPicks(plan.locPicks);
@@ -2308,7 +2314,7 @@ function MIssue({ ctx }) {
     // for ติดตามพัสดุ / จัดส่ง). No customer address here, so recipient is name-only.
     if (typeof createSaleLabel === "function") {
       try {
-        createSaleLabel({ orderId: id, name: customer || "ลูกค้าใหม่", items: plan.lineItems, phone: sf.phone, carrier: sf.carrier, tracking: sf.tracking });
+        createSaleLabel({ orderId: id, name: customer || "ลูกค้าใหม่", items: plan.lineItems, phone: sf.phone, carrier: sf.carrier, tracking: sf.tracking, created_at: od.createdAt });
       } catch (e) {}
     }
 
@@ -2323,8 +2329,8 @@ function MIssue({ ctx }) {
       carrier: sf.carrier,
       tracking: sf.tracking,
       ...(sf.phone ? { phone: sf.phone } : {}),
-      ts: new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }),
-      dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
+      ts: od.ts,
+      dateIso: od.dateIso,
       deductions: plan.channelSplit,
       isBundle: plan.hasBundle,
       bundleName: plan.hasBundle ? plan.bundleNames.join(", ") : "",
@@ -2341,7 +2347,7 @@ function MIssue({ ctx }) {
           label: l.type === "bundle" ? `ชุด: ${l.name}` : l.name,
           to: `−${l.qty} ${l.type === "bundle" ? "ชุด" : "ชิ้น"}`
         })),
-        note: `ออร์เดอร์ ${id} · ${plan.channelLabel}`
+        note: `ออร์เดอร์ ${id} · ${plan.channelLabel}${dateNote}`
       });
     }
     ctx.pushToast(plan.lineCount === 1
@@ -2451,6 +2457,22 @@ function MIssue({ ctx }) {
               })}
             </div>
           </>
+        )}
+
+        {/* Sale date — backdating files a late-keyed order under the day it sold. */}
+        <div className="m-section-label" style={{ padding: "12px 4px 8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>วันที่ขาย</span>
+          {orderDate !== todayStr && (
+            <button onClick={() => setOrderDate(todayStr)} style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 11, cursor: "pointer", padding: 0 }}>กลับเป็นวันนี้</button>
+          )}
+        </div>
+        <input type="date" className="m-input" value={orderDate} max={todayStr}
+          onChange={e => setOrderDate(e.target.value || todayStr)}
+          style={{ marginBottom: 6, ...(orderDate !== todayStr ? { borderColor: "var(--warning)" } : {}) }}/>
+        {orderDate !== todayStr && (
+          <div style={{ fontSize: 11, color: "var(--warning)", margin: "0 4px 8px" }}>
+            ออร์เดอร์ย้อนหลัง · {typeof isoToThai === "function" ? isoToThai(orderDate) : orderDate}
+          </div>
         )}
 
         <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>ลูกค้า / อ้างอิง (ไม่จำเป็น)</div>
