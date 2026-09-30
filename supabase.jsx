@@ -789,27 +789,96 @@ function _rtStale(key, seq) {
   return false;
 }
 
+/* ── Live stock across devices (2026-09-30) ──
+   `products` is deliberately NOT in the realtime publication: staff have no
+   SELECT on products.cost, and a postgres_changes payload carries the whole row,
+   so publishing it could push cost to a staff phone. Stock movements are seen
+   through `stock_adjustments` instead — every movement writes exactly one row
+   there (recordStockMoves), with no cost in it — and the handler reloads the
+   catalog through products_v, which masks cost per role.
+   Every reload is COALESCED: one ปรับสต็อก batch inserts one row per SKU, and a
+   full 424-row reload per row would hammer every open phone. A burst becomes
+   one fetch ~0.7 s after the last event. */
+const _rtTimers = {};
+function _rtSoon(key, fn, ms) {
+  clearTimeout(_rtTimers[key]);
+  _rtTimers[key] = setTimeout(() => { fn().catch(() => {}); }, ms || 700);
+}
+let _lastLiveSync = Date.now();
+async function _rtReloadProducts() {
+  // Two responses in flight used to race: whichever landed last won, so a stale
+  // snapshot could overwrite newer stock. hydrateProductsFromServer drops an
+  // out-of-order response and folds queued-but-unsynced deltas back in.
+  const seq = (typeof beginProductsFetch === 'function') ? beginProductsFetch() : null;
+  const fresh = await dbLoadProducts();
+  if (!fresh) return;
+  _lastLiveSync = Date.now();
+  if (typeof hydrateProductsFromServer === 'function') {
+    if (!hydrateProductsFromServer(fresh, seq)) return;   // superseded by a newer fetch
+  } else { PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p)); }
+  window.dispatchEvent(new CustomEvent('ims-products-change'));
+}
+async function _rtReloadProductLocs() {
+  const seq = _rtClaim('product_locs');
+  const fresh = await dbLoadProductLocs();
+  if (_rtStale('product_locs', seq)) return;
+  if (fresh) {
+    window._DB_PRODUCT_LOCS = fresh;
+    try { localStorage.setItem('ims_product_locs', JSON.stringify(fresh)); } catch (e) {}
+  }
+  window.dispatchEvent(new CustomEvent('ims-product-locs-change'));
+}
+async function _rtReloadOrders() {
+  const seq = _rtClaim('orders');
+  const fresh = await dbLoadOrders();
+  if (_rtStale('orders', seq)) return;
+  if (fresh) window._DB_ORDERS = fresh;
+  window.dispatchEvent(new CustomEvent('ims-orders-change'));
+}
+async function _rtReloadAudit() {
+  // Reload at least as deep as the user has already paged back with
+  // "โหลดเพิ่ม", or every extra page would vanish on the next write.
+  const depth = Math.max(500, (window._DB_AUDIT_LOG || []).length);
+  const seq = _rtClaim('audit');
+  const fresh = await dbLoadAuditLog(depth);
+  if (_rtStale('audit', seq)) return;
+  if (fresh) window._DB_AUDIT_LOG = fresh;
+  window.dispatchEvent(new CustomEvent('ims-audit-change'));
+}
+/* Stock moved somewhere (any device): catalog + shelves (+ sales cards). */
+function _rtStockMoved() {
+  _rtSoon('products', _rtReloadProducts);
+  _rtSoon('product_locs', _rtReloadProductLocs);
+  if (typeof refreshSaleMovesSoon === 'function') refreshSaleMovesSoon();
+}
+/* Catch-up for everything realtime can miss: product edits that move no stock
+   (name, price, reorder), a phone that slept through events, a dropped socket.
+   Runs when the app returns to the foreground after 2+ minutes away, and right
+   after the channel RE-subscribes. */
+function refreshLiveData() {
+  _rtStockMoved();
+  _rtSoon('orders', _rtReloadOrders);
+}
+let _liveFocusHooked = false;
+function _hookLiveFocusRefresh() {
+  if (_liveFocusHooked) return;
+  _liveFocusHooked = true;
+  const onBack = () => {
+    if (document.visibilityState === 'visible' && Date.now() - _lastLiveSync > 120000) refreshLiveData();
+  };
+  document.addEventListener('visibilitychange', onBack);
+  window.addEventListener('focus', onBack);
+}
+
 function setupRealtimeSync() {
+  _hookLiveFocusRefresh();
+  let wasSubscribed = false;
   sb.channel('ims-sync')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, async () => {
-      // Two events in flight used to race: whichever RESPONSE landed last won,
-      // so a stale snapshot could overwrite newer stock and a staff member saw
-      // their own entry disappear. hydrateProductsFromServer drops an
-      // out-of-order response and folds queued-but-unsynced deltas back in.
-      const seq = (typeof beginProductsFetch === 'function') ? beginProductsFetch() : null;
-      const fresh = await dbLoadProducts();
-      if (typeof hydrateProductsFromServer === 'function') {
-        if (!hydrateProductsFromServer(fresh, seq)) return;   // superseded → its own event already rendered
-      } else if (fresh) { PRODUCTS.length = 0; fresh.forEach(p => PRODUCTS.push(p)); }
-      window.dispatchEvent(new CustomEvent('ims-products-change'));
-    })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, async () => {
-      const seq = _rtClaim('orders');
-      const fresh = await dbLoadOrders();
-      if (_rtStale('orders', seq)) return;
-      if (fresh) window._DB_ORDERS = fresh;
-      window.dispatchEvent(new CustomEvent('ims-orders-change'));
-    })
+    // Not published (see above); kept so it works if products is ever added
+    // behind a cost-safe mechanism. Coalesced either way.
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => _rtStockMoved())
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'stock_adjustments' }, () => _rtStockMoved())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => _rtSoon('orders', _rtReloadOrders))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'bundles' }, async () => {
       const fresh = await dbLoadBundles();
       if (fresh) window._DB_BUNDLES = fresh;
@@ -832,26 +901,8 @@ function setupRealtimeSync() {
       if (fresh) window._DB_STORE = fresh;
       window.dispatchEvent(new CustomEvent('ims-store-change'));
     })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'product_locations' }, async () => {
-      const seq = _rtClaim('product_locs');
-      const fresh = await dbLoadProductLocs();
-      if (_rtStale('product_locs', seq)) return;
-      if (fresh) {
-        window._DB_PRODUCT_LOCS = fresh;
-        try { localStorage.setItem('ims_product_locs', JSON.stringify(fresh)); } catch (e) {}
-      }
-      window.dispatchEvent(new CustomEvent('ims-product-locs-change'));
-    })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_log' }, async () => {
-      // Reload at least as deep as the user has already paged back with
-      // "โหลดเพิ่ม", or every extra page would vanish on the next write.
-      const depth = Math.max(500, (window._DB_AUDIT_LOG || []).length);
-      const seq = _rtClaim('audit');
-      const fresh = await dbLoadAuditLog(depth);
-      if (_rtStale('audit', seq)) return;
-      if (fresh) window._DB_AUDIT_LOG = fresh;
-      window.dispatchEvent(new CustomEvent('ims-audit-change'));
-    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'product_locations' }, () => _rtSoon('product_locs', _rtReloadProductLocs))
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'audit_log' }, () => _rtSoon('audit', _rtReloadAudit, 900))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state' }, async (payload) => {
       // Shared KV state (categories / locations / stock_adj). Refresh only the
       // changed key and fire its existing change event so listeners re-render.
@@ -905,7 +956,13 @@ function setupRealtimeSync() {
       }
     })
     .subscribe((status) => {
-      if (status === 'SUBSCRIBED') console.log('[DB] ✓ Real-time sync active');
+      if (status === 'SUBSCRIBED') {
+        console.log('[DB] ✓ Real-time sync active');
+        // A RE-subscribe means the socket dropped (phone slept, network blip)
+        // and events were lost meanwhile — catch up once.
+        if (wasSubscribed) refreshLiveData();
+        wasSubscribed = true;
+      }
     });
 }
 
@@ -1281,7 +1338,7 @@ async function downloadBackup() {
 
 Object.assign(window, {
   sb, readProductNameFromImage, resolveWebImages, buildBackupSnapshot, downloadBackup,
-  dbInit, setupRealtimeSync,
+  dbInit, setupRealtimeSync, refreshLiveData,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,     dbRenameSku,
   dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments,

@@ -1640,8 +1640,13 @@ function CustomerLookup() {
     // track-lookup Edge Function can serve them to anonymous customers too.
     syncPreservedOrdersToDb();
 
-    // Load real orders from Supabase (anon read — no login needed)
-    if (window.sb) {
+    // Direct table reads are for signed-in staff only. Anonymous customers are
+    // served by the track-lookup Edge Function (server-side filtering, masked
+    // phones); the old anon read downloaded EVERY order — names, phones,
+    // addresses — into any visitor's browser. (orders' anon SELECT policy is
+    // being dropped to match: supabase/realtime-live-stock.sql.)
+    if (window.sb) window.sb.auth.getSession().then(({ data }) => {
+      if (!data || !data.session) return;
       window.sb.from("orders")
         .select("*")
         .order("created_at", { ascending: false })
@@ -1667,7 +1672,7 @@ function CustomerLookup() {
       window.sb.from("labels").select("data").then(({ data, error }) => {
         if (!error && data) setDbLabels(data.map(r => r.data).filter(Boolean));
       });
-    }
+    }).catch(() => {});
 
     return () => {
       window.removeEventListener("ims-orders-change", h);
