@@ -10,68 +10,60 @@ const DASH_LS_KEY = "ims_dashboard_layout_v1";
 /* ===== Individual widget bodies ===== */
 
 function KPIWidget({ goTo }) {
-  // Re-render whenever the product catalog or orders change
+  // Re-render whenever the catalog, orders, labels or ปรับสต็อก sales change
   const [tick, setTick] = useStateDash(0);
   useEffectDash(() => {
     const refresh = () => setTick(t => t + 1);
-    window.addEventListener("ims-products-change", refresh);
-    window.addEventListener("ims-orders-change",   refresh);
-    return () => {
-      window.removeEventListener("ims-products-change", refresh);
-      window.removeEventListener("ims-orders-change",   refresh);
-    };
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-sales-change"];
+    evs.forEach(e => window.addEventListener(e, refresh));
+    return () => evs.forEach(e => window.removeEventListener(e, refresh));
   }, []);
 
   const totalSkus   = PRODUCTS.length;
   const totalQty    = PRODUCTS.reduce((s, p) => s + p.qty, 0);
   const lowStock    = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder).length;
   const outOfStock  = PRODUCTS.filter(p => p.qty === 0).length;
-  const allOrders   = typeof loadOrders === "function" ? loadOrders() : [];
-  const pending     = allOrders.filter(o => o.status === "picking" || o.status === "packed").length;
-  const todayOrders = allOrders.filter(o => o.dateIso === (typeof bangkokDateStr === "function" ? bangkokDateStr() : new Date().toISOString().slice(0, 10))).length;
+  // Same order model as the sidebar badge and the phone (was the raw orders
+  // table, so this said 0 while the badge said 16). Blank label drafts excluded.
+  const shipments   = typeof buildOrders === "function" ? buildOrders() : (typeof loadOrders === "function" ? loadOrders() : []);
+  const pending     = shipments.filter(o => typeof isPendingOrder === "function" ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed")).length;
+  const today       = typeof todayIso === "function" ? todayIso() : new Date().toISOString().slice(0, 10);
+  const sales       = typeof loadSalesRecords === "function" ? loadSalesRecords() : [];
+  const todaySales  = sales.filter(o => o.dateIso === today && (o.channel || "") !== "ฉลาก");
+  const todayUnits  = todaySales.reduce((n, o) => n + (Array.isArray(o.lineItems) && o.lineItems.length ? o.lineItems.reduce((m, li) => m + (Number(li.qty) || 0), 0) : (Number(o.items) || 0)), 0);
+  const can = (id) => typeof canOpenPage !== "function" || canOpenPage(id);
+  // Staff never see per-day sales — that slot shows the catalog size instead.
+  const canSales = typeof canDo !== "function" || canDo("viewSales");
+  const inStockSkus = PRODUCTS.filter(p => p.qty > 0).length;
+
+  const tile = (label, value, unit, sub, color, onClick) => (
+    <button type="button" onClick={onClick || undefined} disabled={!onClick}
+      style={{ textAlign: "left", background: "transparent", border: "none", padding: 0, font: "inherit", color: "inherit", cursor: onClick ? "pointer" : "default" }}>
+      <div className="kpi-label">{label}</div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 4 }}>
+        <span className="kpi-value" style={color ? { color } : undefined}>{value}</span>
+        {unit && <span style={{ color: "var(--muted)", fontSize: 12 }}>{unit}</span>}
+      </div>
+      <div className="kpi-delta" style={{ color: "var(--muted)" }}>{sub}</div>
+      {onClick && <div style={{ fontSize: 12, color: "var(--accent)", marginTop: 8, fontWeight: 500 }}>ดูรายการ →</div>}
+    </button>
+  );
+
   return (
     <div style={{ padding: 18, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
-      <div>
-        <div className="kpi-label">SKU ทั้งหมด</div>
-        <div className="kpi-value" style={{ marginTop: 4 }}>{totalSkus}</div>
-        <div className="kpi-delta" style={{ color: "var(--muted)" }}>{totalSkus} รายการในคลัง</div>
-        <div className="bars" style={{ marginTop: 8 }}>
-          {Array(12).fill(1).map((_, i) => <div key={i} className="bar" style={{ height: "30%" }}/>)}
-        </div>
-      </div>
-      <div>
-        <div className="kpi-label">สต็อกคงเหลือรวม</div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 4 }}>
-          <span className="kpi-value">{totalQty.toLocaleString()}</span>
-          <span style={{ color: "var(--muted)", fontSize: 12 }}>ชิ้น</span>
-        </div>
-        <div className="kpi-delta" style={{ color: "var(--muted)" }}>ใน {totalSkus} SKU</div>
-        <div className="bars" style={{ marginTop: 8 }}>
-          {Array(12).fill(1).map((_, i) => <div key={i} className="bar" style={{ height: "30%" }}/>)}
-        </div>
-      </div>
-      <div>
-        <div className="kpi-label">สั่งซื้อค้างส่ง</div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 4 }}>
-          <span className="kpi-value">{pending}</span>
-          <span style={{ color: "var(--muted)", fontSize: 12 }}>ออร์เดอร์</span>
-        </div>
-        <div className="kpi-delta" style={{ color: "var(--muted)" }}>
-          {todayOrders > 0 ? `${todayOrders} ออร์เดอร์วันนี้` : "ไม่มีออร์เดอร์ใหม่วันนี้"}
-        </div>
-        <div className="bars" style={{ marginTop: 8 }}>
-          {Array(12).fill(1).map((_, i) => <div key={i} className="bar" style={{ height: "30%" }}/>)}
-        </div>
-      </div>
-      <div>
-        <div className="kpi-label">ต้องสั่งซื้อ</div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 4 }}>
-          <span className="kpi-value" style={{ color: (lowStock + outOfStock) > 0 ? "var(--danger)" : "var(--fg)" }}>{lowStock + outOfStock}</span>
-          <span style={{ color: "var(--muted)", fontSize: 12 }}>SKU</span>
-        </div>
-        <div className="kpi-delta">{outOfStock} หมด · {lowStock} ต่ำ</div>
-        <button className="btn btn-sm" style={{ marginTop: 10 }} onClick={() => goTo("inventory")}>ดูรายการ <Icons.Chev size={12}/></button>
-      </div>
+      {tile("สต็อกคงเหลือรวม", totalQty.toLocaleString(), "ชิ้น", `ใน ${totalSkus} SKU`, null,
+        can("inventory") ? () => goTo("inventory") : null)}
+      {canSales
+        ? tile("ขายวันนี้", todayUnits.toLocaleString(), "ชิ้น",
+            todaySales.length ? `${todaySales.length} รายการขาย (รวมที่บันทึกผ่านปรับสต็อก)` : "ยังไม่มีการขายวันนี้", null,
+            can("analytics") ? () => goTo("analytics") : null)
+        : tile("SKU ทั้งหมด", totalSkus.toLocaleString(), "SKU", `${inStockSkus} SKU มีสต็อก`, null,
+            can("inventory") ? () => goTo("inventory") : null)}
+      {tile("ออร์เดอร์รอส่ง", pending, "ออร์เดอร์", pending ? "รอแพ็ค / พร้อมส่ง" : "ไม่มีงานค้าง", null,
+        can("outbound") ? () => goTo("outbound") : null)}
+      {tile("ต้องสั่งซื้อ", lowStock + outOfStock, "SKU", `${outOfStock} หมด · ${lowStock} ต่ำกว่าจุดสั่งซื้อ`,
+        (lowStock + outOfStock) > 0 ? "var(--danger)" : null,
+        can("inventory") ? () => goTo("inventory") : null)}
     </div>
   );
 }
@@ -193,49 +185,78 @@ function ActivityWidget({ goTo }) {
   );
 }
 
+/* Today's sales per channel — real orders AND sales recorded through ปรับสต็อก
+   ("ขายผ่าน Shopee (นอกระบบ)" …), which is how the shop records most sales.
+   Used to read a constant list that was always 0. */
 function ChannelsWidget() {
+  const [, setTick] = useStateDash(0);
+  useEffectDash(() => {
+    const refresh = () => setTick(t => t + 1);
+    const evs = ["ims-orders-change", "ims-sales-change", "ims-products-change"];
+    evs.forEach(e => window.addEventListener(e, refresh));
+    return () => evs.forEach(e => window.removeEventListener(e, refresh));
+  }, []);
+  const rows = typeof channelToday === "function" ? channelToday() : [];
+  const totalUnits = rows.reduce((n, c) => n + c.units, 0);
+  const shown = rows.filter(c => c.units > 0).sort((a, b) => b.units - a.units);
   return (
     <div style={{ padding: "12px 18px 18px" }}>
-      {CHANNELS.slice(0, 5).map(c => {
-        const meta = CHANNEL_LIST.find(x => x.id === c.id) || {};
-        return (
-          <div key={c.id} style={{ padding: "9px 0" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, fontSize: 13 }}>
-              <span className="row" style={{ gap: 7 }}>
-                <span style={{ width: 8, height: 8, borderRadius: 999, background: meta.color }}/>
-                {c.name}
-              </span>
-              <span>
-                <span className="tnum" style={{ fontWeight: 500 }}>{c.today}</span>
-                <span style={{ color: "var(--muted)", fontSize: 11, marginLeft: 5 }}>({c.pct}%)</span>
-              </span>
-            </div>
-            <div className="prog" style={{ height: 5 }}><span style={{ width: c.pct + "%", background: meta.color }}/></div>
+      {shown.length === 0 && (
+        <div style={{ padding: "24px 4px", textAlign: "center", color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>
+          ยังไม่มีการขายวันนี้<br/>
+          <span style={{ fontSize: 12 }}>นับจากการตัดสต็อก และการปรับสต็อกด้วยเหตุผล “ขายผ่าน …”</span>
+        </div>
+      )}
+      {shown.map(c => (
+        <div key={c.id} style={{ padding: "9px 0" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, fontSize: 13 }}>
+            <span className="row" style={{ gap: 7 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+              {c.name}
+            </span>
+            <span>
+              <span className="tnum" style={{ fontWeight: 600 }}>{c.units}</span>
+              <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 4 }}>ชิ้น · {c.pct}%</span>
+            </span>
           </div>
-        );
-      })}
-      <div className="divider"/>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)" }}>
-        <span>ออร์เดอร์ที่ต้องส่งวันนี้</span>
-        <span style={{ color: "var(--muted)" }}>—</span>
-      </div>
+          <div className="prog" style={{ height: 5 }}><span style={{ width: c.pct + "%", background: c.color }}/></div>
+        </div>
+      ))}
+      {shown.length > 0 && <>
+        <div className="divider"/>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)" }}>
+          <span>ขายวันนี้ทั้งหมด</span>
+          <span className="tnum" style={{ color: "var(--fg)", fontWeight: 600 }}>{totalUnits} ชิ้น</span>
+        </div>
+      </>}
     </div>
   );
 }
 
 function LowStockWidget({ goTo }) {
-  const items = PRODUCTS.filter(p => p.qty <= p.reorder).slice(0, 6);
+  const all = PRODUCTS.filter(p => p.qty <= p.reorder).sort((a, b) => a.qty - b.qty);
+  const items = all.slice(0, 6);
+  if (!items.length) {
+    return <div style={{ padding: "28px 18px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>สต็อกทุกรายการสูงกว่าจุดสั่งซื้อ</div>;
+  }
+  const where = (p) => {
+    const code = typeof productHomeLoc === "function" ? productHomeLoc(p) : p.loc;
+    if (!code) return "ยังไม่จัดเก็บ";
+    const lp = typeof locParts === "function" ? locParts(code) : null;
+    return lp && lp.pos ? lp.pos : code;
+  };
   return (
+    <>
     <table className="t">
       <thead><tr><th>สินค้า</th><th className="t-num">คงเหลือ</th><th>สถานะ</th></tr></thead>
       <tbody>
         {items.map(p => {
           const s = stockStatus(p);
           return (
-            <tr key={p.sku} onClick={() => goTo("inventory")} style={{ cursor: "pointer" }}>
+            <tr key={p.sku} onClick={() => goTo("inventory", { sku: p.sku })} style={{ cursor: "pointer" }}>
               <td>
                 <div style={{ fontSize: 13 }}>{p.name}</div>
-                <div className="t-mono" style={{ marginTop: 2 }}>{p.sku} · {p.loc}</div>
+                <div className="t-mono" style={{ marginTop: 2 }}>{p.sku} · {where(p)}</div>
               </td>
               <td className="t-num tnum">{p.qty} <span style={{ color: "var(--muted)", fontSize: 11 }}>/ {p.reorder}</span></td>
               <td><span className={"badge " + s.cls}><span className="dot"/>{s.label}</span></td>
@@ -244,19 +265,25 @@ function LowStockWidget({ goTo }) {
         })}
       </tbody>
     </table>
+    {all.length > items.length && (
+      <div style={{ padding: "10px 18px", borderTop: "1px solid var(--border)", textAlign: "right" }}>
+        <button className="btn btn-ghost btn-sm" onClick={() => goTo("inventory")}>ดูทั้งหมด {all.length} รายการ <Icons.Chev size={12}/></button>
+      </div>
+    )}
+    </>
   );
 }
 
 function WarehouseWidget({ goTo }) {
+  // The old colour legend (ว่าง / <30% / … / เต็ม) described a fill scale no
+  // chip ever used — each chip is a position, the number is how many SKUs sit there.
   return (
     <div style={{ padding: 16 }}>
       <MiniWarehouse/>
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12, fontSize: 11 }}>
-        <Legend color="var(--surface-2)" label="ว่าง"/>
-        <Legend color="oklch(0.97 0.02 150)" label="< 30%"/>
-        <Legend color="oklch(0.93 0.05 150)" label="30–70%"/>
-        <Legend color="oklch(0.87 0.08 75)"  label="70–90%"/>
-        <Legend color="oklch(0.82 0.12 30)"  label="เต็ม"/>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12, fontSize: 12, color: "var(--muted)" }}>
+        <span>ตัวเลข = จำนวน SKU ในตำแหน่งนั้น</span>
+        {(typeof canOpenPage !== "function" || canOpenPage("locations")) &&
+          <button className="btn btn-ghost btn-sm" onClick={() => goTo("locations")}>ดูผังคลัง <Icons.Chev size={12}/></button>}
       </div>
     </div>
   );
@@ -269,7 +296,7 @@ function QuickActionsWidget({ goTo }) {
     { id: "labels",   icon: Icons.Tag,  label: "พิมพ์ฉลาก",      tone: "oklch(0.96 0.03 310)", fg: "oklch(0.4 0.13 310)" },
     { id: "import",   icon: Icons.Pkg,  label: "นำเข้า SKU",     tone: "oklch(0.96 0.025 60)", fg: "oklch(0.4 0.13 60)" },
     { id: "locations",icon: Icons.Map,  label: "ตำแหน่งจัดเก็บ", tone: "oklch(0.95 0.04 270)", fg: "oklch(0.4 0.13 270)" },
-    { id: "handheld", icon: Icons.Phone,label: "โหมดมือถือ",     tone: "oklch(0.95 0.04 200)", fg: "oklch(0.4 0.13 200)" }
+    { id: "finder",   icon: Icons.Search,label: "ค้นหาสินค้า",   tone: "oklch(0.95 0.04 200)", fg: "oklch(0.4 0.13 200)" }
   ];
   // Drop shortcuts to pages this role can't open — goTo would refuse them anyway.
   const visible = actions.filter(a => typeof canOpenPage !== "function" || canOpenPage(a.id));
@@ -290,42 +317,6 @@ function QuickActionsWidget({ goTo }) {
           </button>
         );
       })}
-    </div>
-  );
-}
-
-function TasksWidget() {
-  const tasks = [
-    { done: true,  text: "ตรวจนับ GR-26051901 — 320 ชิ้น", time: "09:24" },
-    { done: true,  text: "ส่งมอบให้ไปรษณีย์ไทย 8 ออร์เดอร์", time: "09:44" },
-    { done: false, text: "ตรวจนับ GR-26051902 — Tech Wave", time: "10:55", active: true },
-    { done: false, text: "พิมพ์ฉลากชุด 14 ใบ", time: "11:30" },
-    { done: false, text: "ปิดยอดประจำกะ", time: "16:00" }
-  ];
-  const doneCount = tasks.filter(t => t.done).length;
-  return (
-    <div style={{ padding: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>เสร็จแล้ว {doneCount} จาก {tasks.length}</span>
-        <span style={{ fontSize: 11, color: "var(--muted)" }}>กะเช้า • 8:00 – 17:00</span>
-      </div>
-      <div className="prog" style={{ marginBottom: 14 }}><span style={{ width: (doneCount/tasks.length*100)+"%", background: "var(--success)" }}/></div>
-      <div className="stack" style={{ gap: 6 }}>
-        {tasks.map((t, i) => (
-          <div key={i} className="row" style={{
-            padding: "8px 10px",
-            background: t.active ? "var(--accent-soft)" : "var(--surface-2)",
-            border: "1px solid " + (t.active ? "var(--accent)" : "var(--border)"),
-            borderRadius: 10
-          }}>
-            <span className={"check" + (t.done ? " on" : "")}/>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, textDecoration: t.done ? "line-through" : "none", color: t.done ? "var(--muted)" : "var(--fg)" }}>{t.text}</div>
-            </div>
-            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{t.time}</span>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -374,13 +365,12 @@ function CalendarWidget() {
 
 /* ===== Widget registry ===== */
 const WIDGET_DEFS = {
-  kpi:          { title: "ภาพรวมวันนี้",         sub: "KPI หลัก",                 defaultSpan: 12, render: (p) => <KPIWidget {...p}/> },
-  channels:     { title: "ออร์เดอร์ตามช่องทาง", sub: "แบ่งตามช่องทาง",           defaultSpan: 4, render: (p) => <ChannelsWidget {...p}/> },
+  kpi:          { title: "ภาพรวมวันนี้",         sub: "แตะเพื่อดูรายการ",          defaultSpan: 12, render: (p) => <KPIWidget {...p}/> },
+  channels:     { title: "ขายวันนี้ตามช่องทาง", sub: "ชิ้น",                     defaultSpan: 4, render: (p) => <ChannelsWidget {...p}/> },
   activity:     { title: "กิจกรรมล่าสุด",       sub: "ความเคลื่อนไหวของสต็อก",  defaultSpan: 8, render: (p) => <ActivityWidget {...p}/> },
   lowstock:     { title: "ต้องสั่งซื้อเพิ่ม",   sub: "ต่ำกว่าจุดสั่งซื้อ",       defaultSpan: 7, render: (p) => <LowStockWidget {...p}/> },
-  warehouse:    { title: "การใช้พื้นที่คลัง",   sub: "โซน A – E",                defaultSpan: 5, render: (p) => <WarehouseWidget {...p}/> },
+  warehouse:    { title: "ตำแหน่งจัดเก็บ",      sub: "SKU ต่อตำแหน่ง",           defaultSpan: 5, render: (p) => <WarehouseWidget {...p}/> },
   quickactions: { title: "ทางลัด",              sub: "งานที่ใช้บ่อย",            defaultSpan: 4, render: (p) => <QuickActionsWidget {...p}/> },
-  tasks:        { title: "งานวันนี้",           sub: "Checklist ของฉัน",        defaultSpan: 5, render: (p) => <TasksWidget {...p}/> },
   calendar:     { title: "ปฏิทิน",              sub: "",                        defaultSpan: 4, render: (p) => <CalendarWidget {...p}/> }
 };
 
@@ -391,7 +381,6 @@ const DEFAULT_LAYOUT = [
   { id: "lowstock",  visible: true,  span: 7 },
   { id: "warehouse", visible: true,  span: 5 },
   { id: "quickactions", visible: false, span: 4 },
-  { id: "tasks",        visible: false, span: 5 },
   { id: "calendar",     visible: false, span: 4 }
 ];
 
@@ -458,8 +447,11 @@ function Dashboard({ goTo }) {
   const [dragId, setDragId] = useStateDash(null);
   const [hoverId, setHoverId] = useStateDash(null);
 
-  const visible = layout.filter(w => w.visible);
-  const hidden = layout.filter(w => !w.visible);
+  // The channels widget is per-day sales — gone (board AND tray) without viewSales.
+  const canSales = typeof canDo !== "function" || canDo("viewSales");
+  const allowed = (w) => canSales || w.id !== "channels";
+  const visible = layout.filter(w => w.visible && allowed(w));
+  const hidden = layout.filter(w => !w.visible && allowed(w));
 
   const onClose = (id) => setLayout(L => L.map(w => w.id === id ? { ...w, visible: false } : w));
   const onReopen = (id) => setLayout(L => L.map(w => w.id === id ? { ...w, visible: true } : w));

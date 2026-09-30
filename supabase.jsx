@@ -327,6 +327,24 @@ async function dbInsertStockAdjustment(entries) {
   }
   return { ok: true };
 }
+/* Sales recorded through ปรับสต็อก ("ขายผ่าน … (นอกระบบ)" / "ขายหน้าร้าน …") since
+   `sinceIso`. Staff record almost every sale this way, so analytics and the
+   per-channel cards read these alongside real orders (see saleMoveOrders in
+   data.jsx). Read-only; null on error so callers keep the previous cache. */
+async function dbLoadSaleAdjustments(sinceIso) {
+  // ONLY the ปรับสต็อก sale reasons. ขายสินค้า / ตัดสต็อก / ขายชุดสินค้า also write
+  // history rows ("ขายสินค้า · …", "ขายชุดสินค้า …") but they already exist as
+  // orders — loading them here would count those sales twice.
+  let q = sb.from('stock_adjustments').select('id, sku, delta, reason, created_at')
+    .or('reason.like.ขายผ่าน*,reason.like.ขายหน้าร้าน*')
+    .lt('delta', 0)
+    .order('created_at', { ascending: false })
+    .limit(10000);
+  if (sinceIso) q = q.gte('created_at', sinceIso);
+  const { data, error } = await q;
+  if (error) { console.error('[DB] load sale adjustments:', error.message); return null; }
+  return data || [];
+}
 /* Latest adjustments for one sku — feeds the ProductDrawer movement list. */
 async function dbLoadStockAdjustments(sku, limit = 10) {
   const { data, error } = await sb
@@ -633,7 +651,12 @@ async function dbServerTimeMs() {
     return nowDev + __serverTimeCache.offsetMs;
   }
   try {
-    const { data, error } = await sb.rpc('server_now');
+    // Capped at 6 s: a hung request here used to hold the whole app on the
+    // loading screen (the access check awaits it before opening the gate).
+    const { data, error } = await Promise.race([
+      sb.rpc('server_now'),
+      new Promise(res => setTimeout(() => res({ data: null, error: 'timeout' }), 6000))
+    ]);
     const serverMs = data ? Date.parse(data) : NaN;
     if (!error && !isNaN(serverMs)) {
       __serverTimeCache = { atDeviceMs: Date.now(), offsetMs: serverMs - Date.now(), ok: true };
@@ -1130,6 +1153,9 @@ async function dbInit() {
       }
     }).catch(() => {});
 
+    /* Sales entered through ปรับสต็อก — background, feeds analytics + channel cards. */
+    if (typeof refreshSaleMoves === 'function') refreshSaleMoves();
+
     /* Labels: reconcile local ↔ cloud. This device may hold labels in
        localStorage that never reached the cloud (created before the table
        existed, or saved while another device owned the cloud copy). Merge by id,
@@ -1258,7 +1284,7 @@ Object.assign(window, {
   dbInit, setupRealtimeSync,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,     dbRenameSku,
-  dbInsertStockAdjustment, dbLoadStockAdjustments,
+  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments,
   dbLoadProductLocs,   dbSaveProductLocs,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,

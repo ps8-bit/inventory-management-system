@@ -801,8 +801,9 @@ function receiveStockAndRecord(lines, reason) {
    damaged/lost item, or a sale made outside the system (Shopee/Lazada/หน้าร้าน).
    Desktop (StockAdjustModal) and mobile (MAdjust) BOTH call this; the UIs are
    forked but the logic must not be. Distinct from the sell/ตัดสต็อก flows: it
-   never creates an order, so external sales recorded here deliberately do NOT
-   feed revenue/channel analytics (those read orders — use ตัดสต็อก for that). */
+   never creates an order. External sales recorded here ("ขายผ่าน …") DO feed
+   analytics and the channel cards via saleMoveOrders() — staff record almost
+   every sale this way. */
 function applyStockAdjustment({ sku, delta, reason, note, source }) {
   const d = Math.trunc(Number(delta) || 0);
   const p = PRODUCTS.find(x => x.sku === sku);
@@ -857,7 +858,9 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
       // Structured, queryable history (stock_adjustments table). Best-effort like
       // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
       if (typeof dbInsertStockAdjustment === "function") {
-        dbInsertStockAdjustment([{ sku, delta: rEff, reason: noteOut }]).catch(() => {});
+        dbInsertStockAdjustment([{ sku, delta: rEff, reason: noteOut }])
+          .then(() => { if (rEff < 0 && isAdjustSaleReason(noteOut)) refreshSaleMovesSoon(); })
+          .catch(() => {});
       }
     };
     Promise.resolve(write).then(res => {
@@ -875,6 +878,15 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
   }
   return { ok: true, from, to, eff };
 }
+
+/* The SALE reason picked last time on this device — most batches are the same
+   kind of sale, so both forks preselect it. Only "ขายผ่าน …" reasons are
+   remembered: preselecting นับผิด/เสียหาย would silently mislabel the next sale. */
+const ADJ_REASON_KEY = "ims_last_adjust_reason";
+function lastAdjustReason() {
+  try { const id = localStorage.getItem(ADJ_REASON_KEY); return (/^sale-/.test(id || "") && ADJUST_REASONS.some(r => r.id === id)) ? id : ""; } catch (e) { return ""; }
+}
+function rememberAdjustReason(id) { try { if (/^sale-/.test(id || "")) localStorage.setItem(ADJ_REASON_KEY, id); } catch (e) {} }
 
 /* Multi-SKU version of the above — one shared reason/note, many products.
    Both ปรับสต็อก UIs (desktop StockAdjustModal, mobile MAdjust) select several
@@ -1301,7 +1313,11 @@ function _planLocRows(sku, preferLocs) {
   rows.forEach(r => { if (order.indexOf(r.loc) < 0) order.push(r.loc); });
   const out = rows.map(r => ({ loc: r.loc, qty: r.qty }));
   if (diff > 0) {
-    const target = order[0];
+    /* Added pieces land on a REAL position only. A "-" / stale preference (or a
+       fake row sorted first) used to create or grow a shelf no picker can find;
+       with no real shelf at all they join an existing row, never a new fake one. */
+    const stored = storedLocSet();
+    const target = order.find(l => locIsStored(l, stored)) || productHomeLoc(p, stored) || rows[0].loc;
     const hit = out.find(r => r.loc === target);
     if (hit) hit.qty += diff; else out.push({ loc: target, qty: diff });
   } else {
@@ -1354,7 +1370,11 @@ async function applyLocPicks(picks) {
 function defaultPickLoc(p) {
   if (!p) return "";
   const spots = productPositions(p);
-  return (spots.length && spots[0].loc) || p.loc || "";
+  // First REAL shelf — locSplitFor pins the row equal to p.loc, and p.loc "-"
+  // sent pickers to a "-" row. Falls back to the old choice when none is real.
+  const stored = storedLocSet();
+  const real = spots.find(s => locIsStored(s.loc, stored));
+  return (real && real.loc) || (spots.length && spots[0].loc) || p.loc || "";
 }
 
 /* Move `pieces` of a sku TO one position — the write behind "เพิ่มสินค้า / สแกน
@@ -1419,20 +1439,26 @@ async function moveStockToLocation(sku, code, pieces) {
 async function applyReceiveLocs(lines) {
   const picks = [];   // skus with split rows → difference-based reconcile
   const jobs = [];    // no-row skus that need a split created / primary set
+  const stored = storedLocSet();
   (Array.isArray(lines) ? lines : []).forEach(l => {
-    if (!l || !l.sku || !l.loc || l.loc === "—") return;
+    if (!l || !l.sku) return;
     const p = PRODUCTS.find(x => x.sku === l.sku);
     if (!p) return;
+    /* Never file under a code that isn't a real position ("-" was, and became a
+       fake pick-first shelf). Use the product's real shelf instead — skipping a
+       sku WITH rows would leave them summing short of p.qty. */
+    const loc = locIsStored(l.loc, stored) ? String(l.loc) : productHomeLoc(p, stored);
     const rows = locSplitFor(l.sku, p.loc);
-    if (rows.length) { picks.push({ sku: l.sku, loc: l.loc }); return; }
+    if (rows.length) { picks.push({ sku: l.sku, loc: loc }); return; }
+    if (!loc) return;   // no real shelf and no rows: nothing to file
     const n = Math.max(0, Number(l.qty) || 0);
     const oldQty = Math.max(0, (Number(p.qty) || 0) - n);
-    if (!p.loc || p.loc === l.loc || !locIsStored(p.loc) || oldQty === 0) {
-      if ((p.loc || "") !== l.loc) updateProductInStore(l.sku, { loc: l.loc });
+    if (!p.loc || p.loc === loc || !locIsStored(p.loc, stored) || oldQty === 0) {
+      if ((p.loc || "") !== loc) updateProductInStore(l.sku, { loc: loc });
       return;
     }
     // Stock recorded elsewhere and this batch lands somewhere new → real split.
-    jobs.push([l.sku, [{ loc: p.loc, qty: oldQty }, { loc: l.loc, qty: n }].filter(r => r.qty > 0)]);
+    jobs.push([l.sku, [{ loc: p.loc, qty: oldQty }, { loc: loc, qty: n }].filter(r => r.qty > 0)]);
   });
   const out = { ok: true, offline: false, errors: [] };
   if (picks.length) {
@@ -1486,7 +1512,7 @@ function storedLocSet() { return new Set(allLocationCodes()); }
 function locIsStored(loc, set) { return !!loc && (set || storedLocSet()).has(String(loc)); }
 function countUnstoredProducts() {
   const set = storedLocSet();
-  return PRODUCTS.reduce((n, p) => n + (locIsStored(p.loc, set) ? 0 : 1), 0);
+  return PRODUCTS.reduce((n, p) => n + (productIsStored(p, set) ? 0 : 1), 0);
 }
 
 /* One-time migration to the Building→Floor→Position model: drop the old flat demo
@@ -1499,18 +1525,28 @@ function countUnstoredProducts() {
   // clobbering an existing cloud tree — loadLocTree prefers the cloud copy once it loads,
   // and a real user edit is what first persists the tree to the cloud.
   try { if (!localStorage.getItem("ims_loc_tree")) localStorage.setItem("ims_loc_tree", JSON.stringify(LOC_SEED())); } catch (e) {}
-  try { if (localStorage.getItem("ims_loc_cleared_v2") === "1") return; } catch (e) { return; }
-  const clearOnce = () => {
-    if (!Array.isArray(PRODUCTS) || !PRODUCTS.length) return;   // wait for products
-    const affected = [];
-    PRODUCTS.forEach(p => { if (p.loc) { p.loc = ""; affected.push(p.sku); } });
-    try { localStorage.setItem("ims_loc_cleared_v2", "1"); } catch (e) {}
-    window.removeEventListener("ims-products-change", clearOnce);
-    if (affected.length && typeof _syncManyFields === "function") _syncManyFields(affected, { loc: "" });
-  };
-  window.addEventListener("ims-products-change", clearOnce);
-  clearOnce();
+  /* RETIRED 2026-09-30. This used to blank EVERY product's loc — locally AND in
+     the cloud — the first time any new device/browser opened the app (the "run
+     once" flag lived in that device's localStorage, so every fresh phone, private
+     tab or cleared cache re-ran it). That is how all 424 products ended up with
+     loc "-" while their real shelves survived in product_locations. The v2 move
+     finished long ago; never write product data from a per-device migration. */
+  try { localStorage.setItem("ims_loc_cleared_v2", "1"); } catch (e) {}
 })();
+
+/* Where a product lives, for DISPLAY. products.loc is only the pick-first
+   position and can be blank/stale, while product_locations holds the real
+   shelves — so fall back to the recorded split before calling it unstored.
+   Returns a live position code or "" when the product truly has no shelf. */
+function productHomeLoc(p, set) {
+  if (!p) return "";
+  const s = set || storedLocSet();
+  if (locIsStored(p.loc, s)) return p.loc;
+  const rows = locSplitFor(p.sku, p.loc);
+  const hit = rows.find(r => r.qty > 0 && s.has(String(r.loc))) || rows.find(r => s.has(String(r.loc)));
+  return hit ? hit.loc : "";
+}
+function productIsStored(p, set) { return !!productHomeLoc(p, set); }
 
 /* Sales channels — used for outbound deduction + per-channel stock tracking */
 const CHANNEL_LIST = [
@@ -1551,7 +1587,7 @@ const CHANNELS = [
    via `deductions` (per-channel split) when present, else the order's channel
    name. Returns [{ ...channel, sold }] for every channel (0 when none). */
 const channelSalesFor = (sku, days = 30) => {
-  const orders = (typeof loadOrders === "function" ? loadOrders() : []) || [];
+  const orders = loadSalesRecords();
   let cutoff = "";
   try {
     const today = (typeof bangkokDateStr === "function") ? bangkokDateStr() : new Date().toISOString().slice(0, 10);
@@ -1590,6 +1626,149 @@ const channelSalesFor = (sku, days = 30) => {
   }
   return CHANNEL_LIST.map(c => ({ ...c, sold: Math.round(byId[c.id] || 0) }));
 };
+
+/* ── Sales entered through ปรับสต็อก ──────────────────────────────────────────
+   Staff record nearly every Shopee / Facebook / หน้าร้าน sale with a ปรับสต็อก
+   reason "ขายผ่าน … (นอกระบบ)" rather than as an order, so everything that
+   reads orders only (analytics, channel cards, per-SKU channel sales) showed 0.
+   These rows are loaded read-only from stock_adjustments and turned into
+   order-shaped records so every sales surface counts them. Label-born orders
+   (channel "ฉลาก") are shipments, not sales, and are left out of channel stats. */
+const SALE_MOVES_DAYS = 400;
+let _saleMovesInflight = null;
+function refreshSaleMoves() {
+  if (typeof dbLoadSaleAdjustments !== "function") return Promise.resolve();
+  if (_saleMovesInflight) return _saleMovesInflight;
+  const since = new Date(Date.now() - SALE_MOVES_DAYS * 86400000).toISOString();
+  _saleMovesInflight = dbLoadSaleAdjustments(since).then(rows => {
+    if (Array.isArray(rows)) {
+      window._DB_SALE_MOVES = rows;
+      _saleMoveCache = null;
+      window.dispatchEvent(new CustomEvent("ims-sales-change"));
+    }
+  }).catch(() => {}).then(() => { _saleMovesInflight = null; });
+  return _saleMovesInflight;
+}
+let _saleMoveTimer = null;
+function refreshSaleMovesSoon() {
+  clearTimeout(_saleMoveTimer);
+  _saleMoveTimer = setTimeout(refreshSaleMoves, 2500);
+}
+/* True only for the ปรับสต็อก sale reasons (ADJUST_REASONS "sale-*"). The sell
+   flows' own history rows ("ขายสินค้า · …", "ขายชุดสินค้า …") are NOT sales to
+   add — their orders are already counted. */
+function isAdjustSaleReason(reason) {
+  const r = String(reason || "");
+  return r.indexOf("ขายผ่าน ") === 0 || r.indexOf("ขายหน้าร้าน") === 0;
+}
+function saleChannelOfReason(reason) {
+  const r = String(reason || "");
+  if (/^ขายหน้าร้าน/.test(r)) return CHANNEL_LIST.find(c => c.id === "other");
+  return CHANNEL_LIST.find(c => c.id !== "other" && r.indexOf("ขายผ่าน " + c.name) === 0)
+      || CHANNEL_LIST.find(c => c.id === "other");
+}
+let _saleMoveCache = null;
+function saleMoveOrders() {
+  const rows = window._DB_SALE_MOVES;
+  if (!Array.isArray(rows) || !rows.length) return [];
+  if (_saleMoveCache && _saleMoveCache.src === rows) return _saleMoveCache.list;
+  const priceOf = new Map(PRODUCTS.map(p => [p.sku, Number(p.price) || 0]));
+  /* One ปรับสต็อก confirm = one sale. Its rows share the reason text but are
+     inserted one per SKU after each stock RPC answers, so they can straddle a
+     second boundary — group consecutive rows with the same reason that land
+     within 20 s of each other instead of by exact timestamp. */
+  const sorted = rows
+    .filter(r => r && r.sku && Number(r.delta) < 0 && isAdjustSaleReason(r.reason))
+    .slice()
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  const groups = new Map();
+  let cur = null, curKey = "", curReason = null, lastMs = 0, seq = 0;
+  for (const r of sorted) {
+    const ms = Date.parse(r.created_at) || 0;
+    if (!cur || r.reason !== curReason || ms - lastMs > 20000) {
+      curKey = "g" + (seq++); curReason = r.reason; cur = null;
+    }
+    lastMs = ms;
+    const key = curKey;
+    let g = groups.get(key);
+    if (!g) {
+      const ch = saleChannelOfReason(r.reason);
+      g = {
+        id: "ADJ-" + r.id, source: "adjust", status: "shipped",
+        channel: ch ? ch.name : "ออฟไลน์ / อื่นๆ", customer: "",
+        dateIso: bangkokDateOf(r.created_at), ts: bangkokTimeOf(r.created_at),
+        lineItems: [], items: 0
+      };
+      groups.set(key, g);
+    }
+    cur = g;
+    const qty = -Number(r.delta);
+    g.lineItems.push({ sku: r.sku, qty, price: priceOf.has(r.sku) ? priceOf.get(r.sku) : null });
+    g.items += qty;
+  }
+  const list = [...groups.values()];
+  _saleMoveCache = { src: rows, list };
+  return list;
+}
+/* Every sale the shop recorded: real orders + ปรับสต็อก sales. */
+function loadSalesRecords() {
+  const orders = (typeof loadOrders === "function" ? loadOrders() : []) || [];
+  return orders.concat(saleMoveOrders());
+}
+/* Today's sales per channel — what the "ออร์เดอร์ตามช่องทาง" cards show.
+   Returns CHANNEL_LIST rows with { sales, units, pct } (pct of today's units). */
+function channelToday() {
+  const today = todayIso();
+  const byId = {};
+  CHANNEL_LIST.forEach(c => { byId[c.id] = { sales: 0, units: 0 }; });
+  const nameToId = {};
+  CHANNEL_LIST.forEach(c => { nameToId[c.name] = c.id; });
+  for (const o of loadSalesRecords()) {
+    if (!o || o.dateIso !== today) continue;
+    const chName = (o.channel || "").trim();
+    if (chName === "ฉลาก") continue;
+    const id = nameToId[chName] || "other";
+    const units = Array.isArray(o.lineItems) && o.lineItems.length
+      ? o.lineItems.reduce((s, li) => s + (Number(li && li.qty) || 0), 0)
+      : (Number(o.items) || 0);
+    byId[id].sales += 1;
+    byId[id].units += units;
+  }
+  const totalUnits = Object.values(byId).reduce((s, v) => s + v.units, 0);
+  return CHANNEL_LIST.map(c => ({
+    ...c, sales: byId[c.id].sales, units: byId[c.id].units,
+    pct: totalUnits ? Math.round(byId[c.id].units * 100 / totalUnits) : 0
+  }));
+}
+
+/* A label-born "order" that is really an empty draft (no name, no items, no
+   tracking) — kept on the label queue, but it must not count as work waiting. */
+function isBlankDraftOrder(o) {
+  if (!o || o.tracking) return false;
+  const noName = !o.customer || o.customer === "ไม่ระบุชื่อ" || /^ฉลากใหม่/.test(o.customer);
+  const noItems = !(Number(o.items) > 0) && !(Array.isArray(o.lineItems) && o.lineItems.length);
+  return noName && noItems;
+}
+/* Orders that genuinely need action (รอแพ็ค / พร้อมส่ง), blank drafts excluded. */
+function isPendingOrder(o) {
+  return !!o && (o.status === "picking" || o.status === "packed") && !isBlankDraftOrder(o);
+}
+
+/* One Thai name per order status, used by every screen (desktop + mobile). */
+const ORDER_STATUS_TH = { picking: "รอแพ็ค", packed: "พร้อมส่ง", shipped: "ส่งแล้ว", delivered: "จัดส่งสำเร็จ" };
+
+/* Human-readable order reference: label drafts carry ids like
+   "LBL-NEW-1781451656731-762" — show "ฉลาก #762" instead. */
+function orderShortId(o) {
+  const id = String((o && o.id) || "");
+  const m = /^LBL-(?:NEW-)?\d+-(\d+)$/.exec(id);
+  return m ? "ฉลาก #" + m[1] : id;
+}
+/* Channel for display — label-born orders have no sales channel. */
+function orderChannelLabel(o) {
+  const ch = ((o && o.channel) || "").trim();
+  return ch === "ฉลาก" ? "จากฉลาก" : (ch || "ไม่ระบุ");
+}
 
 const LABEL_SIZES = [
   { id: "100x150", label: "100 × 150 mm", w: 100, h: 150, desc: "มาตรฐานพัสดุ" },
@@ -3045,7 +3224,7 @@ function openPickListWindow(orders, pushToast) {
   const safe = (str) => String(str == null ? "" : str).replace(/[<>&]/g, "");
   const w = window.open("", "_blank");
   if (!w) { if (typeof pushToast === "function") pushToast("เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วลองใหม่"); return; }
-  const rows = orders.map((o, i) => `<tr><td class="mono">${i+1}</td><td class="mono">${safe(o.id)}</td><td>${safe(o.customer)||"—"}</td><td>${safe(o.channel)||"—"}</td><td style="text-align:center">${o.items||0}</td><td>${safe(o.carrier)||"—"}</td><td>${{picking:"กำลังหยิบ",packed:"พร้อมส่ง"}[o.status]||safe(o.status)}</td></tr>`).join("");
+  const rows = orders.map((o, i) => `<tr><td class="mono">${i+1}</td><td class="mono">${safe(o.id)}</td><td>${safe(o.customer)||"—"}</td><td>${safe(o.channel)||"—"}</td><td style="text-align:center">${o.items||0}</td><td>${safe(o.carrier)||"—"}</td><td>${ORDER_STATUS_TH[o.status]||safe(o.status)}</td></tr>`).join("");
   w.document.write(`<!DOCTYPE html><html><head><title>Pick List</title>
 <style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 2px;font-size:18px}p{margin:0 0 16px;color:#666}button{padding:8px 18px;cursor:pointer;margin-bottom:16px;font-size:13px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}td{padding:8px 10px;border-bottom:1px solid #eee}tr:hover td{background:#fafafa}.mono{font-family:monospace;font-size:12px}@media print{button{display:none!important}}</style>
 </head><body onload="window.focus();window.print();">
@@ -3168,10 +3347,12 @@ Object.assign(window, {
   CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canOpenPage, canDo, capServerLocked, currentRoleId,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, importProductsBulk, removeProductsFromStore, resetProductStore, renameProductSku,
   deductStockAndPersist, deductManyAndPersist,
-  applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock,
+  applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock, lastAdjustReason, rememberAdjustReason,
   loadOrders, saveOrders, appendOrder,
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
-  storedLocSet, locIsStored, countUnstoredProducts,
+  storedLocSet, locIsStored, countUnstoredProducts, productHomeLoc, productIsStored,
+  refreshSaleMoves, refreshSaleMovesSoon, isAdjustSaleReason, saleChannelOfReason, saleMoveOrders, loadSalesRecords, channelToday,
+  isBlankDraftOrder, isPendingOrder, ORDER_STATUS_TH, orderShortId, orderChannelLabel,
   loadProductLocs, locSplitFor, hasLocSplit, locSplitTotal, productPositions, qtyAtLocation, productsInLocation, saveLocSplit,
   applyLocPicks, defaultPickLoc, moveStockToLocation, applyReceiveLocs,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,

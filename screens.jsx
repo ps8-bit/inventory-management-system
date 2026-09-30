@@ -33,6 +33,110 @@ class ErrorBoundary extends React.Component {
 }
 if (typeof window !== "undefined") window.ErrorBoundary = ErrorBoundary;
 
+/* ── In-app form dialog (replaces window.prompt) ──────────────────────────────
+   prompt() is a grey browser box: tiny on phones, can't show the existing
+   names to pick from, and creating a shelf took a chain of three of them.
+   askForm() renders a real dialog in its own root and resolves with the
+   values (or null on cancel), so plain event handlers can await it. Both the
+   desktop screens and handheld.jsx use it (screens.jsx loads first).
+     fields: [{ key, label, value, placeholder, options?: (values) => string[],
+                type?: "text" | "number", required? }]                         */
+function AskFormDialog({ title, message, fields, okLabel, onDone }) {
+  const [vals, setVals] = useState(() => Object.fromEntries(fields.map(f => [f.key, f.value != null ? String(f.value) : ""])));
+  const firstRef = useRef(null);
+  useEffect(() => { setTimeout(() => { try { firstRef.current && firstRef.current.focus(); firstRef.current.select && firstRef.current.select(); } catch (e) {} }, 40); }, []);
+  const missing = fields.some(f => f.required !== false && !String(vals[f.key] || "").trim());
+  const submit = () => {
+    if (missing) return;
+    const out = {};
+    fields.forEach(f => { out[f.key] = String(vals[f.key] || "").trim(); });
+    onDone(out);
+  };
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={() => onDone(null)} style={{ zIndex: 400 }}/>
+      <div className="modal" role="dialog" aria-modal="true" style={{ width: "min(440px, calc(100vw - 24px))", zIndex: 401 }}
+        onKeyDown={e => { if (e.key === "Escape") onDone(null); }}>
+        <div className="modal-head">
+          <div>
+            <h3>{title}</h3>
+            {message && <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4, whiteSpace: "pre-line" }}>{message}</div>}
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={() => onDone(null)} aria-label="ปิด"><Icons.X/></button>
+        </div>
+        <form className="modal-body" onSubmit={e => { e.preventDefault(); submit(); }}>
+          {fields.map((f, i) => {
+            const opts = typeof f.options === "function" ? (f.options(vals) || []) : (f.options || []);
+            const listId = opts.length ? "ask-" + f.key : undefined;
+            return (
+              <div key={f.key} style={{ marginBottom: 14 }}>
+                <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{f.label}</label>
+                <input ref={i === 0 ? firstRef : undefined} className="input" list={listId}
+                  type="text" inputMode={f.type === "number" ? "numeric" : undefined}
+                  value={vals[f.key]} placeholder={f.placeholder || ""}
+                  onChange={e => setVals(v => ({ ...v, [f.key]: f.type === "number" ? e.target.value.replace(/[^\d]/g, "") : e.target.value }))}
+                  style={{ width: "100%", fontSize: 15, padding: "10px 12px" }}/>
+                {listId && <datalist id={listId}>{opts.map(o => <option key={o} value={o}/>)}</datalist>}
+                {opts.length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                    {opts.slice(0, 12).map(o => (
+                      <button type="button" key={o} className={"adj-reason" + (vals[f.key] === o ? " on" : "")}
+                        onClick={() => setVals(v => ({ ...v, [f.key]: o }))}>{o}</button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <button type="submit" style={{ display: "none" }}/>
+        </form>
+        <div className="modal-foot">
+          <button className="btn" onClick={() => onDone(null)}>ยกเลิก</button>
+          <button className="btn btn-primary" disabled={missing} onClick={submit}>{okLabel || "บันทึก"}</button>
+        </div>
+      </div>
+    </>
+  );
+}
+function askForm(opts) {
+  return new Promise(resolve => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = ReactDOM.createRoot(host);
+    const done = (v) => { resolve(v); setTimeout(() => { try { root.unmount(); } catch (e) {} host.remove(); }, 0); };
+    root.render(<AskFormDialog {...opts} onDone={done}/>);
+  });
+}
+/* One text answer — the drop-in for prompt(label, value). null = cancelled. */
+async function askText(title, value, extra) {
+  const r = await askForm({ title, fields: [{ key: "v", label: (extra && extra.label) || title, value: value || "", placeholder: extra && extra.placeholder, type: extra && extra.type, options: extra && extra.options }], okLabel: extra && extra.okLabel, message: extra && extra.message });
+  return r ? r.v : null;
+}
+/* New storage position in ONE dialog (was three prompts in a row). Existing
+   buildings/floors are offered as tap-to-pick chips; typing a new name
+   creates it. Resolves the new position code, or null. */
+async function askNewPosition() {
+  const tree = (typeof loadLocTree === "function") ? loadLocTree() : { buildings: [] };
+  const buildings = tree.buildings || [];
+  const floorsOf = (bn) => { const b = buildings.find(x => x.name === bn); return b ? (b.floors || []).map(f => f.name) : []; };
+  const r = await askForm({
+    title: "เพิ่มตำแหน่งจัดเก็บใหม่",
+    message: "เลือกอาคาร/ชั้นที่มีอยู่ หรือพิมพ์ชื่อใหม่เพื่อสร้าง",
+    fields: [
+      { key: "b", label: "อาคาร / โซน", value: buildings[0] ? buildings[0].name : "", options: () => buildings.map(b => b.name) },
+      { key: "f", label: "ชั้น", value: (buildings[0] && floorsOf(buildings[0].name)[0]) || "ชั้น 1", options: (v) => floorsOf(v.b) },
+      { key: "p", label: "ชื่อตำแหน่ง", placeholder: "เช่น A1, กล่อง 12" }
+    ],
+    okLabel: "สร้างตำแหน่ง"
+  });
+  if (!r) return null;
+  if (typeof addBuilding === "function") addBuilding(r.b);
+  if (typeof addFloor === "function") addFloor(r.b, r.f);
+  if (typeof addPosition === "function") addPosition(r.b, r.f, r.p);
+  return locCode(r.b, r.f, r.p);
+}
+Object.assign(window, { askForm, askText, askNewPosition });
+
 /* Dashboard moved to dashboard.jsx (windowed widget board) */
 
 function Kpi({ label, value, sub, delta, spark, warning }) {
@@ -692,25 +796,10 @@ function LocationSelect({ value, onChange, mobile, noneLabel, allowNone = true, 
   const known = new Set(typeof allLocationCodes === "function" ? allLocationCodes() : []);
   const val = value || "";
 
-  // prompt() chain matching the Locations page (อาคาร → ชั้น → ตำแหน่ง); every
-  // step accepts an existing name (add* no-ops on duplicates) or a new one.
-  const createNew = () => {
-    const bNames = buildings.map(b => b.name);
-    const b = prompt("อาคาร / โซน (พิมพ์ชื่อใหม่เพื่อสร้าง)" + (bNames.length ? "\nที่มีอยู่: " + bNames.join(" · ") : ""), bNames[0] || "");
-    if (!b || !b.trim()) return;
-    const bn = b.trim();
-    if (typeof addBuilding === "function") addBuilding(bn);
-    const bld = (loadLocTree().buildings || []).find(x => x.name === bn);
-    const fNames = bld ? (bld.floors || []).map(f => f.name) : [];
-    const f = prompt(`ชั้น ใน "${bn}" (พิมพ์ชื่อใหม่เพื่อสร้าง)` + (fNames.length ? "\nที่มีอยู่: " + fNames.join(" · ") : ""), fNames[0] || "ชั้น 1");
-    if (!f || !f.trim()) return;
-    const fn = f.trim();
-    if (typeof addFloor === "function") addFloor(bn, fn);
-    const ps = prompt(`ชื่อตำแหน่งใหม่ใน ${bn} · ${fn} (เช่น A1, กล่อง 12)`);
-    if (!ps || !ps.trim()) return;
-    const pn = ps.trim();
-    if (typeof addPosition === "function") addPosition(bn, fn, pn);
-    onChange(locCode(bn, fn, pn));
+  // One dialog (askNewPosition) instead of the old three-prompt chain.
+  const createNew = async () => {
+    const code = await askNewPosition();
+    if (code) onChange(code);
   };
 
   const handle = (e) => {
@@ -748,7 +837,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
   const [brand,    setBrand]    = useState(prefill?.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(sku) : ""));
   const [loc,      setLoc]      = useState("");
   const [price,    setPrice]    = useState(prefill?.price ? String(prefill.price) : "");
-  const [reorder,  setReorder]  = useState("30");
+  const [reorder,  setReorder]  = useState("2");   // was 30 — typical stock is ~4, so 30 flagged most SKUs as low
   const [supplier, setSupplier] = useState(suppliers[0] || "");
   const [qty,      setQty]      = useState("1");
   const nameRef = useRef(null);
@@ -774,7 +863,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
       cost:     Math.round((parseFloat(price) || 0) * 0.6),
       qty:      0,          // start at 0; receiving adds on top
       reserved: 0,
-      reorder:  parseInt(reorder) || 30,
+      reorder:  Number.isFinite(parseInt(reorder)) ? Math.max(0, parseInt(reorder)) : 2,
       supplier: supplier.trim() || "ไม่ระบุ",
     };
     // Carry over the WooCommerce product image (a remote URL renders fine in
@@ -1212,6 +1301,9 @@ function Inbound({ goTo, pushToast }) {
   // Persist the receiving draft on every change; clear it once the job is committed.
   useEffect(() => { if (typeof saveInboundDraft === "function") saveInboundDraft(closed ? [] : received); }, [received, closed]);
 
+  // Draft lines default to the product's REAL shelf — p.loc is "-" on live data,
+  // and filing a batch under "-" created a fake pick-first shelf.
+  const recvShelf = (p) => (typeof productHomeLoc === "function" ? productHomeLoc(p) : "");
   const addToReceived = (sku, name, loc, qty) => {
     const t = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
     setReceived(prev => {
@@ -1270,7 +1362,7 @@ function Inbound({ goTo, pushToast }) {
       return;
     }
     if (typeof playScanBeep === "function") playScanBeep();
-    addToReceived(p.sku, p.name, p.loc, 1);
+    addToReceived(p.sku, p.name, recvShelf(p), 1);
     setFlash({ sku: p.sku, name: p.name, notFound: false });
     setTimeout(() => setFlash(null), 1200);
     setScan("");
@@ -1285,7 +1377,7 @@ function Inbound({ goTo, pushToast }) {
     const p = PRODUCTS.find(x => x.sku.toLowerCase() === cand.sku.toLowerCase());
     if (p) {
       if (typeof playScanBeep === "function") playScanBeep();
-      addToReceived(p.sku, p.name, p.loc, 1);
+      addToReceived(p.sku, p.name, recvShelf(p), 1);
       setFlash({ sku: p.sku, name: p.name, notFound: false });
       setTimeout(() => setFlash(null), 1200);
       pushToast(`สแกนรับเข้า ${p.sku} สำเร็จ`);
@@ -1409,7 +1501,7 @@ function Inbound({ goTo, pushToast }) {
             onClose={() => setQuickAdd(null)}
             onConfirm={(product, qty) => {
               addProductToStore(product);
-              addToReceived(product.sku, product.name, product.loc, qty);
+              addToReceived(product.sku, product.name, recvShelf(product), qty);
               if (typeof recordChange === "function") {
                 recordChange({
                   entity: "product", action: "add",
@@ -1424,14 +1516,6 @@ function Inbound({ goTo, pushToast }) {
           />
         )}
 
-        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 12, color: "var(--muted)", marginRight: 4 }}>ทดลองสแกน:</span>
-          {PRODUCTS.slice(0, 5).map(p => (
-            <button key={p.sku} className="btn btn-sm" onClick={() => submitScan(p.sku)}>
-              <span className="mono" style={{ fontSize: 11 }}>{p.sku}</span>
-            </button>
-          ))}
-        </div>
 
         {flash && (
           flash.notFound ? (
@@ -1705,10 +1789,18 @@ function Outbound({ goTo, pushToast, focus }) {
     return () => document.removeEventListener("mousedown", h);
   }, [obBulkMenu]);
 
-  // Tab definitions — index 0 = "all", 1-4 map to real status values
-  const TABS       = ["ทั้งหมด", "กำลังหยิบ", "พร้อมส่ง", "ส่งแล้ว", "จัดส่งสำเร็จ"];
-  const TAB_STATUS = [null,       "picking",    "packed",   "shipped",  "delivered"];
-  const [tab, setTab] = useState(0);
+  // Tabs. "ค้างส่ง" = รอแพ็ค + พร้อมส่ง minus blank label drafts — the work that
+  // is actually waiting, and where the page opens when there is any.
+  const pendingOf = (o) => (typeof isPendingOrder === "function") ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed");
+  const TABS = [
+    { label: "ทั้งหมด",               test: () => true,                         filtered: false },
+    { label: "ค้างส่ง",               test: pendingOf,                          filtered: true },
+    { label: ORDER_STATUS_TH.picking,   test: o => o.status === "picking",   filtered: true },
+    { label: ORDER_STATUS_TH.packed,    test: o => o.status === "packed",    filtered: true },
+    { label: ORDER_STATUS_TH.shipped,   test: o => o.status === "shipped",   filtered: true },
+    { label: ORDER_STATUS_TH.delivered, test: o => o.status === "delivered", filtered: true },
+  ];
+  const [tab, setTab] = useState(() => orders.some(pendingOf) ? 1 : 0);
 
   /* Opened from the global search / notifications with a specific order id.
      There is no per-order drawer here, so isolate that one row instead: jump to
@@ -1719,14 +1811,21 @@ function Outbound({ goTo, pushToast, focus }) {
     if (focus && focus.orderId) { setTab(0); setFilterCh("all"); setFilterQ(focus.orderId); setFilterOpen(true); }
   }, [focus && focus.n]);
 
+  // A selection belongs to the rows on screen: switching tab or filter drops it,
+  // so a bulk ลบ / ยกเลิก / status change can't hit orders the user no longer sees.
+  useEffect(() => {
+    setPicked(p => (Object.keys(p).length ? {} : p));
+    setObBulkMenu(null);
+  }, [tab, filterCh, filterQ]);
+
   // Live counts from orders state (used for stats + tab badges)
   const pickingCount   = orders.filter(o => o.status === "picking").length;
   const packedCount    = orders.filter(o => o.status === "packed").length;
   const shippedCount   = orders.filter(o => o.status === "shipped" || o.status === "delivered").length;
-  const pendingCount   = pickingCount + packedCount;
+  const pendingCount   = orders.filter(pendingOf).length;
 
   // Apply tab + optional channel/text filter
-  const tabOrders = (TAB_STATUS[tab] ? orders.filter(o => o.status === TAB_STATUS[tab]) : orders)
+  const tabOrders = orders.filter(TABS[tab].test)
     .filter(o => {
       if (filterCh !== "all" && o.channel !== filterCh) return false;
       if (filterQ.trim()) {
@@ -1739,7 +1838,7 @@ function Outbound({ goTo, pushToast, focus }) {
     .sort((a, b) => ((b.dateIso || "") + " " + (b.ts || "")).localeCompare((a.dateIso || "") + " " + (a.ts || "")));
 
   // Status display helpers
-  const STATUS_LABEL = { picking: "กำลังหยิบ", packed: "พร้อมส่ง", shipped: "ส่งแล้ว", delivered: "จัดส่งสำเร็จ" };
+  const STATUS_LABEL = ORDER_STATUS_TH;
   const STATUS_CLS   = { picking: "badge-warning", packed: "badge-info", shipped: "badge-success", delivered: "badge-neutral" };
 
   // Multi-item stock-out: the modal hands over a cart, commitIssueOrder does the
@@ -1752,17 +1851,20 @@ function Outbound({ goTo, pushToast, focus }) {
 
   const pickedIds = Object.keys(picked).filter(k => picked[k]);
   const pickedCount = pickedIds.length;
-  const allPicked = orders.length > 0 && orders.every(o => picked[o.id]);
-  const somePicked = !allPicked && orders.some(o => picked[o.id]);
+  // Select-all acts on the rows on screen (current tab + filters). It used to
+  // tick EVERY order in every tab, so a bulk ลบ from a filtered view could hit
+  // orders the user never saw.
+  const allPicked = tabOrders.length > 0 && tabOrders.every(o => picked[o.id]);
+  const somePicked = !allPicked && tabOrders.some(o => picked[o.id]);
 
   const toggleAllOrders = () => {
     if (allPicked) setPicked({});
-    else setPicked(Object.fromEntries(orders.map(o => [o.id, true])));
+    else setPicked(Object.fromEntries(tabOrders.map(o => [o.id, true])));
   };
   const clearPicked = () => { setPicked({}); setObBulkMenu(null); };
 
   const bulkUpdateStatus = (status) => {
-    const STATUS_LABEL = { picking: "กำลังหยิบ", packed: "พร้อมส่ง", shipped: "ส่งแล้ว" };
+    const STATUS_LABEL = ORDER_STATUS_TH;
     setObBulkConfirm({
       title: "ยืนยันการแก้ไขสถานะ",
       description: `อัปเดตสถานะของ ${pickedCount} ออร์เดอร์เป็น \"${STATUS_LABEL[status]}\"`,
@@ -1858,39 +1960,42 @@ function Outbound({ goTo, pushToast, focus }) {
       </div>
 
       <div className="grid-3">
-        <SmallStat label="กำลังหยิบ"  value={pickingCount}  tone="warning" hint="ออร์เดอร์รอหยิบ"/>
+        <SmallStat label={ORDER_STATUS_TH.picking} value={pickingCount}  tone="warning" hint="ตัดสต็อกแล้ว รอหยิบของ"/>
         <SmallStat label="พร้อมส่ง"   value={packedCount}   tone="info"    hint="แพ็คเสร็จรอส่ง"/>
         <SmallStat label="ส่งแล้ว"    value={shippedCount}  tone="success" hint="KEX · Flash · J&T · ไปรษณีย์"/>
       </div>
 
-      {/* Channel breakdown */}
-      <div className="card card-tight">
-        <div className="card-head">
-          <div>
-            <h3>ยอดตัดสต็อกตามช่องทาง</h3>
-            <div className="sub">วันนี้ • รวม {CHANNELS.reduce((s,c)=>s+c.today,0)} ออร์เดอร์</div>
-          </div>
-          {canOpenPage("analytics") && <button className="btn btn-ghost btn-sm" onClick={() => goTo && goTo("analytics")}>ดูรายงาน <Icons.Chev size={14}/></button>}
-        </div>
-        <div style={{ padding: "12px 18px 18px", display: "grid", gridTemplateColumns: `repeat(${CHANNELS.length}, 1fr)`, gap: 12 }}>
-          {CHANNELS.map(c => {
-            const meta = CHANNEL_LIST.find(x => x.id === c.id) || {};
-            return (
-              <div key={c.id} style={{ padding: "12px 14px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
-                <div className="row" style={{ gap: 6, marginBottom: 6 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: 999, background: meta.color }}/>
-                  <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 500 }}>{c.name}</span>
-                </div>
-                <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em", fontFamily: "IBM Plex Sans, sans-serif" }} className="tnum">{c.today}</div>
-                <div className="prog" style={{ marginTop: 6, height: 4 }}>
-                  <span style={{ width: c.pct + "%", background: meta.color }}/>
-                </div>
-                <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>{c.pct}% ของวันนี้</div>
+      {/* Today's sales by channel — real orders + ปรับสต็อก "ขายผ่าน …" sales.
+          (Was a constant list that always read 0.) Hidden without viewSales. */}
+      {(typeof canDo !== "function" || canDo("viewSales")) && (() => {
+        const rows = typeof channelToday === "function" ? channelToday() : [];
+        const total = rows.reduce((n, c) => n + c.units, 0);
+        return (
+          <div className="card card-tight">
+            <div className="card-head">
+              <div>
+                <h3>ขายวันนี้ตามช่องทาง</h3>
+                <div className="sub">{total ? `รวม ${total} ชิ้น · นับรวมการปรับสต็อก “ขายผ่าน …”` : "ยังไม่มีการขายวันนี้"}</div>
               </div>
-            );
-          })}
-        </div>
-      </div>
+              {canOpenPage("analytics") && <button className="btn btn-ghost btn-sm" onClick={() => goTo && goTo("analytics")}>ดูรายงาน <Icons.Chev size={14}/></button>}
+            </div>
+            {total > 0 && (
+              <div style={{ padding: "12px 18px 18px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12 }}>
+                {rows.filter(c => c.units > 0).map(c => (
+                  <div key={c.id} style={{ padding: "12px 14px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
+                    <div className="row" style={{ gap: 6, marginBottom: 6 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+                      <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 500 }}>{c.name}</span>
+                    </div>
+                    <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }} className="tnum">{c.units} <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 400 }}>ชิ้น</span></div>
+                    <div className="prog" style={{ marginTop: 6, height: 4 }}><span style={{ width: c.pct + "%", background: c.color }}/></div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {filterOpen && (
         <div className="card card-tight" style={{ padding:"14px 18px", animation:"modalin 0.14s ease-out" }}>
@@ -1917,10 +2022,10 @@ function Outbound({ goTo, pushToast, focus }) {
 
       <div className="tabs">
         {TABS.map((t, i) => {
-          const cnt = TAB_STATUS[i] ? orders.filter(o => o.status === TAB_STATUS[i]).length : orders.length;
+          const cnt = orders.filter(t.test).length;
           return (
-            <div key={t} className={"tab" + (tab === i ? " active" : "")} onClick={() => setTab(i)}>
-              {t}
+            <div key={t.label} className={"tab" + (tab === i ? " active" : "")} onClick={() => setTab(i)}>
+              {t.label}
               {cnt > 0 && <span className="nav-badge" style={{ marginLeft: 5 }}>{cnt}</span>}
             </div>
           );
@@ -2002,7 +2107,7 @@ function Outbound({ goTo, pushToast, focus }) {
                       <td>${o.channel||"—"}</td>
                       <td class="num">${Array.isArray(o.lineItems)&&o.lineItems.length ? o.lineItems.reduce((s,x)=>s+(x.qty||1),0) : (o.items||0)}</td>
                       <td>${o.carrier||"—"}</td>
-                      <td>${{picking:"กำลังหยิบ",packed:"พร้อมส่ง",shipped:"ส่งแล้ว"}[o.status]||o.status}</td>
+                      <td>${ORDER_STATUS_TH[o.status]||o.status}</td>
                     </tr>`).join("")}
                   </tbody>
                 </table>`;
@@ -2046,9 +2151,9 @@ function Outbound({ goTo, pushToast, focus }) {
               }}>
                 <div style={{ padding: "6px 10px 4px", fontSize: 11, color: "var(--muted)", fontWeight: 500 }}>เปลี่ยนสถานะเป็น</div>
                 {[
-                  { id: "picking", label: "กำลังหยิบ", icon: Icons.Box },
-                  { id: "packed",  label: "พร้อมส่ง",   icon: Icons.Pkg },
-                  { id: "shipped", label: "ส่งแล้ว",    icon: Icons.Truck }
+                  { id: "picking", label: ORDER_STATUS_TH.picking, icon: Icons.Box },
+                  { id: "packed",  label: ORDER_STATUS_TH.packed,  icon: Icons.Pkg },
+                  { id: "shipped", label: ORDER_STATUS_TH.shipped, icon: Icons.Truck }
                 ].map(s => {
                   const I = s.icon;
                   return (
@@ -2094,19 +2199,19 @@ function Outbound({ goTo, pushToast, focus }) {
               return (
                 <tr key={o.id}>
                   <td><span className={"check" + (on ? " on" : "")} onClick={() => setPicked(p => ({ ...p, [o.id]: !p[o.id] }))}/></td>
-                  <td className="t-mono" style={{ color: "var(--fg)" }}>
-                    {o.id}
+                  <td className="t-mono" style={{ color: "var(--fg)" }} title={o.id}>
+                    {typeof orderShortId === "function" ? orderShortId(o) : o.id}
                     {o.isBundle && <span className="badge badge-info" style={{ marginLeft: 6, fontSize: 9, padding: "1px 6px" }} title={o.bundleName}><Icons.Bundle size={9}/> ชุด</span>}
                   </td>
                   <td>
                     {chMeta ? (
                       <span className="ch-chip"><span className="swatch" style={{ background: chMeta.color }}/>{o.channel}</span>
                     ) : (
-                      <span className="badge badge-neutral">{o.channel}</span>
+                      <span className="badge badge-neutral">{typeof orderChannelLabel === "function" ? orderChannelLabel(o) : o.channel}</span>
                     )}
                   </td>
-                  <td>{o.customer}</td>
-                  <td className="t-num tnum">{o.items}</td>
+                  <td style={!o.customer || o.customer === "ไม่ระบุชื่อ" ? { color: "var(--muted)" } : undefined}>{o.customer || "ไม่ระบุชื่อ"}</td>
+                  <td className="t-num tnum">{Number(o.items) > 0 ? o.items : "—"}</td>
                   <td>{o.carrier}</td>
                   <td className="t-mono">{o.tracking}</td>
                   <td><span className={"badge " + stCls}><span className="dot"/>{stLab}</span></td>
@@ -2119,7 +2224,8 @@ function Outbound({ goTo, pushToast, focus }) {
             {tabOrders.length === 0 && (
               <tr><td colSpan="9" style={{ textAlign: "center", padding: 40, color: "var(--muted)", fontSize: 13 }}>
                 <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
-                <div>{(filterQ || filterCh !== "all" || TAB_STATUS[tab]) ? "ไม่พบออร์เดอร์ที่ตรงกับตัวกรอง" : "ยังไม่มีออร์เดอร์"}</div>
+                <div>{tab === 1 && !filterQ && filterCh === "all" ? "ไม่มีออร์เดอร์ค้างส่ง" : (filterQ || filterCh !== "all" || TABS[tab].filtered) ? "ไม่พบออร์เดอร์ที่ตรงกับตัวกรอง" : "ยังไม่มีออร์เดอร์"}</div>
+                {tab !== 0 && !filterQ && filterCh === "all" && <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => setTab(0)}>ดูทั้งหมด</button>}
                 {(filterQ || filterCh !== "all") && (
                   <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setFilterCh("all"); setFilterQ(""); }}>ล้างตัวกรอง</button>
                 )}
@@ -2804,6 +2910,15 @@ function Inventory({ pushToast, density, goTo, focus }) {
   const [cat, setCat] = useState("ทั้งหมด");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locFilter, setLocFilter] = useState(false); // true = only products not stored in a real position
+  const [sort, setSort] = useState({ key: null, dir: 1 });     // column sort
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportRef = useRef(null);
+  useEffect(() => {
+    if (!exportOpen) return;
+    const h = (e) => { if (exportRef.current && !exportRef.current.contains(e.target)) setExportOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [exportOpen]);
   const [open, setOpen] = useState(null);
   const [selected, setSelected] = useState({}); // { sku: true }
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -2877,16 +2992,26 @@ function Inventory({ pushToast, density, goTo, focus }) {
   // Which loc codes are real positions in the live tree — stale codes (e.g. a
   // legacy "A" from CSV import) count as NOT stored and get a warning badge.
   const storedCodes = useMemo(() => storedLocSet(), [stockKey]);
-  const unstoredCount = useMemo(() => liveProducts.reduce((n, p) => n + (locIsStored(p.loc, storedCodes) ? 0 : 1), 0), [liveProducts, storedCodes]);
+  const unstoredCount = useMemo(() => liveProducts.reduce((n, p) => n + (productIsStored(p, storedCodes) ? 0 : 1), 0), [liveProducts, storedCodes]);
 
-  const filtered = liveProducts.filter(p => {
+  const filteredRaw = liveProducts.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     const s = stockStatus(p).key;
     if (statusFilter !== "all" && s !== statusFilter) return false;
-    if (locFilter && locIsStored(p.loc, storedCodes)) return false;
+    if (locFilter && productIsStored(p, storedCodes)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
+  const SORTERS = {
+    sku:   (a, b) => a.sku.localeCompare(b.sku),
+    name:  (a, b) => String(a.name || "").localeCompare(String(b.name || ""), "th"),
+    qty:   (a, b) => a.qty - b.qty,
+    avail: (a, b) => (a.qty - a.reserved) - (b.qty - b.reserved),
+  };
+  const filtered = sort.key ? [...filteredRaw].sort((a, b) => SORTERS[sort.key](a, b) * sort.dir) : filteredRaw;
+  const sortBy = (key) => setSort(sv => sv.key === key ? (sv.dir === 1 ? { key, dir: -1 } : { key: null, dir: 1 }) : { key, dir: 1 });
+  const sortMark = (key) => sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : "";
+  const STATUS_TH = { ok: "พร้อมขาย", low: "ต่ำ", out: "หมด" };
 
   const filteredSkus = filtered.map(p => p.sku);
   const selectedSkus = filteredSkus.filter(s => selected[s]);
@@ -2991,19 +3116,35 @@ function Inventory({ pushToast, density, goTo, focus }) {
           <div className="page-sub">{liveProducts.length} SKU • รวม {liveProducts.reduce((s,p)=>s+p.qty,0).toLocaleString()} ชิ้น</div>
         </div>
         <div className="row">
-          {canDo("exportData") && <button className="btn" onClick={() => {
-            if (typeof downloadStockReport === "function") downloadStockReport(liveProducts);
-          }}><Icons.Pkg size={14}/> รายงานสต็อก Excel</button>}
-          {canDo("exportData") && <button className="btn" onClick={() => {
-            exportInventoryCsv(filtered, `สินค้าคงคลัง_${new Date().toISOString().slice(0,10)}.csv`);
-            pushToast(`ส่งออก ${filtered.length} รายการเป็น CSV แล้ว`);
-          }}><Icons.Pkg size={14}/> Export CSV</button>}
-          {canDo("exportData") && <button className="btn" onClick={() => {
-            const w = window.open("", "_blank");
+          {/* One ส่งออก menu instead of three look-alike buttons. */}
+          {canDo("exportData") && (
+            <div ref={exportRef} style={{ position: "relative" }}>
+              <button className="btn" onClick={() => setExportOpen(o => !o)}><Icons.Pkg size={14}/> ส่งออก <Icons.Down size={12}/></button>
+              {exportOpen && (
+                <div className="popover" style={{ top: "calc(100% + 6px)", right: 0, left: "auto", bottom: "auto", minWidth: 240, zIndex: 40 }}>
+                  <button className="popover-item" onClick={() => { setExportOpen(false); if (typeof downloadStockReport === "function") downloadStockReport(liveProducts); }}>
+                    <Icons.Pkg size={14}/> รายงานสต็อก (Excel)
+                  </button>
+                  <button className="popover-item" onClick={() => {
+                    setExportOpen(false);
+                    exportInventoryCsv(filtered, `สินค้าคงคลัง_${new Date().toISOString().slice(0,10)}.csv`);
+                    pushToast(`ส่งออก ${filtered.length} รายการเป็น CSV แล้ว`);
+                  }}>
+                    <Icons.Pkg size={14}/> รายการที่แสดงอยู่ (CSV · {filtered.length})
+                  </button>
+                  <button className="popover-item" onClick={() => {
+                    setExportOpen(false);
+                    const w = window.open("", "_blank");
             const rows = filtered.map(p => { const s = stockStatus(p); return `<tr><td class="mono">${p.sku}</td><td>${p.name}</td><td>${p.cat}</td><td class="r mono">${p.qty}</td><td class="r mono">${p.reorder}</td><td class="mono">${p.loc}</td><td>${s.label}</td></tr>`; }).join("");
             w.document.write(`<!DOCTYPE html><html><head><title>รายงานสินค้าคงคลัง</title><style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 4px}p{margin:0 0 16px;color:#555}button{padding:8px 18px;cursor:pointer;margin-bottom:16px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600}td{padding:7px 10px;border-bottom:1px solid #eee}.mono{font-family:monospace;font-size:12px}.r{text-align:right}@media print{button{display:none!important}}</style></head><body><h2>รายงานสินค้าคงคลัง</h2><p>${new Date().toLocaleDateString("th-TH",{dateStyle:"full"})} · ${filtered.length} รายการ</p><button onclick="window.print()">🖨 พิมพ์</button><table><thead><tr><th>SKU</th><th>ชื่อสินค้า</th><th>หมวด</th><th class="r">คงเหลือ</th><th class="r">จุดสั่ง</th><th>ตำแหน่ง</th><th>สถานะ</th></tr></thead><tbody>${rows}</tbody></table></body></html>`);
             w.document.close();
-          }}><Icons.Print/> พิมพ์รายงาน</button>}
+                  }}>
+                    <Icons.Print size={14}/> พิมพ์รายงาน
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {canDo("addProduct") && canOpenPage("import") && <button className="btn" onClick={() => goTo && goTo("import")}><Icons.Pkg size={14}/> นำเข้า SKU จาก Excel</button>}
           {canAdjustStock() && <button className="btn" onClick={() => setAdjOpen(true)}><Icons.Refresh size={14}/> ปรับสต็อก</button>}
           {canDo("addProduct") && <button className="btn btn-accent" onClick={() => setAddOpen(true)}><Icons.Plus/> เพิ่ม SKU</button>}
@@ -3018,9 +3159,10 @@ function Inventory({ pushToast, density, goTo, focus }) {
             <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา SKU, ชื่อสินค้า, ผู้จัดส่ง..."/>
             {q && <span style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}><Icons.X size={13}/></span>}
           </div>
-          <div className="seg">
-            {cats.map(c => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}
-          </div>
+          {/* 21 categories as buttons ran 1,500 px wide and scrolled the page sideways. */}
+          <select className="input inv-cat-select" value={cat} onChange={e => setCat(e.target.value)} title="หมวดหมู่">
+            {cats.map(c => <option key={c} value={c}>{c === "ทั้งหมด" ? "ทุกหมวดหมู่" : c}</option>)}
+          </select>
           <div className="spacer"/>
           {(unstoredCount > 0 || locFilter) && (
             <button
@@ -3049,7 +3191,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
             <span>กรองอยู่:</span>
             {q && <span className="badge badge-neutral">ค้นหา "{q}" <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setQ("")}/></span>}
             {cat !== "ทั้งหมด" && <span className="badge badge-neutral">หมวด: {cat} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setCat("ทั้งหมด")}/></span>}
-            {statusFilter !== "all" && <span className="badge badge-neutral">สถานะ: {statusFilter} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setStatusFilter("all")}/></span>}
+            {statusFilter !== "all" && <span className="badge badge-neutral">สถานะ: {STATUS_TH[statusFilter] || statusFilter} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setStatusFilter("all")}/></span>}
             {locFilter && <span className="badge badge-warning">ยังไม่จัดเก็บ <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setLocFilter(false)}/></span>}
             <span className="spacer"/>
             <span><strong className="tnum" style={{ color: "var(--fg)" }}>{filtered.length}</strong> จาก {products.length} รายการ</span>
@@ -3080,13 +3222,14 @@ function Inventory({ pushToast, density, goTo, focus }) {
             <BulkBtn icon={<Icons.Map size={13}/>} label="จัดเก็บเข้าตำแหน่ง" onClick={() => setAssignSkus([...selectedSkus])}/>
             {canDo("editProduct") && <BulkBtn icon={<Icons.Edit size={13}/>} label="แก้ไขทั้งหมด" onClick={() => setBulkOpen(true)}/>}
             <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์บาร์โค้ด" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); if (typeof printBarcodeLabels === "function") printBarcodeLabels(items, pushToast); }}/>
-            {canDo("exportData") && <BulkBtn icon={<Icons.Pkg size={13}/>} label="ส่งออก Excel" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); exportInventoryCsv(items, `สินค้าคงคลัง_เลือก_${new Date().toISOString().slice(0,10)}.csv`); pushToast(`ส่งออก ${items.length} รายการแล้ว`); }}/>}
+            {canDo("exportData") && <BulkBtn icon={<Icons.Pkg size={13}/>} label="ส่งออก CSV" onClick={() => { const items = [...selectedSkus].map(s => products.find(p => p.sku === s)).filter(Boolean); exportInventoryCsv(items, `สินค้าคงคลัง_เลือก_${new Date().toISOString().slice(0,10)}.csv`); pushToast(`ส่งออก ${items.length} รายการแล้ว`); }}/>}
             {canDeleteData() && <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDelete} danger/>}
           </div>
         </div>
       )}
 
-      <div className="card card-tight">
+      {/* Scroll the table inside its card on narrower screens instead of the whole page. */}
+      <div className="card card-tight" style={{ overflowX: "auto" }}>
         <table className="t">
           <thead><tr>
             <th style={{ width: 36 }}>
@@ -3097,13 +3240,13 @@ function Inventory({ pushToast, density, goTo, focus }) {
                 title={allFilteredSelected ? "ยกเลิกเลือกทั้งหมด" : "เลือกทั้งหมด"}
               />
             </th>
-            <th>SKU</th>
-            <th>ชื่อสินค้า</th>
+            <th className="th-sort" onClick={() => sortBy("sku")}>SKU{sortMark("sku")}</th>
+            <th className="th-sort" onClick={() => sortBy("name")}>ชื่อสินค้า{sortMark("name")}</th>
             <th>หมวดหมู่</th>
             <th>ตำแหน่ง</th>
-            <th className="t-num">คงเหลือ</th>
+            <th className="t-num th-sort" onClick={() => sortBy("qty")}>คงเหลือ{sortMark("qty")}</th>
             <th className="t-num">จอง</th>
-            <th className="t-num">พร้อมขาย</th>
+            <th className="t-num th-sort" onClick={() => sortBy("avail")}>พร้อมขาย{sortMark("avail")}</th>
             <th>สถานะ</th>
             <th style={{ width: 1 }}/>
           </tr></thead>
@@ -3126,13 +3269,14 @@ function Inventory({ pushToast, density, goTo, focus }) {
                   </td>
                   <td onClick={() => setOpen(p.sku)}><span className="badge badge-neutral">{p.cat}</span></td>
                   <td onClick={() => setOpen(p.sku)}>
-                    {locIsStored(p.loc, storedCodes) ? (() => {
+                    {productIsStored(p, storedCodes) ? (() => {
                       /* Every place this SKU physically sits, not just the primary
                          shelf — a split product read as if all of it were on one. */
                       const spots = (typeof productPositions === "function") ? productPositions(p) : [];
-                      const extra = spots.filter(s => s.loc !== p.loc);
-                      const lp = locParts(p.loc);
-                      const primaryQty = spots.length > 1 ? qtyAtLocation(p.sku, p.loc) : null;
+                      const home = productHomeLoc(p, storedCodes);
+                      const extra = spots.filter(s => s.loc !== home);
+                      const lp = locParts(home);
+                      const primaryQty = spots.length > 1 ? qtyAtLocation(p.sku, home) : null;
                       return (
                         <div style={{ lineHeight: 1.3 }}>
                           <span className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{lp.pos}</span>
@@ -3142,7 +3286,10 @@ function Inventory({ pushToast, density, goTo, focus }) {
                             const ep = locParts(s.loc);
                             return (
                               <div key={s.loc} style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 1 }}>
-                                <span className="mono" style={{ fontWeight: 600, color: "var(--fg-2)" }}>{ep.pos}</span>
+                                {/* A row filed under "-" / a deleted shelf isn't a place to walk to. */}
+                                {locIsStored(s.loc, storedCodes)
+                                  ? <span className="mono" style={{ fontWeight: 600, color: "var(--fg-2)" }}>{ep.pos}</span>
+                                  : <span style={{ fontWeight: 600, color: "var(--warning)" }}>ยังไม่ระบุตำแหน่ง</span>}
                                 <span className="tnum"> ×{s.qty}</span>
                               </div>
                             );
@@ -3171,7 +3318,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
               <tr><td colSpan="10" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
                 <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
                 <div>ไม่พบสินค้าที่ตรงกับตัวกรอง</div>
-                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); }}>ล้างตัวกรอง</button>
+                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); }}>ล้างตัวกรอง</button>
               </td></tr>
             )}
           </tbody>
@@ -3226,7 +3373,7 @@ function BulkBtn({ icon, label, onClick, danger }) {
 
 function BulkEditModal({ count, products, categories, onClose, onApply }) {
   const [enabled, setEnabled] = useState({ cat: false, loc: false, supplier: false, reorder: false });
-  const [vals, setVals] = useState({ cat: categories[0] || "", loc: "", supplier: "", reorder: 50 });
+  const [vals, setVals] = useState({ cat: categories[0] || "", loc: "", supplier: "", reorder: 2 });
   const suppliers = useMemo(() => [...new Set(products.map(p => p.supplier))], [products]);
 
   const hasChanges = Object.values(enabled).some(Boolean);
@@ -3372,7 +3519,7 @@ function AssignLocationModal({ skus, products, storedCodes, onClose, onApply, on
 
           <div className="stack" style={{ gap: 6, marginTop: 14, maxHeight: 240, overflowY: "auto" }}>
             {items.slice(0, 30).map(p => {
-              const stored = locIsStored(p.loc, storedCodes);
+              const stored = productIsStored(p, storedCodes);
               const lp = stored ? locParts(p.loc) : null;
               return (
                 <div key={p.sku} className="row" style={{ gap: 10, padding: "6px 8px", background: "var(--surface-2)", borderRadius: 8 }}>
@@ -3483,7 +3630,7 @@ function AddSkuModal({ products, categories, onClose, onAdd }) {
     cat: categories[0] || "",
     brand: "",
     supplier: "",
-    cost: "", price: "", qty: "", reorder: "50", loc: ""
+    cost: "", price: "", qty: "", reorder: "2", loc: ""
   });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const [pickedImage, setPickedImage] = useState("");
@@ -3767,12 +3914,17 @@ function LocationSplitPanel({ product, pushToast }) {
       </div>
 
       {!editing && split.map((r, i) => {
-        const lp = typeof locParts === "function" ? locParts(r.loc) : null;
-        const primary = r.loc === product.loc;
+        // A row filed under "-" / a deleted shelf is not a place — say so, and
+        // never tag it หยิบก่อน (pick-first = defaultPickLoc, the first REAL shelf).
+        const real = codes.indexOf(r.loc) >= 0;
+        const lp = real && typeof locParts === "function" ? locParts(r.loc) : null;
+        const primary = r.loc === (typeof defaultPickLoc === "function" ? defaultPickLoc(product) : product.loc);
         return (
           <div key={r.loc + i} className="row" style={{ justifyContent: "space-between", padding: "7px 0", borderTop: i ? "1px solid var(--border)" : "none" }}>
             <div style={{ minWidth: 0 }}>
-              <div className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{lp ? lp.pos : r.loc}</div>
+              {real
+                ? <div className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{lp ? lp.pos : r.loc}</div>
+                : <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--warning)" }}>ยังไม่ระบุตำแหน่ง</div>}
               <div style={{ fontSize: 10.5, color: "var(--muted)" }}>
                 {lp ? lp.building + (lp.floor ? " · " + lp.floor : "") : ""}
                 {primary && <span style={{ marginLeft: 6, color: "var(--accent)" }}>· หยิบก่อน</span>}
@@ -3903,9 +4055,9 @@ function ProductDrawer({ product, onClose, pushToast }) {
               </span>
             }/>
             <Stat label="หมวดหมู่" value={product.cat}/>
-            <Stat label="ตำแหน่ง" value={locIsStored(product.loc)
+            <Stat label="ตำแหน่ง" value={productIsStored(product)
               ? <span>
-                  <span className="mono">{product.loc}</span>
+                  <span className="mono">{productHomeLoc(product)}</span>
                   {/* A split product's loc is only where you pick FIRST — say so,
                       or the drawer reads as "all 83 are in A" like it used to. */}
                   {typeof hasLocSplit === "function" && hasLocSplit(product.sku) && (
@@ -4299,7 +4451,8 @@ function QtyStepper({ value, onChange, onBlur, min = 0, max, small, title }) {
 function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const [rows, setRows] = useState(() => (product ? [{ sku: product.sku, amount: "" }] : []));
   const [mode, setMode] = useState("remove"); // add | remove | set
-  const [reasonId, setReasonId] = useState("");
+  const [reasonId, setReasonIdRaw] = useState(() => (typeof lastAdjustReason === "function" ? lastAdjustReason() : ""));
+  const setReasonId = (id) => { setReasonIdRaw(id); if (typeof rememberAdjustReason === "function") rememberAdjustReason(id); };
   const [note, setNote] = useState("");
   const [scan, setScan] = useState("");
   const [q, setQ] = useState("");
@@ -4365,7 +4518,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
 
   const resetForNext = () => {
     busyRef.current = false; setBusy(false);
-    setRows([]); setMode("remove"); setReasonId(""); setNote(""); setScan(""); setQ(""); setShowN(30); setPickOpen(true);
+    setRows([]); setMode("remove"); setReasonIdRaw(typeof lastAdjustReason === "function" ? lastAdjustReason() : ""); setNote(""); setScan(""); setQ(""); setShowN(30); setPickOpen(true);
     setTimeout(() => scanRef.current?.focus(), 60);
   };
 
@@ -4619,11 +4772,11 @@ function Locations({ goTo }) {
   // tree state refreshes on both products- and locations-change, so this stays live
   const unstored = useMemo(() => countUnstoredProducts(), [tree]);
 
-  const askBuilding = () => { const n = prompt("ชื่ออาคาร / โซน (เช่น สภ.)"); if (n && n.trim()) addBuilding(n.trim()); };
-  const askFloor    = (b) => { const n = prompt(`เพิ่มชั้นในอาคาร "${b}" (เช่น ชั้น 3)`); if (n && n.trim()) addFloor(b, n.trim()); };
-  const askPos      = (b, f) => { const n = prompt(`เพิ่มตำแหน่งใน ${b} · ${f} (เช่น A1)`); if (n && n.trim()) addPosition(b, f, n.trim()); };
-  const editB = (b) => { const n = prompt("เปลี่ยนชื่ออาคาร", b); if (n && n.trim() && n.trim() !== b) renameBuilding(b, n.trim()); };
-  const editF = (b, f) => { const n = prompt("เปลี่ยนชื่อชั้น", f); if (n && n.trim() && n.trim() !== f) renameFloor(b, f, n.trim()); };
+  const askBuilding = async () => { const n = await askText("เพิ่มอาคาร / โซน", "", { label: "ชื่ออาคาร / โซน", placeholder: "เช่น สภ., ตึกพาณิชย์" }); if (n) addBuilding(n); };
+  const askFloor    = async (b) => { const n = await askText(`เพิ่มชั้นในอาคาร "${b}"`, "", { label: "ชื่อชั้น", placeholder: "เช่น ชั้น 3" }); if (n) addFloor(b, n); };
+  const askPos      = async (b, f) => { const n = await askText(`เพิ่มตำแหน่งใน ${b} · ${f}`, "", { label: "ชื่อตำแหน่ง", placeholder: "เช่น A1, กล่อง 12" }); if (n) addPosition(b, f, n); };
+  const editB = async (b) => { const n = await askText("เปลี่ยนชื่ออาคาร", b, { okLabel: "เปลี่ยนชื่อ" }); if (n && n !== b) renameBuilding(b, n); };
+  const editF = async (b, f) => { const n = await askText("เปลี่ยนชื่อชั้น", f, { okLabel: "เปลี่ยนชื่อ" }); if (n && n !== f) renameFloor(b, f, n); };
 
   return (
     <div className="stack" style={{ gap: 24 }}>
@@ -4667,11 +4820,11 @@ function Locations({ goTo }) {
               )}
               {res.hits.map(p => {
                 const st = stockStatus(p);
-                const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
+                const parts = ((h) => h ? locParts(h) : null)(productHomeLoc(p));
                 return (
                   <div key={p.sku} className="row"
                     onClick={() => parts
-                      ? setSelected({ building: parts.building, floor: parts.floor, pos: parts.pos, code: p.loc, highlightSku: p.sku })
+                      ? setSelected({ building: parts.building, floor: parts.floor, pos: parts.pos, code: parts.code, highlightSku: p.sku })
                       : (canAssign && setAssignSku(p.sku))}
                     title={parts ? "เปิดตำแหน่งนี้" : (canAssign ? "เลือกตำแหน่งจัดเก็บให้สินค้านี้" : "บัญชีนี้ไม่มีสิทธิ์แก้ไขตำแหน่งจัดเก็บ")}
                     style={{ gap: 12, padding: 10, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, cursor: (parts || canAssign) ? "pointer" : "default" }}>
@@ -4819,8 +4972,13 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
   const [viewSku, setViewSku] = useState(null);
   useEffect(() => { setShowItems(40); setViewSku(null); }, [loc.code]);
   const toast = (m) => window.dispatchEvent(new CustomEvent("ims-toast", { detail: m }));
+  // "Already here" = pieces filed at this shelf (product_locations), not p.loc —
+  // p.loc is "-" on live data, which listed shelved products as addable.
+  const isHere = (p) => (p.loc || "") === loc.code
+    || ((typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, loc.code) : 0) > 0;
   const assign = async (p) => {
-    const from = p.loc && p.loc !== loc.code ? locParts(p.loc) : null;
+    const home = productHomeLoc(p);
+    const from = home && home !== loc.code ? locParts(home) : null;
     const rows = (typeof locSplitFor === "function") ? locSplitFor(p.sku, p.loc) : [];
     if (rows.length && typeof moveStockToLocation === "function") {
       /* Recorded split → the rows must move, not just p.loc (a bare p.loc write
@@ -4829,11 +4987,11 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
          primary pile); single-position sku moves whole, no question. */
       let pieces = Number(p.qty) || 0;
       if (rows.length > 1) {
-        const atPrimary = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, p.loc) : 0;
-        const ans = prompt(
-          `“${p.name}” แยกเก็บ ${rows.length} ตำแหน่ง (รวม ${pieces} ชิ้น)\nย้ายมา ${loc.pos} กี่ชิ้น?`,
-          String(atPrimary > 0 ? atPrimary : pieces)
-        );
+        const atPrimary = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, home || p.loc) : 0;
+        const ans = await askText(`ย้ายมา ${loc.pos} กี่ชิ้น?`, String(atPrimary > 0 ? atPrimary : pieces), {
+          label: "จำนวนชิ้น", type: "number", okLabel: "ย้าย",
+          message: `“${p.name}” แยกเก็บ ${rows.length} ตำแหน่ง (รวม ${pieces} ชิ้น)`
+        });
         if (ans === null) return;
         pieces = Math.round(Number(ans));
         if (!pieces || pieces <= 0 || isNaN(pieces)) return;
@@ -4868,7 +5026,7 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
     const res = searchProductsForLocation(addQ, 2);
     const hit = exact || (res.hits.length === 1 ? res.hits[0] : null);
     if (!hit) return;
-    if ((hit.loc || "") !== loc.code) assign(hit);
+    if (!isHere(hit)) assign(hit);
     setAddQ("");
   };
   // Camera scan → assign here. Resolves exactly like the wedge path (exact SKU,
@@ -4884,7 +5042,7 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
     if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast("ไม่พบ SKU: " + q); return; }
     if (typeof playScanBeep === "function") playScanBeep();
     const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, loc.code) : 0;
-    if ((p.loc || "") === loc.code && !(typeof hasLocSplit === "function" && hasLocSplit(p.sku))) {
+    if (isHere(p) && !(typeof hasLocSplit === "function" && hasLocSplit(p.sku))) {
       toast(`“${p.name}” อยู่ใน ${loc.pos} อยู่แล้ว (${here || p.qty} ชิ้น)`);
       return;
     }
@@ -4892,8 +5050,9 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
   };
   // One row of the picker — used by both the search results and the browse list.
   const pickRow = (p) => {
-    const here = (p.loc || "") === loc.code;
-    const from = !here && locIsStored(p.loc) ? locParts(p.loc) : null;
+    const here = isHere(p);
+    const home = here ? "" : productHomeLoc(p);
+    const from = home && home !== loc.code ? locParts(home) : null;
     return (
       <div key={p.sku} className="row" onClick={() => { if (!here) assign(p); }}
         style={{ gap: 10, padding: 8, borderRadius: 8, background: here ? "var(--accent-soft)" : "var(--surface-2)", cursor: here ? "default" : "pointer" }}>
@@ -4936,9 +5095,9 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
     w.document.close();
   };
 
-  const renamePos = () => {
-    const n = prompt("เปลี่ยนชื่อตำแหน่ง", loc.pos);
-    if (n && n.trim() && n.trim() !== loc.pos) { renamePosition(loc.building, loc.floor, loc.pos, n.trim()); onClose(); }
+  const renamePos = async () => {
+    const n = await askText("เปลี่ยนชื่อตำแหน่ง", loc.pos, { okLabel: "เปลี่ยนชื่อ" });
+    if (n && n !== loc.pos) { renamePosition(loc.building, loc.floor, loc.pos, n); onClose(); }
   };
 
   return (
@@ -4992,8 +5151,8 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
                 // No query → browse the whole catalog right here; unplaced products first
                 // (stale codes count as unplaced, same as the ยังไม่จัดเก็บ badge).
                 const stored = storedLocSet();
-                const browse = PRODUCTS.filter(p => (p.loc || "") !== loc.code)
-                  .sort((a, b) => ((locIsStored(a.loc, stored) ? 1 : 0) - (locIsStored(b.loc, stored) ? 1 : 0)) || String(a.name || "").localeCompare(String(b.name || ""), "th"));
+                const browse = PRODUCTS.filter(p => !isHere(p))
+                  .sort((a, b) => ((productIsStored(a, stored) ? 1 : 0) - (productIsStored(b, stored) ? 1 : 0)) || String(a.name || "").localeCompare(String(b.name || ""), "th"));
                 return (
                   <div className="stack" style={{ gap: 4, marginTop: 8 }}>
                     {browse.length === 0
@@ -5019,8 +5178,10 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
               // Pieces AT THIS POSITION, not the product's grand total — a picker
               // sent here for 6 must not read the 12 that include another shelf.
               const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, loc.code) : p.qty;
-              const isPrimary = (p.loc || "") === loc.code;
-              const main = !isPrimary && locIsStored(p.loc) ? locParts(p.loc) : null;
+              // Primary / "หลักอยู่" from the real home shelf — p.loc is "-" on live data.
+              const home = productHomeLoc(p);
+              const isPrimary = home === loc.code;
+              const main = home && home !== loc.code ? locParts(home) : null;
               const split = typeof hasLocSplit === "function" && hasLocSplit(p.sku);
               return (
                 <div key={p.sku} className="row" onClick={() => setViewSku(p.sku)} title="ดูรายละเอียดสินค้า"
@@ -5222,6 +5383,9 @@ function LocPickSelect({ sku, value, onChange, need, label }) {
   if (spots.length <= 1) return null;
   const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(sku, value) : 0;
   const short = Number(need) > 0 && here < Number(need);
+  // "-" / deleted-shelf rows read as unplaced and are never tagged หยิบก่อน.
+  const stored = storedLocSet();
+  const first = defaultPickLoc(p);
   return (
     <div style={{ marginTop: 6 }}>
       <div className="row" style={{ gap: 6, alignItems: "center" }}>
@@ -5232,7 +5396,7 @@ function LocPickSelect({ sku, value, onChange, need, label }) {
           {!value && <option value="">— เลือกตำแหน่ง —</option>}
           {spots.map(s => (
             <option key={s.loc} value={s.loc} disabled={s.qty <= 0}>
-              {locParts(s.loc).pos} ×{s.qty}{s.loc === p.loc ? " · หยิบก่อน" : ""}
+              {locIsStored(s.loc, stored) ? locParts(s.loc).pos : "ยังไม่ระบุตำแหน่ง"} ×{s.qty}{s.loc === first ? " · หยิบก่อน" : ""}
             </option>
           ))}
         </select>
@@ -6141,7 +6305,7 @@ function ProductFinder({ pushToast, goTo, focus }) {
             {res.hits.map(p => {
               const eq = effQty(p.sku);
               const st = stockStatus({ ...p, qty: eq });
-              const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
+              const parts = ((h) => h ? locParts(h) : null)(productHomeLoc(p));
               const url = typeof resolveProductImage === "function" ? resolveProductImage(p.sku, images) : "";
               return (
                 <div key={p.sku} className="card" onClick={() => setSelectedSku(p.sku)}
@@ -6187,8 +6351,8 @@ function ProductFinder({ pushToast, goTo, focus }) {
         const eq = effQty(p.sku);
         const st = stockStatus({ ...p, qty: eq });
         const avail = Math.max(0, eq - (p.reserved || 0));
-        const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
-        const locPhoto = p.loc && typeof getLocationImage === "function" ? getLocationImage(p.loc, locImages) : "";
+        const parts = ((h) => h ? locParts(h) : null)(productHomeLoc(p));
+        const locPhoto = productHomeLoc(p) && typeof getLocationImage === "function" ? getLocationImage(productHomeLoc(p), locImages) : "";
         const url = typeof resolveProductImage === "function" ? resolveProductImage(p.sku, images) : "";
         const close = () => setSelectedSku(null);
         return (
@@ -6400,7 +6564,7 @@ function PackQueue({ pushToast, goTo, user }) {
         </div>
         <div className="row">
           {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
-          {canOpenPage("handheld") && <button className="btn btn-primary" onClick={() => goTo("handheld")}><Icons.Phone size={14}/> เปิดโหมดมือถือเพื่อหยิบของ</button>}
+          <span className="badge badge-neutral" title="การหยิบ ติ๊ก และสแกน ทำบนมือถือ"><Icons.Phone size={12}/> หยิบของบนมือถือ: เพิ่มเติม → แพ็คสินค้า</span>
         </div>
       </div>
 

@@ -44,6 +44,12 @@ const Icons = {
   Camera:(p)=><Ico {...p}><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></Ico>,
   Spark:(p)=><Ico {...p}><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18 14l.8 2.2 2.2.8-2.2.8L18 20l-.8-2.2L15 17l2.2-.8z"/></Ico>,
   Lock: (p) => <Ico {...p}><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></Ico>,
+  Users:(p) => <Ico {...p}><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8"/><path d="M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/></Ico>,
+  Chart:(p) => <Ico {...p}><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></Ico>,
+  Grid: (p) => <Ico {...p}><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></Ico>,
+  Clipboard:(p) => <Ico {...p}><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1"/><path d="M9 11l2 2 4-4"/><path d="M9 17h6"/></Ico>,
+  Menu: (p) => <Ico {...p}><path d="M4 7h16M4 12h16M4 17h16"/></Ico>,
+  Pack: (p) => <Ico {...p}><path d="M4 8h16v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M3 4h18v4H3z"/><path d="M10 12h4"/></Ico>,
 };
 
 /* Barcode (Code128-ish visual) */

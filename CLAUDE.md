@@ -96,6 +96,14 @@ The app is an installable PWA (`manifest.webmanifest` + PWA icons + `sw.js`, reg
    - **`product_locations` RLS is role-only** (fixed 2026-09-19, `supabase/product-locations-policy-fix.sql`). It was the ONLY table in the database gated on `within_work_hours()` while `products` was not, so a staff member working after 18:00 moved `products.qty` but had the shelf write rejected — permanent drift, and the split editor then refused every later save. DELETE also reaches `staff` now: selling the last piece off a shelf drops that row, and staff can already zero it via UPDATE. **Don't reintroduce a time gate on one side of a two-table write.**
    - **Labels are appended with `appendLabel`, never `saveLabels([...all, x])`.** `saveLabels` diffs-and-DELETEs anything missing from the list it is handed (the labels twin of the retired `saveOrders`), so an append from a slightly stale cache erased other devices' labels — and the orders derived from them. It also early-returns when the mapped rows are identical to `window._DB_LABELS`, which is what stops the desktop Labels screen's persist→`ims-labels-change`→reload→persist cycle from re-upserting the whole queue forever.
 
+5. **Usability conventions** (2026-09-30).
+   - **Shelf display comes from `productHomeLoc(p)` / `productIsStored(p)`, never `locIsStored(p.loc)`.** `products.loc` is only the pick-first position and was "-" on all 424 products (a per-device "one-time" migration in `data.jsx` blanked it on every new browser — now retired; never write product data from a per-device migration). Real shelves live in `product_locations`.
+   - **Staff record most sales through ปรับสต็อก** ("ขายผ่าน … (นอกระบบ)"). `refreshSaleMoves()` loads those `stock_adjustments` rows and `loadSalesRecords()` = orders + those sales; analytics, `channelSalesFor` and `channelToday()` read it. Anything showing sales must use `loadSalesRecords()`, not `loadOrders()`. The static `CHANNELS` const is dead data (always 0) — don't render it.
+   - **Pending work = `isPendingOrder(o)`** (excludes blank label drafts). Status words come from `ORDER_STATUS_TH`; show `orderShortId(o)` / `orderChannelLabel(o)` instead of raw `LBL-NEW-…` ids and channel "ฉลาก".
+   - **`ims-toast` detail may be a string or `{ msg, type }`**; both shells go through `normalizeToast`/`ToastView` in `app.jsx` (rendering the raw object used to blank the whole app).
+   - **`window.__currentUser` is set in `Root`'s render**, before the shells mount — `canDo`/`canOpenPage` read it on first paint.
+   - **No `prompt()`** — use `askText` / `askForm` / `askNewPosition` (`screens.jsx`, on `window`). Long mobile lists render in pages (`showN` + "ดูเพิ่ม").
+
 ## Adding a new top-level page/screen (do ALL of these, or it silently won't show)
 
 A desktop nav page needs **four** edits, and the mobile fork is **separate**:

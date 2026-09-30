@@ -89,9 +89,12 @@ function AnalyticsPage({ pushToast }) {
     const refresh = () => setPv(v => v + 1);
     window.addEventListener("ims-products-change", refresh);
     window.addEventListener("ims-orders-change", refresh);
+    window.addEventListener("ims-sales-change", refresh);
+    if (typeof refreshSaleMoves === "function") refreshSaleMoves();
     return () => {
       window.removeEventListener("ims-products-change", refresh);
       window.removeEventListener("ims-orders-change", refresh);
+      window.removeEventListener("ims-sales-change", refresh);
     };
   }, []);
 
@@ -101,7 +104,7 @@ function AnalyticsPage({ pushToast }) {
   // All bucketed in Bangkok-local time. Revenue uses each SKU's current price.
   const agg = useMemoAn(() => {
     const win = buildAnalyticsWindow(period, _todayBkkIso());
-    const orders = (typeof loadOrders === "function" ? loadOrders() : []) || [];
+    const orders = (typeof loadSalesRecords === "function" ? loadSalesRecords() : (typeof loadOrders === "function" ? loadOrders() : [])) || [];
     const pmap = new Map(PRODUCTS.map(p => [p.sku, p]));
     const costOf = (p) => p ? (p.cost ?? Math.round((Number(p.price) || 0) * 0.6)) : 0;
 

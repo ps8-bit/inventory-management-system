@@ -6,18 +6,17 @@ const ALL_NAV = [
   { id: "dashboard", label: "หน้าหลัก",       icon: Icons.Dash,    group: "main" },
   { id: "inbound",   label: "รับเข้าสินค้า",   icon: Icons.In,      group: "ops"   },
   { id: "outbound",  label: "จัดส่งสินค้า",    icon: Icons.Out,     group: "ops"   },
-  { id: "pack",      label: "แพ็คสินค้า",      icon: Icons.Box,     group: "ops"   },
+  { id: "pack",      label: "แพ็คสินค้า",      icon: Icons.Pack,    group: "ops"   },
   { id: "finder",    label: "ค้นหาสินค้า",     icon: Icons.Search,  group: "ops"   },
   { id: "inventory", label: "สินค้าคงคลัง",    icon: Icons.Box,     group: "stock" },
-  { id: "stocktake", label: "ตรวจนับสต็อก",    icon: Icons.Scan,    group: "stock" },
+  { id: "stocktake", label: "ตรวจนับสต็อก",    icon: Icons.Clipboard, group: "stock" },
   { id: "locations", label: "ตำแหน่งจัดเก็บ",  icon: Icons.Map,     group: "stock" },
   { id: "import",    label: "นำเข้า SKU",      icon: Icons.Pkg,     group: "stock" },
   { id: "labels",    label: "พิมพ์ฉลาก",       icon: Icons.Tag,     group: "ship"  },
   { id: "tracking",  label: "ติดตามพัสดุ",       icon: Icons.Truck,   group: "ship" },
-  { id: "analytics", label: "วิเคราะห์ยอดขาย",     icon: Icons.Dash,    group: "stock" },
+  { id: "analytics", label: "วิเคราะห์ยอดขาย",     icon: Icons.Chart,   group: "main" },
   { id: "history",   label: "ประวัติการแก้ไข", icon: Icons.History, group: "system" },
-  { id: "handheld",  label: "โหมดมือถือ",      icon: Icons.Phone,   group: "ship" },
-  { id: "users",     label: "ผู้ใช้งานและสิทธิ์", icon: Icons.Help,  group: "system" },
+  { id: "users",     label: "ผู้ใช้งานและสิทธิ์", icon: Icons.Users, group: "system" },
   { id: "layout",    label: "ปรับแต่งเลย์เอาต์",  icon: Icons.Edit,  group: "system" },
   { id: "bundles",   label: "ชุดสินค้า",          icon: Icons.Bundle,  group: "stock" },
   { id: "settings",  label: "ตั้งค่าร้านค้า",    icon: Icons.Setting, group: "system" }
@@ -66,13 +65,16 @@ function ordersSnapshot() {
 function computeBadges() {
   // --- inbound: low-stock / out-of-stock products ---
   const inbound = PRODUCTS.filter(p => p.qty <= p.reorder).length;
+  const pendingOf = (o) => (typeof isPendingOrder === "function") ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed");
 
   // --- outbound: orders not yet shipped (Tracking-model view) ---
   const snap = ordersSnapshot();
-  const outbound = snap.filter(o => o.status === "picking" || o.status === "packed").length;
+  // Blank label drafts (no name, no items) are not work waiting — they only
+  // made this badge say "16" for months.
+  const outbound = snap.filter(pendingOf).length;
 
   // --- pack: orders whose stock is cut but nothing has been fetched off the shelf yet ---
-  const pack = snap.filter(o => o.status === "picking").length;
+  const pack = snap.filter(o => o.status === "picking" && pendingOf(o)).length;
 
   // --- labels: items in print queue (prefer Supabase cache) ---
   let labelsArr = window._DB_LABELS || SAMPLE_LABELS;
@@ -82,7 +84,9 @@ function computeBadges() {
       if (raw !== null) { const a = JSON.parse(raw); if (Array.isArray(a)) labelsArr = a; }
     }
   } catch (e) {}
-  const labels = labelsArr.length;
+  // Only labels still waiting for a tracking number — the badge used to count
+  // every label ever made (271, of which 213 were long shipped).
+  const labels = labelsArr.filter(l => !(l && (l.tracking || (l.data && l.data.tracking)))).length;
 
   return {
     inbound:  inbound  > 0 ? inbound  : null,
@@ -181,13 +185,13 @@ function SearchOverlay({ q, setQ, onClose, goToProduct, goToOrder }) {
                 <div style={{ padding:"8px 18px 4px", fontSize:11, fontWeight:600, color:"var(--muted)", letterSpacing:"0.06em", textTransform:"uppercase", marginTop:4 }}>ออร์เดอร์</div>
                 {results.orders.map(o => {
                   const stCls = { picking:"badge-warning", packed:"badge-info", shipped:"badge-success", delivered:"badge-neutral" }[o.status] || "badge-neutral";
-                  const stLab = { picking:"กำลังหยิบ", packed:"พร้อมส่ง", shipped:"ส่งแล้ว", delivered:"จัดส่งสำเร็จ" }[o.status] || o.status;
+                  const stLab = (typeof ORDER_STATUS_TH !== "undefined" && ORDER_STATUS_TH[o.status]) || o.status;
                   return (
                     <div key={o.id} className="search-hit" onClick={() => { goToOrder(o.id); onClose(); }}>
                       <Icons.Truck size={14} style={{ color:"var(--muted)", flexShrink:0 }}/>
                       <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ fontSize:13, fontWeight:500 }}>{o.customer}</div>
-                        <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace" }}>{o.id} · {o.channel}</div>
+                        <div style={{ fontSize:13, fontWeight:500 }}>{o.customer || "ไม่ระบุชื่อ"}</div>
+                        <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace" }}>{typeof orderShortId === "function" ? orderShortId(o) : o.id} · {typeof orderChannelLabel === "function" ? orderChannelLabel(o) : o.channel}</div>
                       </div>
                       <span className={"badge " + stCls} style={{ fontSize:10, flexShrink:0 }}>{stLab}</span>
                     </div>
@@ -206,7 +210,7 @@ function SearchOverlay({ q, setQ, onClose, goToProduct, goToOrder }) {
 function NotifPopover({ onClose, goTo, goToProduct, goToOrder }) {
   const outOfStock = PRODUCTS.filter(p => p.qty === 0);
   const lowStock   = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder);
-  const pending    = ordersSnapshot().filter(o => o.status === "picking" || o.status === "packed");
+  const pending    = ordersSnapshot().filter(o => (typeof isPendingOrder === "function") ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed"));
   const nothing    = outOfStock.length === 0 && lowStock.length === 0 && pending.length === 0;
 
   return (
@@ -304,6 +308,47 @@ function mapSessionToUser(session) {
   return { id: su.id, email, name, role, avatar, active: true };
 }
 
+/* ======== TOASTS ========
+   One implementation for both shells. A toast may arrive as a plain string OR
+   as { msg, type } (several data.jsx paths send the object form). Rendering the
+   raw object used to throw outside every ErrorBoundary and blank the whole app
+   — e.g. right after the offline queue synced. Errors get their own look and
+   stay up longer; a new toast restarts the timer instead of being cut short by
+   the previous one's. */
+const TOAST_ERROR_RE = /ไม่สำเร็จ|ไม่ได้|ไม่มีสิทธิ์|ไม่พบ|ผิดพลาด|ล้มเหลว|ถูกปฏิเสธ|ถูกยกเลิก|error/i;
+const TOAST_WARN_RE  = /คำเตือน|รอซิงค์|กันบันทึกซ้ำ|โปรดตรวจสอบ/;
+function normalizeToast(detail) {
+  let msg = detail, type = null;
+  if (detail && typeof detail === "object") { msg = detail.msg != null ? detail.msg : (detail.message || ""); type = detail.type || null; }
+  msg = msg == null ? "" : String(msg);
+  if (!type) type = TOAST_ERROR_RE.test(msg) ? "error" : TOAST_WARN_RE.test(msg) ? "warn" : "ok";
+  return { msg, type };
+}
+function useToast() {
+  const [toast, setToast] = useStateApp(null);
+  const timerRef = useRefApp(null);
+  const push = (detail) => {
+    const t = normalizeToast(detail);
+    if (!t.msg) return;
+    setToast({ ...t, key: Date.now() });
+    clearTimeout(timerRef.current);
+    const ms = t.type === "error" ? 5500 : t.type === "warn" ? 4500 : Math.min(6000, 2600 + t.msg.length * 25);
+    timerRef.current = setTimeout(() => setToast(null), ms);
+  };
+  useEffectApp(() => () => clearTimeout(timerRef.current), []);
+  return [toast, push, () => setToast(null)];
+}
+function ToastView({ toast, onClose }) {
+  if (!toast) return null;
+  const Icon = toast.type === "error" ? Icons.X : toast.type === "warn" ? Icons.Warn : Icons.Check;
+  return (
+    <div key={toast.key} className={"toast toast-" + toast.type} role={toast.type === "error" ? "alert" : "status"} onClick={onClose}>
+      <span className="toast-icon"><Icon size={13}/></span>
+      <span>{toast.msg}</span>
+    </div>
+  );
+}
+
 /* ======== ROOT WITH AUTH GATE ======== */
 
 /* Detect mobile/tablet via viewport width OR coarse pointer (real touch device).
@@ -329,17 +374,31 @@ function useIsMobile() {
   return mobile;
 }
 
-/* ── Loading screen shown while dbInit() fetches data from Supabase ── */
-function DBLoadingScreen() {
+/* ── Loading screen shown while dbInit() fetches data from Supabase ──
+   Same look as the HTML boot splash so the hand-off is seamless. On a bad
+   connection dbInit can hang with no answer at all, so after a while offer a
+   retry — and, when this device already has cached data, a way in with it
+   (dbInit keeps running and refreshes every screen when it lands). */
+function DBLoadingScreen({ onUseCache, sub }) {
+  const [slow, setSlow] = useStateApp(false);
+  useEffectApp(() => {
+    if (!onUseCache) return;
+    const id = setTimeout(() => setSlow(true), 12000);
+    return () => clearTimeout(id);
+  }, [!!onUseCache]);
+  const hasCache = (() => { try { return !!localStorage.getItem("ims_products"); } catch (e) { return false; } })();
   return (
-    <div style={{
-      display: "flex", flexDirection: "column", alignItems: "center",
-      justifyContent: "center", height: "100vh", gap: 16,
-      background: "var(--bg, #f5f5f5)", color: "var(--fg, #111)"
-    }}>
-      <div style={{ fontSize: 40 }}>📦</div>
-      <div style={{ fontSize: 20, fontWeight: 700 }}>คลังพร้อมส่ง</div>
-      <div style={{ fontSize: 14, opacity: 0.6 }}>กำลังเชื่อมต่อฐานข้อมูล...</div>
+    <div className="boot-splash">
+      <div className="boot-mark">PS</div>
+      <div className="boot-title">PS STOCK</div>
+      <div className="boot-sub">{slow ? "การเชื่อมต่อช้ากว่าปกติ…" : (sub || "กำลังโหลดข้อมูล…")}</div>
+      {!slow && <div className="boot-bar"/>}
+      {slow && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center", padding: "0 16px" }}>
+          <button className="btn" onClick={() => window.location.reload()}>ลองใหม่</button>
+          {hasCache && <button className="btn btn-primary" onClick={onUseCache}>เปิดด้วยข้อมูลล่าสุดในเครื่อง</button>}
+        </div>
+      )}
     </div>
   );
 }
@@ -494,7 +553,12 @@ function Root() {
       checking = true;
       try {
         // (1) Working-hours window — only when the role is actually governed.
-        const store = window._DB_STORE ? { ...DEFAULT_STORE, ...window._DB_STORE } : DEFAULT_STORE;
+        // Fall back to the last store settings this device saw — someone who
+        // opens with cached data (slow network) must still get the work-hours rule.
+        let cachedStore = null;
+        if (!window._DB_STORE) { try { const raw = localStorage.getItem("ims_store"); cachedStore = raw ? JSON.parse(raw) : null; } catch (e) {} }
+        const store = window._DB_STORE ? { ...DEFAULT_STORE, ...window._DB_STORE }
+                    : cachedStore ? { ...DEFAULT_STORE, ...cachedStore } : DEFAULT_STORE;
         const wh = store.workHours;
         const governed = wh && wh.enabled && Array.isArray(wh.roles) && wh.roles.includes(userRole)
                          && typeof workHoursStatus === "function";
@@ -624,10 +688,17 @@ function Root() {
   // Hold rendering until the first access check (suspension + working-hours)
   // passes, so a blocked user is bounced to the login notice without ever
   // seeing the app. If blocked, the effect signs them out → user becomes null.
-  if (!gateReady) return <DBLoadingScreen/>;
+  if (!gateReady) return <DBLoadingScreen onUseCache={!dbReady ? () => setDbReady(true) : null}/>;
 
   // Logged in but DB data not ready yet
-  if (!dbReady) return <DBLoadingScreen/>;
+  if (!dbReady) return <DBLoadingScreen onUseCache={() => setDbReady(true)}/>;
+
+  /* Publish the signed-in user BEFORE the shell's first render. canDo() /
+     canOpenPage() read window.__currentUser; when it was only set in a child
+     useEffect, the first paint resolved every gate as "viewer" — an admin's
+     phone opened without the รับเข้า/จัดส่ง tabs and 3 of 4 home shortcuts
+     until something else re-rendered. */
+  window.__currentUser = user;
 
   if (isMobile) return <MobileFullscreen user={user} onLogout={logout} onSwitchUser={() => {}}/>;
   return <App user={user} onLogout={logout} onSwitchUser={() => {}}/>;
@@ -638,11 +709,7 @@ function Root() {
    When the user is actually on a phone/tablet we drop the frame and
    let it fill the viewport with safe-area insets. */
 function MobileFullscreen({ user, onLogout, onSwitchUser }) {
-  const [toast, setToast] = useStateApp(null);
-  const pushToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 2400);
-  };
+  const [toast, pushToast, closeToast] = useToast();
 
   useEffectApp(() => { window.__currentUser = user; }, [user]);
 
@@ -687,7 +754,7 @@ function MobileFullscreen({ user, onLogout, onSwitchUser }) {
         paddingRight: "env(safe-area-inset-right)"
       }}>
       <MobileApp pushToast={pushToast} user={user} onLogout={onLogout} onSwitchUser={onSwitchUser} fullscreen/>
-      {toast && <div className="toast"><Icons.Check size={14}/> {toast}</div>}
+      <ToastView toast={toast} onClose={closeToast}/>
     </div>
   );
 }
@@ -703,7 +770,7 @@ function App({ user, onLogout, onSwitchUser }) {
      screen's effect — without it a repeat click would be a silent no-op. */
   const [pageFocus, setPageFocus] = useStateApp(null);
   const focusSeqRef = useRefApp(0);
-  const [toast, setToast] = useStateApp(null);
+  const [toast, pushToast, closeToast] = useToast();
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [sellOpen, setSellOpen] = useStateApp(false);
   const [searchOpen, setSearchOpen] = useStateApp(false);
@@ -796,12 +863,7 @@ function App({ user, onLogout, onSwitchUser }) {
   }, [notifOpen]);
 
   const notifCount = PRODUCTS.filter(p => p.qty <= p.reorder).length +
-    ordersSnapshot().filter(o => o.status === "picking" || o.status === "packed").length;
-
-  const pushToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 2400);
-  };
+    ordersSnapshot().filter(o => (typeof isPendingOrder === "function") ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed")).length;
 
   // Global toast bridge: lets non-React code (e.g. saveProductStore in data.jsx)
   // surface a message without a pushToast prop in scope.
@@ -928,14 +990,13 @@ function App({ user, onLogout, onSwitchUser }) {
             <div className="search" onClick={() => { setSearchQ(""); setSearchOpen(true); }} style={{ cursor:"pointer", userSelect:"none" }}>
               <Icons.Search size={14}/>
               <span style={{ fontSize:13, color:"var(--muted)", flex:1 }}>ค้นหา SKU, ออร์เดอร์, ลูกค้า...</span>
-              <span className="kbd">⌘K</span>
+              <span className="kbd">{/Mac|iPhone|iPad/.test(navigator.platform || "") ? "⌘K" : "Ctrl K"}</span>
             </div>
             {canDo("sell") && (
               <button className="btn btn-primary" onClick={() => setSellOpen(true)} style={{ gap: 7 }}>
                 <Icons.Cart size={14}/> ขายสินค้า
               </button>
             )}
-            <button className="btn btn-ghost btn-icon" title="ช่วยเหลือ" onClick={() => alert("สำหรับคำถามเพิ่มเติม ติดต่อ admin@bangkokfulfill.co")}><Icons.Help size={16}/></button>
             {pendingSync > 0 && (
               <div title={`${pendingSync} รายการรอซิงค์`} style={{ display:"flex", alignItems:"center", gap:5, fontSize:12, color:"var(--warning)", cursor:"default", whiteSpace:"nowrap" }}>
                 <Icons.Refresh size={14}/>
@@ -967,7 +1028,6 @@ function App({ user, onLogout, onSwitchUser }) {
           {page === "tracking"  && <TrackingPage pushToast={pushToast} store={store} focus={focusFor("tracking")}/>}
           {page === "analytics" && <AnalyticsPage pushToast={pushToast}/>}
           {page === "history"   && <HistoryPage pushToast={pushToast}/>}
-          {page === "handheld"  && <Handheld pushToast={pushToast}/>}
           {page === "users"     && <UserManagement currentUser={user} pushToast={pushToast} store={store} setStore={setStore} allNav={ALL_NAV}/>}
           {page === "layout"    && <LayoutCustomize navItems={navItems} setNavItems={setNavItems} pushToast={pushToast} allNavItems={ALL_NAV}/>}
           {page === "bundles"   && <BundlePage pushToast={pushToast}/>}
@@ -982,7 +1042,7 @@ function App({ user, onLogout, onSwitchUser }) {
         </div>
       </main>
 
-      {toast && <div className="toast"><Icons.Check size={14}/> {toast}</div>}
+      <ToastView toast={toast} onClose={closeToast}/>
 
       {sellOpen && (
         <SellProductModal
@@ -1044,7 +1104,7 @@ function UserDock({ user, onLogout, onSwitchUser, goTo, canSeeUsers }) {
           {canSeeUsers && (
             <>
               <button className="popover-item" onClick={() => { goTo("users"); setOpen(false); }}>
-                <Icons.Help size={14}/> จัดการสมาชิก
+                <Icons.Users size={14}/> จัดการสมาชิก
               </button>
               <button className="popover-item" onClick={() => { goTo("layout"); setOpen(false); }}>
                 <Icons.Edit size={14}/> ปรับแต่งเลย์เอาต์
