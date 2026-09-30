@@ -5411,6 +5411,176 @@ function LocPickSelect({ sku, value, onChange, need, label }) {
 }
 
 /* ========= SELL PRODUCT MODAL (3-step wizard) ========= */
+/* ========= ขายออก (quick sale) — desktop =========
+   One screen for the everyday sale: scan or search → quantity → channel → done.
+   Writes through commitQuickSale (data.jsx), the same path ปรับสต็อก "ขายผ่าน …"
+   already uses, so analytics and the channel cards count it. Stays open after a
+   sale with the channel kept, ready for the next one. Twin: MQuickSell. */
+function QuickSellModal({ onClose, pushToast }) {
+  const toast = pushToast || ((m) => { try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })); } catch (e) {} });
+  const channels = useMemo(() => (typeof quickSaleChannels === "function" ? quickSaleChannels() : []), []);
+  const [reasonId, setReasonId] = useState(() => (typeof lastAdjustReason === "function" ? lastAdjustReason() : ""));
+  const [lines, setLines] = useState([]);          // [{ sku, qty (string), loc }]
+  const [q, setQ] = useState("");
+  const [note, setNote] = useState("");
+  const [camOpen, setCamOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const searchRef = useRef(null);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const h = () => setTick(t => t + 1);
+    window.addEventListener("ims-products-change", h);
+    window.addEventListener("ims-stock-adj-change", h);
+    setTimeout(() => searchRef.current && searchRef.current.focus(), 60);
+    return () => { window.removeEventListener("ims-products-change", h); window.removeEventListener("ims-stock-adj-change", h); };
+  }, []);
+  const effQty = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : ((PRODUCTS.find(p => p.sku === sku) || {}).qty || 0));
+
+  const add = (sku) => {
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (!p) return false;
+    if (effQty(sku) <= 0) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast(`${p.sku} หมดสต็อก`); return true; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setLines(ls => {
+      const hit = ls.find(l => l.sku === sku);
+      if (hit) return ls.map(l => l.sku === sku ? { ...l, qty: String(Math.min(effQty(sku), (parseInt(l.qty, 10) || 0) + 1)) } : l);
+      return [...ls, { sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "" }];
+    });
+    setQ("");
+    return true;
+  };
+  const lq = q.trim().toLowerCase();
+  const hits = !lq ? [] : PRODUCTS.filter(p => p.sku.toLowerCase().includes(lq) || String(p.name || "").toLowerCase().includes(lq))
+    .sort((a, b) => (a.sku.toLowerCase() === lq ? -1 : b.sku.toLowerCase() === lq ? 1 : 0))
+    .slice(0, 8);
+  const onSearchKey = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const exact = PRODUCTS.find(p => p.sku.toLowerCase() === lq);   // keyboard-wedge scanner
+    if (exact) { add(exact.sku); return; }
+    if (hits.length === 1) { add(hits[0].sku); return; }
+    if (lq && !hits.length) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast("ไม่พบสินค้า: " + q.trim()); }
+  };
+  const onCamScan = (code) => {
+    const c = String(code || "").trim();
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === c.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast("ไม่พบ SKU: " + c); return; }
+    add(p.sku);
+  };
+  const setLine = (sku, patch) => setLines(ls => ls.map(l => l.sku === sku ? { ...l, ...patch } : l));
+  const pieces = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0), 0);
+  const overStock = lines.find(l => (parseInt(l.qty, 10) || 0) > effQty(l.sku));
+  const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy;
+
+  const submit = async () => {
+    if (!canSubmit || busyRef.current) return;
+    busyRef.current = true; setBusy(true);   // synchronous latch — a double-click must not sell twice
+    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim() });
+    busyRef.current = false; setBusy(false);
+    if (!res.ok) { if (res.error) toast(res.error); return; }
+    const ch = channels.find(c => c.id === reasonId);
+    toast(`ขายออก ${res.pieces} ชิ้น (${res.applied} รายการ) · ${ch ? ch.label : ""}` + (res.locWarning ? " — " + res.locWarning : ""));
+    setLines([]); setNote("");
+    setTimeout(() => searchRef.current && searchRef.current.focus(), 60);
+  };
+
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 300 }}/>
+      <div className="modal" style={{ width: 680, maxWidth: "calc(100vw - 40px)", zIndex: 301 }}>
+        <div className="modal-head">
+          <div>
+            <h3>ขายออก</h3>
+            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 2 }}>สแกนหรือค้นหา → จำนวน → ช่องทาง → ยืนยัน · ตัดสต็อกทันทีและนับเข้ายอดขาย</div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose} aria-label="ปิด"><Icons.X/></button>
+        </div>
+        <div className="modal-body">
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>ช่องทางขาย</div>
+          <div className="adj-reasons" style={{ marginBottom: 16 }}>
+            {channels.map(c => (
+              <button key={c.id} type="button" className={"adj-reason" + (reasonId === c.id ? " on" : "")} onClick={() => setReasonId(c.id)}>
+                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 999, background: c.color, marginRight: 6 }}/>{c.label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ position: "relative" }}>
+            <div className="row" style={{ gap: 8 }}>
+              <div className="search" style={{ flex: 1 }}>
+                <Icons.Search size={14}/>
+                <input ref={searchRef} value={q} onChange={e => setQ(e.target.value)} onKeyDown={onSearchKey}
+                  placeholder="สแกนบาร์โค้ด หรือพิมพ์ SKU / ชื่อสินค้า แล้วกด Enter"/>
+              </div>
+              <button className="btn" onClick={() => setCamOpen(o => !o)}><Icons.Camera size={14}/> {camOpen ? "ปิดกล้อง" : "กล้อง"}</button>
+            </div>
+            {hits.length > 0 && (
+              <div className="card" style={{ position: "absolute", left: 0, right: 0, top: "calc(100% + 4px)", zIndex: 5, padding: 4, maxHeight: 320, overflowY: "auto", boxShadow: "var(--shadow-lg)" }}>
+                {hits.map(p => {
+                  const left = effQty(p.sku);
+                  return (
+                    <button key={p.sku} className="popover-item" style={{ width: "100%", gap: 10, opacity: left > 0 ? 1 : 0.5 }} onClick={() => add(p.sku)}>
+                      <ProductImageThumb sku={p.sku} size={32} radius={7}/>
+                      <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
+                        <span style={{ display: "block", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                        <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{p.sku}</span>
+                      </span>
+                      <span className="tnum" style={{ fontSize: 12, color: left > 0 ? "var(--fg-2)" : "var(--danger)" }}>{left > 0 ? `เหลือ ${left}` : "หมด"}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          {camOpen && <div style={{ marginTop: 10 }}><CameraScanner continuous onScan={onCamScan} onClose={() => setCamOpen(false)}/></div>}
+
+          <div style={{ marginTop: 14 }}>
+            {lines.length === 0 && (
+              <div style={{ padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)", borderRadius: 12 }}>
+                ยังไม่มีสินค้า — สแกนหรือค้นหาด้านบน (สแกนซ้ำ = +1)
+              </div>
+            )}
+            {lines.map(l => {
+              const p = PRODUCTS.find(x => x.sku === l.sku) || { sku: l.sku, name: l.sku };
+              const left = effQty(l.sku);
+              const n = parseInt(l.qty, 10) || 0;
+              return (
+                <div key={l.sku} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "10px 0", borderBottom: "1px solid var(--border)" }}>
+                  <ProductImageThumb sku={l.sku} size={40} radius={8}/>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    <div style={{ fontSize: 12, color: n > left ? "var(--danger)" : "var(--muted)" }}>
+                      <span className="mono">{l.sku}</span> · เหลือ {left}{n > 0 && n <= left ? ` → ${left - n}` : ""}{n > left ? " — เกินสต็อก" : ""}
+                    </div>
+                    <LocPickSelect sku={l.sku} value={l.loc} need={n} onChange={loc => setLine(l.sku, { loc })}/>
+                  </div>
+                  <QtyStepper small value={l.qty} min={1} max={left} onChange={v => setLine(l.sku, { qty: v })} title={`จำนวน ${l.sku}`}/>
+                  <button className="btn btn-ghost btn-icon" title="เอาออก" onClick={() => setLines(ls => ls.filter(x => x.sku !== l.sku))}><Icons.X size={14}/></button>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>หมายเหตุ <span style={{ fontWeight: 400, color: "var(--muted)" }}>(ไม่จำเป็น)</span></div>
+            <input className="input" style={{ width: "100%" }} value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, ชื่อลูกค้า"/>
+          </div>
+        </div>
+        <div className="modal-foot" style={{ alignItems: "center" }}>
+          <span style={{ marginRight: "auto", fontSize: 13, color: "var(--muted)" }}>
+            {!reasonId ? "เลือกช่องทางขายก่อน" : pieces ? `${lines.length} รายการ · ${pieces} ชิ้น` : ""}
+          </span>
+          <button className="btn" onClick={onClose}>ปิด</button>
+          <button className="btn btn-primary" disabled={!canSubmit} onClick={submit}>
+            <Icons.Check size={14}/> {busy ? "กำลังบันทึก…" : `ยืนยันขาย${pieces ? " " + pieces + " ชิ้น" : ""}`}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function SellProductModal({ onClose, onSellComplete, presetSku }) {
   const [step, setStep] = useState(1);
   const [sellBusy, setSellBusy] = useState(false);
@@ -6717,4 +6887,5 @@ function PackQueue({ pushToast, goTo, user }) {
   );
 }
 
+Object.assign(window, { QuickSellModal });
 Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel, LocationSelect, PackQueue, QtyStepper });

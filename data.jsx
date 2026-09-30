@@ -888,6 +888,63 @@ function lastAdjustReason() {
 }
 function rememberAdjustReason(id) { try { if (/^sale-/.test(id || "")) localStorage.setItem(ADJ_REASON_KEY, id); } catch (e) {} }
 
+/* ── ขายออก (quick sale) ────────────────────────────────────────────────────
+   The fast way to record a Shopee / Facebook / หน้าร้าน sale: pick products,
+   pick the channel, confirm. It is deliberately the SAME write the team already
+   uses every day (ปรับสต็อก with a "ขายผ่าน …" reason → applyStockAdjustmentBatch
+   → one stock_adjustments row per SKU), so it inherits the atomic RPC, opId
+   idempotency and server-reported history, and the sales show up in analytics
+   and the channel cards through saleMoveOrders() with no new data model.
+   Both forks (desktop QuickSellModal, mobile MQuickSell) call this one function.
+   lines = [{ sku, qty, loc }] → { ok, pieces, applied, error?, duplicate?, locWarning? } */
+function quickSaleChannels() {
+  return ADJUST_REASONS.filter(r => r.channel).map(r => {
+    const ch = CHANNEL_LIST.find(c => c.id === r.channel) || {};
+    return { id: r.id, label: r.id === "sale-offline" ? "หน้าร้าน / ออฟไลน์" : (ch.name || r.label), color: ch.color || "var(--muted)" };
+  });
+}
+function _saleEffQty(sku) {
+  if (typeof getEffectiveQty === "function") return getEffectiveQty(sku);
+  const p = PRODUCTS.find(x => x.sku === sku);
+  return p ? Math.max(0, Number(p.qty) || 0) : 0;
+}
+async function commitQuickSale({ lines, reasonId, note, source }) {
+  const reason = ADJUST_REASONS.find(r => r.id === reasonId && r.channel);
+  if (!reason) return { ok: false, error: "เลือกช่องทางขายก่อน" };
+  // One entry per SKU — the same product added twice (scan + tap) is one sale line.
+  const bySku = new Map();
+  (Array.isArray(lines) ? lines : []).forEach(l => {
+    if (!l || !l.sku) return;
+    const q = Math.max(0, Math.round(Number(l.qty) || 0));
+    if (!q) return;
+    const cur = bySku.get(l.sku);
+    if (cur) cur.qty += q; else bySku.set(l.sku, { sku: l.sku, qty: q, loc: l.loc || "" });
+  });
+  const want = [...bySku.values()];
+  if (!want.length) return { ok: false, error: "ยังไม่ได้เลือกสินค้า" };
+  // Validate against stock BEFORE anything moves — never sell what isn't there.
+  const short = want.find(w => w.qty > _saleEffQty(w.sku));
+  if (short) return { ok: false, error: `สต็อกไม่พอ: ${short.sku} เหลือ ${_saleEffQty(short.sku)} ชิ้น` };
+  const changes = want.map(w => ({ sku: w.sku, delta: -w.qty }));
+  const guardKey = commitFingerprint("quicksale-" + reasonId, changes);
+  if (!claimCommit(guardKey)) { duplicateCommitToast(); return { ok: false, duplicate: true }; }
+  const res = applyStockAdjustmentBatch(changes, { reason, note, source });
+  if (!res.applied) {
+    releaseCommit(guardKey);
+    return { ok: false, error: "บันทึกการขายไม่สำเร็จ" };
+  }
+  rememberAdjustReason(reasonId);
+  // Take the pieces off the shelf the seller picked (same tick as the qty write).
+  let locWarning = "";
+  const locBySku = {};
+  want.forEach(w => { locBySku[w.sku] = w.loc; });
+  const picks = (res.results || changes).filter(r => r.ok !== false).map(r => ({ sku: r.sku, loc: locBySku[r.sku] }));
+  const locRes = await applyLocPicks(picks);
+  if (locRes && locRes.offline) locWarning = "จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์";
+  else if (locRes && locRes.errors && locRes.errors.length) locWarning = "ปรับตำแหน่งไม่สำเร็จ: " + locRes.errors[0].error;
+  return { ok: true, pieces: -res.net, applied: res.applied, skipped: res.skipped, locWarning };
+}
+
 /* Multi-SKU version of the above — one shared reason/note, many products.
    Both ปรับสต็อก UIs (desktop StockAdjustModal, mobile MAdjust) select several
    items at once, and both must stay on the single choke point above, so this
@@ -3347,7 +3404,7 @@ Object.assign(window, {
   CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canOpenPage, canDo, capServerLocked, currentRoleId,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, importProductsBulk, removeProductsFromStore, resetProductStore, renameProductSku,
   deductStockAndPersist, deductManyAndPersist,
-  applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock, lastAdjustReason, rememberAdjustReason,
+  applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock, lastAdjustReason, rememberAdjustReason, quickSaleChannels, commitQuickSale,
   loadOrders, saveOrders, appendOrder,
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
   storedLocSet, locIsStored, countUnstoredProducts, productHomeLoc, productIsStored,

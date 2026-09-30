@@ -186,7 +186,7 @@ function Screen({ ctx }) {
   if (!route.view && !mTabAllowed(route.tab)) return <MNoAccess ctx={ctx}/>;
   // Selling / issuing stock is a capability, not a page — MSell and MIssue have
   // several entry points, so the guard lives here rather than on each button.
-  if ((route.view === "sell" || route.view === "issue") && typeof canDo === "function" && !canDo("sell")) {
+  if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell") && typeof canDo === "function" && !canDo("sell")) {
     return <MNoAccess ctx={ctx}/>;
   }
   if (route.view === "adjust" && typeof canAdjustStock === "function" && !canAdjustStock()) {
@@ -206,6 +206,7 @@ function Screen({ ctx }) {
   if (route.view === "pack-order")return <MPackOrder ctx={ctx}/>;
   if (route.view === "pack-wave") return <MPackWave ctx={ctx}/>;
   if (route.view === "sell")      return <MSell ctx={ctx}/>;
+  if (route.view === "quicksell") return <MQuickSell ctx={ctx}/>;
   if (route.view === "locations") return <MLocations ctx={ctx}/>;
   if (route.view === "labels")    return <MLabels ctx={ctx}/>;
   if (route.view === "label-view")return <MLabelView ctx={ctx}/>;
@@ -339,8 +340,9 @@ function MHome({ ctx }) {
             Screen guard would otherwise bounce the tap to "ไม่มีสิทธิ์เข้าถึง". */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, marginBottom: 14 }}>
           {/* ปรับสต็อก first — it is how the team records Shopee / Facebook / หน้าร้าน sales. */}
-          {typeof canAdjustStock === "function" && canAdjustStock() && canOpenPage("adjust") && <QuickTile icon={<Icons.Refresh size={20}/>} label="ปรับสต็อก / ขายนอกระบบ" color="oklch(0.95 0.05 50)" fg="oklch(0.5 0.16 40)" onClick={() => ctx.push("adjust")}/>}
-          {canDo("sell") && <QuickTile icon={<Icons.Cart size={20}/>} label="ขายสินค้า" color="oklch(0.95 0.05 50)"  fg="oklch(0.5 0.16 40)"  onClick={() => ctx.push("sell")}/>}
+          {canDo("sell") && <QuickTile icon={<Icons.Cart size={20}/>} label="ขายออก" color="oklch(0.95 0.05 50)" fg="oklch(0.5 0.16 40)" onClick={() => ctx.push("quicksell")}/>}
+          {typeof canAdjustStock === "function" && canAdjustStock() && canOpenPage("adjust") && <QuickTile icon={<Icons.Refresh size={20}/>} label="ปรับสต็อก" color="oklch(0.96 0.03 90)" fg="oklch(0.45 0.1 80)" onClick={() => ctx.push("adjust")}/>}
+          {canDo("sell") && <QuickTile icon={<Icons.Truck size={20}/>} label="ขาย + จัดส่ง" color="oklch(0.95 0.03 250)"  fg="oklch(0.42 0.12 250)"  onClick={() => ctx.push("sell")}/>}
           {canOpenPage("inbound") && <QuickTile icon={<Icons.In size={20}/>}   label="รับเข้า"   color="oklch(0.96 0.04 150)" fg="oklch(0.4 0.13 150)" onClick={() => ctx.switchTab("inbound")}/>}
           {canDo("sell") && <QuickTile icon={<Icons.Out size={20}/>}  label="ตัดสต็อก"  color="oklch(0.95 0.04 230)" fg="oklch(0.4 0.13 230)" onClick={() => ctx.push("issue")}/>}
           {canOpenPage("labels") && <QuickTile icon={<Icons.Tag size={20}/>}  label="ฉลาก"     color="oklch(0.96 0.03 310)" fg="oklch(0.4 0.13 310)" onClick={() => ctx.push("labels")}/>}
@@ -1889,6 +1891,162 @@ function MProductDetail({ ctx }) {
    รูปแบบ/เหตุผล/หมายเหตุ — and both funnel through applyStockAdjustmentBatch →
    applyStockAdjustment (data.jsx) so the forks can't diverge. Never creates an
    order — that's MIssue (ตัดสต็อก)'s job. */
+/* =============== ขายออก (quick sale) — mobile twin of QuickSellModal ===============
+   Scan / search → quantity → channel → confirm, through commitQuickSale (data.jsx):
+   the same write as ปรับสต็อก "ขายผ่าน …", so analytics counts it. The screen stays
+   open with the channel kept after each sale, ready for the next one. */
+function MQuickSell({ ctx }) {
+  const channels = useMemoM(() => (typeof quickSaleChannels === "function" ? quickSaleChannels() : []), []);
+  const [reasonId, setReasonId] = useStateM(() => (typeof lastAdjustReason === "function" ? lastAdjustReason() : ""));
+  const [lines, setLines] = useStateM(() => {
+    const want = ctx.route.params && ctx.route.params.sku;
+    const p = want && PRODUCTS.find(x => x.sku === want);
+    return p ? [{ sku: p.sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "" }] : [];
+  });
+  const [q, setQ] = useStateM("");
+  const [note, setNote] = useStateM("");
+  const [camOpen, setCamOpen] = useStateM(false);
+  const [busy, setBusy] = useStateM(false);
+  const busyRef = useRefM(false);
+  const [, setTick] = useStateM(0);
+  useEffectM(() => {
+    const h = () => setTick(t => t + 1);
+    window.addEventListener("ims-products-change", h);
+    window.addEventListener("ims-stock-adj-change", h);
+    return () => { window.removeEventListener("ims-products-change", h); window.removeEventListener("ims-stock-adj-change", h); setCamOpen(false); };
+  }, []);
+  const effQty = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : ((PRODUCTS.find(p => p.sku === sku) || {}).qty || 0));
+
+  const add = (sku) => {
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (!p) return;
+    if (effQty(sku) <= 0) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast(`${p.sku} หมดสต็อก`); return; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setLines(ls => {
+      const hit = ls.find(l => l.sku === sku);
+      if (hit) return ls.map(l => l.sku === sku ? { ...l, qty: String(Math.min(effQty(sku), (parseInt(l.qty, 10) || 0) + 1)) } : l);
+      return [...ls, { sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "" }];
+    });
+    setQ("");
+  };
+  const lq = q.trim().toLowerCase();
+  const hits = !lq ? [] : PRODUCTS.filter(p => p.sku.toLowerCase().includes(lq) || String(p.name || "").toLowerCase().includes(lq))
+    .sort((a, b) => (a.sku.toLowerCase() === lq ? -1 : b.sku.toLowerCase() === lq ? 1 : 0))
+    .slice(0, 8);
+  const onSearchKey = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const exact = PRODUCTS.find(p => p.sku.toLowerCase() === lq);
+    if (exact) { add(exact.sku); return; }
+    if (hits.length === 1) { add(hits[0].sku); return; }
+    if (lq && !hits.length) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast("ไม่พบสินค้า: " + q.trim()); }
+  };
+  const onCamScan = (code) => {
+    const c = String(code || "").trim();
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === c.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast("ไม่พบ SKU: " + c); return; }
+    add(p.sku);
+  };
+  const setLine = (sku, patch) => setLines(ls => ls.map(l => l.sku === sku ? { ...l, ...patch } : l));
+  const pieces = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0), 0);
+  const overStock = lines.find(l => (parseInt(l.qty, 10) || 0) > effQty(l.sku));
+  const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy;
+
+  const submit = async () => {
+    if (!canSubmit || busyRef.current) return;
+    busyRef.current = true; setBusy(true);   // synchronous latch — a double-tap must not sell twice
+    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim(), source: "mobile" });
+    busyRef.current = false; setBusy(false);
+    if (!res.ok) { if (res.error) ctx.pushToast(res.error); return; }
+    const ch = channels.find(c => c.id === reasonId);
+    ctx.pushToast(`ขายออก ${res.pieces} ชิ้น · ${ch ? ch.label : ""}` + (res.locWarning ? " — " + res.locWarning : ""));
+    setLines([]); setNote("");
+  };
+
+  return (
+    <>
+      <div className="m-topbar">
+        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+        <div className="m-title-sub">ขายออก</div>
+        <button className="m-action" onClick={() => setCamOpen(o => !o)} aria-label="สแกน"><Icons.Camera size={16}/></button>
+      </div>
+      <div className="m-content">
+        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>ช่องทางขาย</div>
+        <div className="adj-reasons" style={{ marginBottom: 14 }}>
+          {channels.map(c => (
+            <button key={c.id} type="button" className={"adj-reason" + (reasonId === c.id ? " on" : "")} onClick={() => setReasonId(c.id)}>
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 999, background: c.color, marginRight: 6 }}/>{c.label}
+            </button>
+          ))}
+        </div>
+
+        {camOpen && <div style={{ marginBottom: 10 }}><CameraScanner continuous onScan={onCamScan} onClose={() => setCamOpen(false)}/></div>}
+        <div className="m-search" style={{ marginBottom: hits.length ? 6 : 12 }}>
+          <Icons.Search size={14}/>
+          <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={onSearchKey} placeholder="สแกน / พิมพ์ SKU หรือชื่อสินค้า"/>
+          {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+        </div>
+        {hits.length > 0 && (
+          <div className="m-list" style={{ marginBottom: 12 }}>
+            {hits.map(p => {
+              const left = effQty(p.sku);
+              return (
+                <button key={p.sku} className="m-row" style={{ opacity: left > 0 ? 1 : 0.5 }} onClick={() => add(p.sku)}>
+                  <ProductImageThumb sku={p.sku} size={40} radius={8}/>
+                  <div className="m-row-main">
+                    <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    <div className="m-row-sub"><span className="mono">{p.sku}</span> · {left > 0 ? `เหลือ ${left}` : "หมด"}</div>
+                  </div>
+                  <Icons.Plus size={18} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>สินค้าที่ขาย {lines.length > 0 && <span style={{ color: "var(--accent)" }}>({lines.length})</span>}</div>
+        {lines.length === 0 ? (
+          <div className="m-card" style={{ textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)" }}>
+            สแกนหรือค้นหาด้านบน — สแกนซ้ำ = +1 ชิ้น
+          </div>
+        ) : (
+          <div className="m-list">
+            {lines.map(l => {
+              const p = PRODUCTS.find(x => x.sku === l.sku) || { sku: l.sku, name: l.sku };
+              const left = effQty(l.sku);
+              const n = parseInt(l.qty, 10) || 0;
+              return (
+                <div key={l.sku} className="m-row" style={{ cursor: "default", alignItems: "flex-start" }}>
+                  <ProductImageThumb sku={l.sku} size={40} radius={8}/>
+                  <div className="m-row-main">
+                    <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    <div className="m-row-sub" style={{ color: n > left ? "var(--danger)" : undefined }}>
+                      <span className="mono">{l.sku}</span> · เหลือ {left}{n > left ? " — เกินสต็อก" : ""}
+                    </div>
+                    <MLocPickChips sku={l.sku} value={l.loc} need={n} onChange={loc => setLine(l.sku, { loc })}/>
+                  </div>
+                  <QtyStepper small value={l.qty} min={1} max={left} onChange={v => setLine(l.sku, { qty: v })} title={`จำนวน ${l.sku}`}/>
+                  <button onClick={() => setLines(ls => ls.filter(x => x.sku !== l.sku))} aria-label="เอาออก"
+                    style={{ display: "grid", placeItems: "center", width: 36, height: 36, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0 }}>
+                    <Icons.X size={15}/>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="m-section-label" style={{ padding: "14px 4px 8px" }}>หมายเหตุ (ไม่จำเป็น)</div>
+        <input className="m-input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, ชื่อลูกค้า"/>
+
+        <button className="m-btn-big" style={{ marginTop: 14 }} disabled={!canSubmit} onClick={submit}>
+          <Icons.Check size={16}/> {busy ? "กำลังบันทึก…" : !reasonId ? "เลือกช่องทางขายก่อน" : `ยืนยันขาย${pieces ? " " + pieces + " ชิ้น" : ""}`}
+        </button>
+      </div>
+    </>
+  );
+}
+
 function MAdjust({ ctx }) {
   const [rows, setRows] = useStateM(() => {
     const want = ctx.route.params?.sku;

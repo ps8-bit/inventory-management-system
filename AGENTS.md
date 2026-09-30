@@ -103,6 +103,8 @@ The app is an installable PWA (`manifest.webmanifest` + PWA icons + `sw.js`, reg
    - **`ims-toast` detail may be a string or `{ msg, type }`**; both shells go through `normalizeToast`/`ToastView` in `app.jsx` (rendering the raw object used to blank the whole app).
    - **`window.__currentUser` is set in `Root`'s render**, before the shells mount — `canDo`/`canOpenPage` read it on first paint.
    - **No `prompt()`** — use `askText` / `askForm` / `askNewPosition` (`screens.jsx`, on `window`). Long mobile lists render in pages (`showN` + "ดูเพิ่ม").
+   - **ขายออก (quick sale) is the everyday sale screen** — desktop `QuickSellModal` (topbar primary button) and mobile `MQuickSell` (view `quicksell`, first home tile), both through **`commitQuickSale()`** in `data.jsx`. It deliberately writes through `applyStockAdjustmentBatch` with an ADJUST_REASONS `sale-*` reason (the path staff already used via ปรับสต็อก) + `applyLocPicks`, so no new data model: sales land in `stock_adjustments` and reach analytics via `saleMoveOrders()`. It validates stock per SKU across the whole cart and takes a `claimCommit` latch. "ขาย + จัดส่ง" (`SellProductModal`/`MSell`) remains for orders that need an address/label.
+   - **Live sync:** `products` is NOT in the realtime publication (payloads would carry `cost` to staff). Stock changes arrive via `stock_adjustments` INSERTs; every realtime reload goes through the coalescing `_rtSoon` in `supabase.jsx`; `refreshLiveData()` catches up on foreground (>2 min) and re-subscribe. `orders` is authenticated-read only (the public #track page must use `track-lookup`, never read tables).
 
 ## Adding a new top-level page/screen (do ALL of these, or it silently won't show)
 

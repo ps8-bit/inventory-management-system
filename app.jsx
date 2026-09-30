@@ -773,6 +773,7 @@ function App({ user, onLogout, onSwitchUser }) {
   const [toast, pushToast, closeToast] = useToast();
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [sellOpen, setSellOpen] = useStateApp(false);
+  const [quickSellOpen, setQuickSellOpen] = useStateApp(false);
   const [searchOpen, setSearchOpen] = useStateApp(false);
   const [searchQ, setSearchQ] = useStateApp("");
   const [notifOpen, setNotifOpen] = useStateApp(false);
@@ -992,9 +993,16 @@ function App({ user, onLogout, onSwitchUser }) {
               <span style={{ fontSize:13, color:"var(--muted)", flex:1 }}>ค้นหา SKU, ออร์เดอร์, ลูกค้า...</span>
               <span className="kbd">{/Mac|iPhone|iPad/.test(navigator.platform || "") ? "⌘K" : "Ctrl K"}</span>
             </div>
+            {/* ขายออก = the everyday sale (scan → qty → channel). ขาย + จัดส่ง keeps the
+                full flow with a shipping address for orders that need a label. */}
             {canDo("sell") && (
-              <button className="btn btn-primary" onClick={() => setSellOpen(true)} style={{ gap: 7 }}>
-                <Icons.Cart size={14}/> ขายสินค้า
+              <button className="btn" onClick={() => setSellOpen(true)} style={{ gap: 7 }} title="ขายพร้อมที่อยู่จัดส่งและฉลาก">
+                <Icons.Truck size={14}/> ขาย + จัดส่ง
+              </button>
+            )}
+            {canDo("sell") && (
+              <button className="btn btn-primary" onClick={() => setQuickSellOpen(true)} style={{ gap: 7 }}>
+                <Icons.Cart size={14}/> ขายออก
               </button>
             )}
             {pendingSync > 0 && (
@@ -1054,6 +1062,8 @@ function App({ user, onLogout, onSwitchUser }) {
           }}
         />
       )}
+
+      {quickSellOpen && typeof QuickSellModal === "function" && <QuickSellModal onClose={() => setQuickSellOpen(false)} pushToast={pushToast}/>}
 
       {searchOpen && <SearchOverlay q={searchQ} setQ={setSearchQ} onClose={() => setSearchOpen(false)} goToProduct={goToProduct} goToOrder={goToOrder}/>}
 
