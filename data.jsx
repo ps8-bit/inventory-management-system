@@ -672,6 +672,9 @@ function writeLedgerRows(rows) {
   if (typeof navigator !== "undefined" && navigator.onLine === false) { keep(); return Promise.resolve({ queued: true }); }
   return dbInsertStockAdjustment(list).then(res => {
     if (res && res.error && !_ledgerRefused(res.error)) keep();
+    // Open movement-history lists re-read now that the row really exists
+    // (they used to guess with a 900 ms timer and miss slow inserts).
+    if (res && res.ok) { try { window.dispatchEvent(new CustomEvent("ims-ledger-change", { detail: { skus: list.map(r => r.sku) } })); } catch (e) {} }
     return res || { ok: true };
   }).catch(e => { keep(); return { error: String(e) }; });
 }

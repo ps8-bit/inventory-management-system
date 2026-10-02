@@ -731,7 +731,7 @@ function MInbound({ ctx }) {
               addReceived(product, qty);
               if (typeof recordChange === "function") {
                 recordChange({
-                  entity: "product", action: "add",
+                  entity: "product", entityId: product.sku, action: "add",
                   summary: `เพิ่มสินค้าใหม่ ${product.sku} — ${product.name} (สร้างจากการสแกนรับเข้า)`,
                 });
               }
@@ -1660,7 +1660,11 @@ function MProductDetail({ ctx }) {
     let t = null;
     const bump = () => { if (t) clearTimeout(t); t = setTimeout(() => setMovesTick(v => v + 1), 900); };
     window.addEventListener("ims-products-change", bump);
-    return () => { if (t) clearTimeout(t); window.removeEventListener("ims-products-change", bump); };
+    // Fired once a history row has actually been written (this device), and on
+    // a realtime stock event from another one — no more racing the insert.
+    const now = () => setMovesTick(v => v + 1);
+    window.addEventListener("ims-ledger-change", now);
+    return () => { if (t) clearTimeout(t); window.removeEventListener("ims-products-change", bump); window.removeEventListener("ims-ledger-change", now); };
   }, []);
   const moveSku = ctx.route.params?.sku;
   useEffectM(() => {
@@ -1700,7 +1704,8 @@ function MProductDetail({ ctx }) {
       if (_qtyDelta) auditChanges.push({ label: "qty", to: `${_qtyDelta > 0 ? "+" : ""}${_qtyDelta} ชิ้น` });
       recordChange({
         entity: "product", entityId: p.sku, action: "update",
-        summary: `แก้ไขข้อมูลสินค้า ${fields.name || p.name} (${p.sku}) (มือถือ)`,
+        // The quantity goes in the summary — it is all the activity feed shows.
+        summary: `แก้ไขข้อมูลสินค้า ${fields.name || p.name} (${p.sku})${_qtyDelta ? ` จำนวน ${_qtyDelta > 0 ? "+" : ""}${_qtyDelta} ชิ้น` : ""} (มือถือ)`,
         changes: auditChanges
       });
     }
@@ -7430,8 +7435,8 @@ function MHistory({ ctx }) {
     if (!got) ctx.pushToast("โหลดครบทุกรายการแล้ว");
   };
 
-  const entts = ["all", "product", "bundle", "order", "user"];
-  const entLabel = { all: "ทั้งหมด", product: "สินค้า", bundle: "ชุดสินค้า", order: "ออร์เดอร์", user: "ผู้ใช้" };
+  const entts = ["all", "inbound", "product", "bundle", "order", "user"];
+  const entLabel = { all: "ทั้งหมด", inbound: "รับเข้า", product: "สินค้า", bundle: "ชุดสินค้า", order: "ออร์เดอร์", user: "ผู้ใช้" };
 
   /* Return a handler that opens the record an entry changed, or null when there
      is nothing to open (no entityId, bulk entry, deleted record, or an entity
@@ -7453,10 +7458,12 @@ function MHistory({ ctx }) {
 
   const source = day ? (dayRows || []) : log;
   const filtered = source.filter(e => {
-    if (filter !== "all" && e.entity !== filter) return false;
+    // "รับเข้า" = the batch close AND the per-product receive entries.
+    if (filter === "inbound") { if (e.entity !== "inbound" && e.action !== "receive") return false; }
+    else if (filter !== "all" && e.entity !== filter) return false;
     if (q) {
       const ql = q.toLowerCase();
-      const hay = ((e.summary || "") + " " + (e.entityId || "") + " " + (e.user?.name || "")).toLowerCase();
+      const hay = ((e.summary || "") + " " + (e.entityId || "") + " " + (e.user?.name || "") + " " + (e.note || "")).toLowerCase();
       if (!hay.includes(ql)) return false;
     }
     return true;

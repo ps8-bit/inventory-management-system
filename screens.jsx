@@ -1418,7 +1418,7 @@ function Inbound({ goTo, pushToast }) {
           </div>
         </div>
         <div className="row">
-          {canOpenPage("history") && <button className="btn" onClick={() => goTo && goTo("history")}><Icons.History/> ประวัติการรับเข้า</button>}
+          {canOpenPage("history") && <button className="btn" onClick={() => { try { sessionStorage.setItem("ims_history_filter", "inbound"); } catch (e) {} goTo && goTo("history"); }}><Icons.History/> ประวัติการรับเข้า</button>}
           <button
             className="btn btn-primary"
             disabled={received.length === 0 || closed}
@@ -1524,7 +1524,7 @@ function Inbound({ goTo, pushToast }) {
               addToReceived(product.sku, product.name, recvShelf(product), qty);
               if (typeof recordChange === "function") {
                 recordChange({
-                  entity: "product", action: "add",
+                  entity: "product", entityId: product.sku, action: "add",
                   summary: `เพิ่มสินค้าใหม่ ${product.sku} — ${product.name} (สร้างจากการสแกนรับเข้า)`,
                 });
               }
@@ -4052,7 +4052,11 @@ function ProductDrawer({ product, onClose, pushToast }) {
     let t = null;
     const bump = () => { if (t) clearTimeout(t); t = setTimeout(() => setMovesTick(v => v + 1), 900); };
     window.addEventListener("ims-products-change", bump);
-    return () => { if (t) clearTimeout(t); window.removeEventListener("ims-products-change", bump); };
+    // Fired once a history row has actually been written (this device), and on
+    // a realtime stock event from another one — no more racing the insert.
+    const now = () => setMovesTick(v => v + 1);
+    window.addEventListener("ims-ledger-change", now);
+    return () => { if (t) clearTimeout(t); window.removeEventListener("ims-products-change", bump); window.removeEventListener("ims-ledger-change", now); };
   }, []);
   useEffect(() => {
     let dead = false;

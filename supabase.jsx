@@ -892,6 +892,9 @@ function _rtStockMoved() {
 function refreshLiveData() {
   _rtStockMoved();
   _rtSoon('orders', _rtReloadOrders);
+  // The activity feeds (กิจกรรมล่าสุด, ประวัติการแก้ไข) read this cache too — a
+  // receive made on the phone while this screen slept never appeared here.
+  _rtSoon('audit', _rtReloadAudit);
 }
 let _liveFocusHooked = false;
 function _hookLiveFocusRefresh() {
@@ -911,7 +914,7 @@ function setupRealtimeSync() {
     // Not published (see above); kept so it works if products is ever added
     // behind a cost-safe mechanism. Coalesced either way.
     .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => _rtStockMoved())
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'stock_adjustments' }, () => _rtStockMoved())
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'stock_adjustments' }, () => { _rtStockMoved(); window.dispatchEvent(new CustomEvent('ims-ledger-change')); })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => _rtSoon('orders', _rtReloadOrders))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'bundles' }, async () => {
       const fresh = await dbLoadBundles();

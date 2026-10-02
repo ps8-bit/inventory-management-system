@@ -216,7 +216,8 @@ const ENTITY_LABELS = {
   user: "ผู้ใช้งาน",
   settings: "ตั้งค่าร้าน",
   layout: "เลย์เอาต์",
-  label: "ฉลาก"
+  label: "ฉลาก",
+  inbound: "รับเข้า"
 };
 
 const ACTION_LABELS = {
@@ -226,6 +227,7 @@ const ACTION_LABELS = {
   adjust: "ปรับสต็อก",
   receive: "รับเข้า",
   close: "ปิดงาน",
+  add: "เพิ่ม",
   "bulk-update": "แก้ไขกลุ่ม",
   "bulk-delete": "ลบกลุ่ม"
 };
@@ -237,6 +239,7 @@ const ACTION_TONES = {
   adjust: "badge-warning",
   receive: "badge-success",
   close: "badge-success",
+  add: "badge-success",
   "bulk-update": "badge-info",
   "bulk-delete": "badge-danger"
 };
@@ -255,7 +258,10 @@ function formatTime(iso) {
 function HistoryPage({ pushToast }) {
   const log = useAuditLog();
   const [q, setQ] = useStateAud("");
-  const [entityFilter, setEntityFilter] = useStateAud("all");
+  // "ประวัติการรับเข้า" on the Inbound page opens this list pre-filtered.
+  const [entityFilter, setEntityFilter] = useStateAud(() => {
+    try { const v = sessionStorage.getItem("ims_history_filter"); sessionStorage.removeItem("ims_history_filter"); return v || "all"; } catch (e) { return "all"; }
+  });
   const [actionFilter, setActionFilter] = useStateAud("all");
   const [expanded, setExpanded] = useStateAud(new Set());
   const [day, setDay] = useStateAud(null);        // null = ทุกวันที่โหลดไว้
@@ -296,11 +302,15 @@ function HistoryPage({ pushToast }) {
 
   const source = day ? (dayRows || []) : log;
   const filtered = source.filter(e => {
-    if (entityFilter !== "all" && e.entity !== entityFilter) return false;
+    // "รับเข้า" = the batch close AND the per-product receive entries.
+    if (entityFilter === "inbound") { if (e.entity !== "inbound" && e.action !== "receive") return false; }
+    else if (entityFilter !== "all" && e.entity !== entityFilter) return false;
     if (actionFilter !== "all" && e.action !== actionFilter) return false;
     if (q) {
       const ql = q.toLowerCase();
-      const match = ((e.entityId || "") + " " + (e.user?.name || "") + " " + (e.note || "")).toLowerCase().includes(ql);
+      // The summary is where the product name / SKU usually is (a batch or a
+      // product created by scan has no entityId) — searching without it missed them.
+      const match = ((e.summary || "") + " " + (e.entityId || "") + " " + (e.user?.name || "") + " " + (e.note || "")).toLowerCase().includes(ql);
       if (!match) return false;
     }
     return true;
@@ -382,7 +392,7 @@ function HistoryPage({ pushToast }) {
         <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
           <div className="search" style={{ width: 320 }}>
             <Icons.Search size={14}/>
-            <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหาออร์เดอร์ ผู้ใช้ หรือบันทึก"/>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหาสินค้า / SKU ออร์เดอร์ ผู้ใช้ หรือบันทึก"/>
           </div>
           <div className="seg">
             <button className={entityFilter === "all" ? "on" : ""} onClick={() => setEntityFilter("all")}>ทั้งหมด</button>
