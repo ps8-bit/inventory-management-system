@@ -2247,6 +2247,7 @@ function MLocPickChips({ sku, value, onChange, need, label }) {
 
 function MSell({ ctx }) {
   const [step, setStep] = useStateM(1); // 1 cart · 2 shipping · 3 confirm
+  const [when, setWhen] = useStateM(""); // วันเวลาที่ขาย — "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [cart, setCart] = useStateM(() => {
     // Pre-add a product when opened from the product detail page ("ขาย")
     const presetSku = ctx.route.params?.sku;
@@ -2435,6 +2436,9 @@ function MSell({ ctx }) {
     }
 
     const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
+    const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+    const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
+    const backLabel = createdAt ? stockOutStampLabel(stamp) : "";
 
     if (typeof recordChange === "function") {
       recordChange({
@@ -2445,7 +2449,7 @@ function MSell({ ctx }) {
           label: item.type === "bundle" ? `ชุด: ${item.name}` : item.name,
           to: `−${item.qty} ${item.type === "bundle" ? "ชุด" : "ชิ้น"}`
         })),
-        note: `ผู้รับ: ${ship.name} · ${ship.addr1} · ${ship.carrier}`
+        note: `ผู้รับ: ${ship.name} · ${ship.addr1} · ${ship.carrier}${backLabel ? ` · ย้อนหลัง ${backLabel}` : ""}`
       });
     }
 
@@ -2469,6 +2473,7 @@ function MSell({ ctx }) {
           carrier: ship.carrier,
           cod: ship.cod ? (parseFloat(ship.codAmt) || 0) : 0,
           items: lineItems,
+          created_at: createdAt,
         });
       } catch (e) { createdLabel = null; }
     }
@@ -2488,7 +2493,8 @@ function MSell({ ctx }) {
         carrier: ship.carrier,
         tracking: "",
         items: cart.length,
-        dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
+        dateIso: stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10)),
+        createdAt,
         isSellOrder: true,
         isBundle: hasBundle,
         bundleName: hasBundle ? cart.filter(i => i.type === "bundle").map(i => i.name).join(", ") : "",
@@ -2504,7 +2510,7 @@ function MSell({ ctx }) {
       }
     }
 
-    ctx.pushToast(`ขายสำเร็จ ${orderId} · สร้างฉลากแล้ว`);
+    ctx.pushToast(`ขายสำเร็จ ${orderId} · สร้างฉลากแล้ว${backLabel ? ` (ย้อนหลัง ${backLabel})` : ""}`);
     if (createdLabel) ctx.push("label-view", createdLabel);
     else ctx.switchTab("outbound");
   };
@@ -2795,6 +2801,8 @@ function MSell({ ctx }) {
                 </div>
               ))}
             </div>
+
+            <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ขาย" hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง"/>
 
             <div className="m-card" style={{ background: "var(--info-soft)", color: "var(--info)", fontSize: 12 }}>
               <div className="row" style={{ gap: 6, fontWeight: 600, marginBottom: 4 }}><Icons.Check size={13}/>พร้อมยืนยัน</div>

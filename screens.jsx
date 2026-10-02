@@ -4763,6 +4763,7 @@ function LocPickSelect({ sku, value, onChange, need, label }) {
 /* ========= SELL PRODUCT MODAL (3-step wizard) ========= */
 function SellProductModal({ onClose, onSellComplete, presetSku }) {
   const [step, setStep] = useState(1);
+  const [when, setWhen] = useState(""); // วันเวลาที่ขาย — "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   // presetSku: opened from the Product Finder with an already-confirmed product —
   // start the cart with it so staff never re-search (and can't re-pick the wrong SKU).
   const [cart, setCart] = useState(() => {
@@ -4877,7 +4878,9 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
     }
 
     const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
-    const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+    const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+    const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
+    const ts = stamp ? stamp.ts : new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
     const hasBundle = cart.some(i => i.type === "bundle");
 
     if (typeof recordChange === "function") {
@@ -4889,7 +4892,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
           label: item.type === "bundle" ? `ชุด: ${item.name}` : item.name,
           to: `−${item.qty} ${item.type === "bundle" ? "ชุด" : "ชิ้น"}`
         })),
-        note: `ผู้รับ: ${ship.name} · ${ship.addr1} · ${ship.carrier}`
+        note: `ผู้รับ: ${ship.name} · ${ship.addr1} · ${ship.carrier}${createdAt ? ` · ย้อนหลัง ${stockOutStampLabel(stamp)}` : ""}`
       });
     }
 
@@ -4902,7 +4905,8 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
       carrier: ship.carrier,
       tracking: "",
       ts,
-      dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
+      dateIso: stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10)),
+      createdAt,
       deductions: [{ id: "direct", name: "ขายตรง", color: "#8B5CF6", qty: cartTotal }],
       isSellOrder: true,
       isBundle: hasBundle,
@@ -4935,6 +4939,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
           carrier: ship.carrier,
           cod: ship.cod ? (parseFloat(ship.codAmt) || 0) : 0,
           items: order.lineItems,
+          created_at: createdAt,
         });
       } catch (e) {}
     }
@@ -5249,6 +5254,9 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
                   ))}
                 </div>
               </div>
+
+              <StockOutWhenField value={when} onChange={setWhen} label="วันเวลาที่ขาย"
+                hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"/>
 
               <div style={{ padding: "12px 14px", background: "var(--info-soft)", borderRadius: 10, fontSize: 12, color: "var(--info)" }}>
                 <div className="row" style={{ gap: 6, fontWeight: 600, marginBottom: 4 }}><Icons.Check size={13}/>พร้อมยืนยัน</div>
