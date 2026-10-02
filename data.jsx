@@ -1739,15 +1739,25 @@ const CHANNEL_LIST = [
 /* Reasons for a manual stock adjustment (ปรับสต็อก) — single source for the
    desktop modal AND mobile MAdjust so the taxonomy can't fork. External-sale
    reasons derive from CHANNEL_LIST; the channel is carried in the label text
-   (stock_adjustments stores a reason string, not a channel column). */
+   (stock_adjustments stores a reason string, not a channel column).
+   `dir` = which mode the reason makes sense for: "add" (เพิ่มเข้า), "remove"
+   (หักออก) or "both". ตั้งค่าเป็น can move either way, so it lists everything. */
 const ADJUST_REASONS = [
-  { id: "recount",      label: "นับสต็อกผิด / แก้ไขยอด" },
-  { id: "damaged",      label: "สินค้าเสียหาย / ชำรุด" },
-  { id: "lost",         label: "สินค้าสูญหาย" },
-  ...CHANNEL_LIST.filter(c => c.id !== "other").map(c => ({ id: "sale-" + c.id, label: `ขายผ่าน ${c.name} (นอกระบบ)`, channel: c.id })),
-  { id: "sale-offline", label: "ขายหน้าร้าน / ออฟไลน์", channel: "other" },
-  { id: "other",        label: "อื่นๆ (ระบุ)", requireNote: true }
+  { id: "restock",      label: "รับสินค้าเข้า / เติมสต็อก", dir: "add" },
+  { id: "recount",      label: "นับสต็อกผิด / แก้ไขยอด", dir: "both" },
+  { id: "damaged",      label: "สินค้าเสียหาย / ชำรุด", dir: "remove" },
+  { id: "lost",         label: "สินค้าสูญหาย", dir: "remove" },
+  ...CHANNEL_LIST.filter(c => c.id !== "other").map(c => ({ id: "sale-" + c.id, label: `ขายผ่าน ${c.name} (นอกระบบ)`, channel: c.id, dir: "remove" })),
+  { id: "sale-offline", label: "ขายหน้าร้าน / ออฟไลน์", channel: "other", dir: "remove" },
+  { id: "other",        label: "อื่นๆ (ระบุ)", requireNote: true, dir: "both" }
 ];
+/* Reasons shown for a ปรับสต็อก mode (add | remove | set) — both forks use it,
+   and resolve the picked reason through it so one picked under หักออก can't
+   ride along after switching to เพิ่มเข้า. */
+function adjustReasonsFor(mode) {
+  if (mode !== "add" && mode !== "remove") return ADJUST_REASONS;
+  return ADJUST_REASONS.filter(r => r.dir === "both" || r.dir === mode);
+}
 
 const CHANNELS = [
   { id: "shopee", name: "Shopee",          today: 0, pct: 0 },
@@ -3559,7 +3569,7 @@ Object.assign(window, {
   CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canOpenPage, canDo, capServerLocked, currentRoleId,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, importProductsBulk, removeProductsFromStore, resetProductStore, renameProductSku,
   deductStockAndPersist, deductManyAndPersist,
-  applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, canAdjustStock, lastAdjustReason, rememberAdjustReason, quickSaleChannels, commitQuickSale,
+  applyStockAdjustment, applyStockAdjustmentBatch, ADJUST_REASONS, adjustReasonsFor, canAdjustStock, lastAdjustReason, rememberAdjustReason, quickSaleChannels, commitQuickSale,
   loadOrders, saveOrders, appendOrder,
   loadLocTree, saveLocTree, locCode, allPositions, allLocationCodes, skusInLocation, canDeleteData, searchProductsForLocation, locParts,
   storedLocSet, locIsStored, countUnstoredProducts, productHomeLoc, productIsStored,

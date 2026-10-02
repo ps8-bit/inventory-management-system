@@ -4503,7 +4503,10 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const busyRef = useRef(false);
   const scanRef = useRef(null);
   const toast = pushToast || (() => {});
-  const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
+  // Only reasons that fit the mode (เพิ่มเข้า hides ขายผ่าน… etc.); a pick that
+  // doesn't fit after a mode switch resolves to null so confirm stays disabled.
+  const modeReasons = typeof adjustReasonsFor === "function" ? adjustReasonsFor(mode) : ADJUST_REASONS;
+  const reason = modeReasons.find(r => r.id === reasonId) || null;
   const effQty = (sku) => (typeof getEffectiveQty === "function"
     ? getEffectiveQty(sku)
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
@@ -4736,7 +4739,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
               <div className="field">
                 <label>เหตุผล <span style={{ color: "var(--danger)" }}>*</span></label>
                 <div className="adj-reasons">
-                  {ADJUST_REASONS.map(r => (
+                  {modeReasons.map(r => (
                     <button key={r.id} type="button" className={"adj-reason" + (reasonId === r.id ? " on" : "")} onClick={() => setReasonId(r.id)}>{r.label}</button>
                   ))}
                 </div>

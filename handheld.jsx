@@ -2119,7 +2119,9 @@ function MAdjust({ ctx }) {
   const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   useEffectM(() => () => setCamOpen(false), []);
 
-  const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
+  // Same mode filter as the desktop modal (adjustReasonsFor in data.jsx).
+  const modeReasons = typeof adjustReasonsFor === "function" ? adjustReasonsFor(mode) : ADJUST_REASONS;
+  const reason = modeReasons.find(r => r.id === reasonId) || null;
   const effQty = (sku) => (typeof getEffectiveQty === "function"
     ? getEffectiveQty(sku)
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
@@ -2320,7 +2322,7 @@ function MAdjust({ ctx }) {
 
             <div className="m-section-label" style={{ padding: "4px 4px 8px" }}>เหตุผล (จำเป็น)</div>
             <div className="adj-reasons">
-              {ADJUST_REASONS.map(r => (
+              {modeReasons.map(r => (
                 <button key={r.id} type="button" className={"adj-reason" + (reasonId === r.id ? " on" : "")} onClick={() => setReasonId(r.id)}>{r.label}</button>
               ))}
             </div>
