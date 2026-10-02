@@ -1932,6 +1932,7 @@ function MQuickSell({ ctx }) {
   });
   const [q, setQ] = useStateM("");
   const [note, setNote] = useStateM("");
+  const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [camOpen, setCamOpen] = useStateM(false);
   const [busy, setBusy] = useStateM(false);
   const busyRef = useRefM(false);
@@ -1982,11 +1983,13 @@ function MQuickSell({ ctx }) {
   const submit = async () => {
     if (!canSubmit || busyRef.current) return;
     busyRef.current = true; setBusy(true);   // synchronous latch — a double-tap must not sell twice
-    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim(), source: "mobile" });
+    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim(), source: "mobile", when });
     busyRef.current = false; setBusy(false);
     if (!res.ok) { if (res.error) ctx.pushToast(res.error); return; }
     const ch = channels.find(c => c.id === reasonId);
-    ctx.pushToast(`ขายออก ${res.pieces} ชิ้น · ${ch ? ch.label : ""}` + (res.locWarning ? " — " + res.locWarning : ""));
+    const st = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+    const backTxt = st && st.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(st)})` : "";
+    ctx.pushToast(`ขายออก ${res.pieces} ชิ้น · ${ch ? ch.label : ""}${backTxt}` + (res.locWarning ? " — " + res.locWarning : ""));
     setLines([]); setNote("");
   };
 
@@ -2066,6 +2069,8 @@ function MQuickSell({ ctx }) {
         <div className="m-section-label" style={{ padding: "14px 4px 8px" }}>หมายเหตุ (ไม่จำเป็น)</div>
         <input className="m-input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, ชื่อลูกค้า"/>
 
+        <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ขาย" hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ยอดขายจะนับเป็นวันนั้น"/>
+
         <button className="m-btn-big" style={{ marginTop: 14 }} disabled={!canSubmit} onClick={submit}>
           <Icons.Check size={16}/> {busy ? "กำลังบันทึก…" : !reasonId ? "เลือกช่องทางขายก่อน" : `ยืนยันขาย${pieces ? " " + pieces + " ชิ้น" : ""}`}
         </button>
@@ -2090,6 +2095,7 @@ function MAdjust({ ctx }) {
   const [fillValue, setFillValue] = useStateM("");   // "ใส่เท่ากันทุกแถว" box
   const busyRef = useRefM(false);
   const [note, setNote] = useStateM("");
+  const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   useEffectM(() => () => setCamOpen(false), []);
 
   const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
@@ -2140,14 +2146,14 @@ function MAdjust({ ctx }) {
     busyRef.current = true;
     setBusy(true);
     const guardKey = (typeof commitFingerprint === "function")
-      ? commitFingerprint("adjust-" + mode + "-" + reasonId, changes) : null;
+      ? commitFingerprint("adjust-" + mode + "-" + reasonId + (when ? "@" + when : ""), changes) : null;
     if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
       if (typeof duplicateCommitToast === "function") duplicateCommitToast();
       busyRef.current = false; setBusy(false);
       return;
     }
     const res = (typeof applyStockAdjustmentBatch === "function")
-      ? applyStockAdjustmentBatch(changes, { reason, note, source: "mobile" })
+      ? applyStockAdjustmentBatch(changes, { reason, note, source: "mobile", when })
       : { applied: 0, net: 0 };
     if (!res.applied) {
       ctx.pushToast("ปรับสต็อกไม่สำเร็จ");
@@ -2163,9 +2169,11 @@ function MAdjust({ ctx }) {
       const locRes = await applyLocPicks(picks);
       if (locRes && locRes.errors && locRes.errors.length) ctx.pushToast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ — แก้ที่หน้าสินค้าบนเดสก์ท็อป");
     }
-    ctx.pushToast(changes.length === 1
+    const backSt = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+    const backTxt = backSt && backSt.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backSt)})` : "";
+    ctx.pushToast((changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
-      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น)`);
+      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น)`) + backTxt);
     ctx.back();
   };
 
@@ -2298,6 +2306,8 @@ function MAdjust({ ctx }) {
 
             <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>หมายเหตุ {reason && reason.requireNote ? "(จำเป็น)" : "(ไม่จำเป็น)"}</div>
             <input className="m-input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, อ้างอิงการนับ"/>
+
+            <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ปรับสต็อก" hint="ปรับย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง"/>
 
             {changes.length > 0 && (
               <div className="m-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
@@ -2433,7 +2443,8 @@ function MIssue({ ctx }) {
   const [ship, setShip] = useStateM({ phone: "", carrier: "", tracking: "" });
   const [shipOpen, setShipOpen] = useStateM(false);
   const todayStr = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
-  const [orderDate, setOrderDate] = useStateM(todayStr);
+  // วันเวลาที่ขาย — "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM" (issueOrderDate).
+  const [orderDate, setOrderDate] = useStateM("");
   const [pickOpen, setPickOpen] = useStateM(false);
   const [tab, setTab] = useStateM("product");   // picker tab: product | bundle
   const [q, setQ] = useStateM("");
@@ -2537,7 +2548,7 @@ function MIssue({ ctx }) {
     const od = (typeof issueOrderDate === "function")
       ? issueOrderDate(orderDate)
       : { dateIso: todayStr, ts: "", backdated: false, createdAt: new Date().toISOString() };
-    const dateNote = od.backdated ? ` · ขายวันที่ ${typeof isoToThai === "function" ? isoToThai(od.dateIso) : od.dateIso}` : "";
+    const dateNote = od.backdated ? ` · ขายวันที่ ${typeof isoToThai === "function" ? isoToThai(od.dateIso) : od.dateIso}${od.ts ? " " + od.ts : ""}` : "";
 
     deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก (มือถือ) · ออร์เดอร์ ${id} (${plan.channelLabel})${dateNote}`);
     // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
@@ -2567,6 +2578,7 @@ function MIssue({ ctx }) {
       ...(sf.phone ? { phone: sf.phone } : {}),
       ts: od.ts,
       dateIso: od.dateIso,
+      ...(od.backdated && od.createdAt ? { createdAt: od.createdAt } : {}),
       deductions: plan.channelSplit,
       isBundle: plan.hasBundle,
       bundleName: plan.hasBundle ? plan.bundleNames.join(", ") : "",
@@ -2586,9 +2598,10 @@ function MIssue({ ctx }) {
         note: `ออร์เดอร์ ${id} · ${plan.channelLabel}${dateNote}`
       });
     }
-    ctx.pushToast(plan.lineCount === 1
+    ctx.pushToast((plan.lineCount === 1
       ? `ตัดสต็อก ${cart[0].name} ${pieces} ชิ้น — ${plan.channelLabel}`
-      : `ตัดสต็อก ${plan.lineCount} รายการ (${pieces} ชิ้น) — ${plan.channelLabel}`);
+      : `ตัดสต็อก ${plan.lineCount} รายการ (${pieces} ชิ้น) — ${plan.channelLabel}`)
+      + (od.backdated ? ` (ย้อนหลัง ${typeof isoToThai === "function" ? isoToThai(od.dateIso) : od.dateIso}${od.ts ? " " + od.ts : ""})` : ""));
     ctx.back();
   };
 
@@ -2695,21 +2708,8 @@ function MIssue({ ctx }) {
           </>
         )}
 
-        {/* Sale date — backdating files a late-keyed order under the day it sold. */}
-        <div className="m-section-label" style={{ padding: "12px 4px 8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>วันที่ขาย</span>
-          {orderDate !== todayStr && (
-            <button onClick={() => setOrderDate(todayStr)} style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 11, cursor: "pointer", padding: 0 }}>กลับเป็นวันนี้</button>
-          )}
-        </div>
-        <input type="date" className="m-input" value={orderDate} max={todayStr}
-          onChange={e => setOrderDate(e.target.value || todayStr)}
-          style={{ marginBottom: 6, ...(orderDate !== todayStr ? { borderColor: "var(--warning)" } : {}) }}/>
-        {orderDate !== todayStr && (
-          <div style={{ fontSize: 11, color: "var(--warning)", margin: "0 4px 8px" }}>
-            ออร์เดอร์ย้อนหลัง · {typeof isoToThai === "function" ? isoToThai(orderDate) : orderDate}
-          </div>
-        )}
+        {/* Sale date/time — backdating files a late-keyed order under the moment it sold. */}
+        <MStockOutWhen value={orderDate} onChange={setOrderDate} label="วันเวลาที่ขาย" hint="ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง"/>
 
         <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>ลูกค้า / อ้างอิง (ไม่จำเป็น)</div>
         <input className="m-input" placeholder="เช่น คุณ ปวีณา / Shopee #2025-119283" value={customer} onChange={e => setCustomer(e.target.value)} style={{ marginBottom: 8 }}/>
@@ -2861,6 +2861,41 @@ function MIssue({ ctx }) {
   );
 }
 
+/* Mobile twin of StockOutWhenField (screens.jsx) — วันเวลา for a backdated
+   stock-out. "" = now. */
+function MStockOutWhen({ value, onChange, label, hint }) {
+  const maxLocal = (typeof nowBkkLocal === "function") ? nowBkkLocal() : "";
+  const stamp = value && typeof stockOutStamp === "function" ? stockOutStamp(value) : null;
+  const backdated = !!(stamp && stamp.backdated);
+  const setYesterday = () => {
+    const base = value || maxLocal;
+    const d = new Date(Date.parse(base.slice(0, 10) + "T00:00:00Z") - 86400000).toISOString().slice(0, 10);
+    onChange(d + "T" + (base.slice(11, 16) || "12:00"));
+  };
+  return (
+    <>
+      <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>{label || "วันเวลาที่ตัดสต็อก"}</div>
+      <input
+        type="datetime-local" className="m-input"
+        value={value || maxLocal} max={maxLocal}
+        onChange={e => onChange(e.target.value && e.target.value < maxLocal ? e.target.value : "")}
+        style={backdated ? { borderColor: "var(--warning)" } : undefined}
+      />
+      <div className="row" style={{ gap: 6, marginTop: 6 }}>
+        <button type="button" className="btn" style={{ flex: 1, justifyContent: "center" }} onClick={setYesterday}>เมื่อวาน</button>
+        <button type="button" className={"btn" + (!value ? " btn-primary" : "")} style={{ flex: 1, justifyContent: "center" }} onClick={() => onChange("")}>ตอนนี้</button>
+      </div>
+      {backdated ? (
+        <div style={{ margin: "6px 0 8px", padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", color: "oklch(0.5 0.13 65)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+          <Icons.Calendar size={13}/> ย้อนหลัง · <strong>{stockOutStampLabel(stamp)}</strong>
+        </div>
+      ) : (
+        <div style={{ fontSize: 11, color: "var(--muted)", margin: "4px 4px 8px" }}>{hint || "ทำย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง"}</div>
+      )}
+    </>
+  );
+}
+
 /* Mobile twin of LocPickSelect — chips instead of a select, because a phone
    picker inside a cart row must be one tap. Hidden for single-position products. */
 function MLocPickChips({ sku, value, onChange, need, label }) {
@@ -2910,6 +2945,7 @@ function MLocPickChips({ sku, value, onChange, need, label }) {
 
 function MSell({ ctx }) {
   const [step, setStep] = useStateM(1); // 1 cart · 2 shipping · 3 confirm
+  const [when, setWhen] = useStateM(""); // วันเวลาที่ขาย — "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [cart, setCart] = useStateM(() => {
     // Pre-add a product when opened from the product detail page ("ขาย")
     const presetSku = ctx.route.params?.sku;
@@ -3100,6 +3136,9 @@ function MSell({ ctx }) {
     }
 
     const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
+    const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+    const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
+    const backLabel = createdAt ? stockOutStampLabel(stamp) : "";
 
     if (typeof recordChange === "function") {
       recordChange({
@@ -3110,7 +3149,7 @@ function MSell({ ctx }) {
           label: item.type === "bundle" ? `ชุด: ${item.name}` : item.name,
           to: `−${item.qty} ${item.type === "bundle" ? "ชุด" : "ชิ้น"}`
         })),
-        note: `ผู้รับ: ${ship.name} · ${ship.addr1} · ${ship.carrier}`
+        note: `ผู้รับ: ${ship.name} · ${ship.addr1} · ${ship.carrier}${backLabel ? ` · ย้อนหลัง ${backLabel}` : ""}`
       });
     }
 
@@ -3134,6 +3173,7 @@ function MSell({ ctx }) {
           carrier: ship.carrier,
           cod: ship.cod ? (parseFloat(ship.codAmt) || 0) : 0,
           items: lineItems,
+          created_at: createdAt,
         });
       } catch (e) { createdLabel = null; }
     }
@@ -3153,7 +3193,8 @@ function MSell({ ctx }) {
         carrier: ship.carrier,
         tracking: "",
         items: cart.length,
-        dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
+        dateIso: stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10)),
+        ...(createdAt ? { createdAt } : {}),
         isSellOrder: true,
         isBundle: hasBundle,
         bundleName: hasBundle ? cart.filter(i => i.type === "bundle").map(i => i.name).join(", ") : "",
@@ -3169,7 +3210,7 @@ function MSell({ ctx }) {
       }
     }
 
-    ctx.pushToast(`ขายสำเร็จ ${orderId} · สร้างฉลากแล้ว`);
+    ctx.pushToast(`ขายสำเร็จ ${orderId} · สร้างฉลากแล้ว${backLabel ? ` (ย้อนหลัง ${backLabel})` : ""}`);
     if (createdLabel) ctx.push("label-view", createdLabel);
     else ctx.switchTab("outbound");
   };
@@ -3460,6 +3501,8 @@ function MSell({ ctx }) {
                 </div>
               ))}
             </div>
+
+            <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ขาย" hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง"/>
 
             <div className="m-card" style={{ background: "var(--info-soft)", color: "var(--info)", fontSize: 12 }}>
               <div className="row" style={{ gap: 6, fontWeight: 600, marginBottom: 4 }}><Icons.Check size={13}/>พร้อมยืนยัน</div>

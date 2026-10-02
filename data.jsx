@@ -665,7 +665,8 @@ function writeLedgerRows(rows) {
   const by = (window.__currentUser && window.__currentUser.name) || "ระบบ";
   const at = new Date().toISOString();
   const list = (Array.isArray(rows) ? rows : []).filter(r => r && r.sku && Number(r.delta))
-    .map(r => ({ sku: r.sku, delta: Math.trunc(Number(r.delta)), reason: r.reason || "", created_by: r.created_by || by, at: r.at || at }));
+    .map(r => ({ sku: r.sku, delta: Math.trunc(Number(r.delta)), reason: r.reason || "", created_by: r.created_by || by,
+                 createdAt: r.createdAt || undefined, at: r.createdAt || r.at || at }));
   if (!list.length) return Promise.resolve({ ok: true });
   const keep = () => { if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("ledger", list); };
   if (typeof navigator !== "undefined" && navigator.onLine === false) { keep(); return Promise.resolve({ queued: true }); }
@@ -847,7 +848,7 @@ function receiveStockAndRecord(lines, reason) {
    never creates an order. External sales recorded here ("ขายผ่าน …") DO feed
    analytics and the channel cards via saleMoveOrders() — staff record almost
    every sale this way. */
-function applyStockAdjustment({ sku, delta, reason, note, source }) {
+function applyStockAdjustment({ sku, delta, reason, note, source, when }) {
   const d = Math.trunc(Number(delta) || 0);
   const p = PRODUCTS.find(x => x.sku === sku);
   if (!p || !d) return { ok: false };
@@ -871,7 +872,15 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
   const eff = to - from;
   const reasonLabel = (reason && reason.label) || String(reason || "");
   const noteText = String(note || "").trim();
-  const fullReason = noteText ? `${reasonLabel} — ${noteText}` : reasonLabel;
+  // Backdated (ย้อนหลัง): the stock moves now, but the history row is dated when
+  // it really happened — which also files a ขายผ่าน… sale under that day in
+  // analytics (saleMoveOrders reads created_at). The reason keeps its prefix, so
+  // isAdjustSaleReason / saleChannelOfReason still match. The audit-log row
+  // keeps its real time: it records when someone keyed it in.
+  const back = when ? stockOutStamp(when) : null;
+  const backAt = back && back.backdated ? back.createdAt : undefined;
+  const fullReason = [noteText ? `${reasonLabel} — ${noteText}` : reasonLabel,
+    backAt ? `ย้อนหลัง ${stockOutStampLabel(back)}` : ""].filter(Boolean).join(" · ");
 
   /* ── Why the history is written AFTER the server answers ──
      from/to above are computed from THIS DEVICE's copy of qty, and the server
@@ -900,7 +909,7 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
       }
       // Structured, queryable history (stock_adjustments table). Best-effort like
       // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
-      writeLedgerRows([{ sku, delta: rEff, reason: noteOut }])
+      writeLedgerRows([{ sku, delta: rEff, reason: noteOut, createdAt: backAt }])
         .then(() => { if (rEff < 0 && isAdjustSaleReason(noteOut)) refreshSaleMovesSoon(); })
         .catch(() => {});
     };
@@ -949,7 +958,7 @@ function _saleEffQty(sku) {
   const p = PRODUCTS.find(x => x.sku === sku);
   return p ? Math.max(0, Number(p.qty) || 0) : 0;
 }
-async function commitQuickSale({ lines, reasonId, note, source }) {
+async function commitQuickSale({ lines, reasonId, note, source, when }) {
   const reason = ADJUST_REASONS.find(r => r.id === reasonId && r.channel);
   if (!reason) return { ok: false, error: "เลือกช่องทางขายก่อน" };
   // One entry per SKU — the same product added twice (scan + tap) is one sale line.
@@ -967,9 +976,11 @@ async function commitQuickSale({ lines, reasonId, note, source }) {
   const short = want.find(w => w.qty > _saleEffQty(w.sku));
   if (short) return { ok: false, error: `สต็อกไม่พอ: ${short.sku} เหลือ ${_saleEffQty(short.sku)} ชิ้น` };
   const changes = want.map(w => ({ sku: w.sku, delta: -w.qty }));
-  const guardKey = commitFingerprint("quicksale-" + reasonId, changes);
+  // The picked date is part of the key: the same sale keyed for two different
+  // days back-to-back is two sales, not a double-click.
+  const guardKey = commitFingerprint("quicksale-" + reasonId + (when ? "@" + when : ""), changes);
   if (!claimCommit(guardKey)) { duplicateCommitToast(); return { ok: false, duplicate: true }; }
-  const res = applyStockAdjustmentBatch(changes, { reason, note, source });
+  const res = applyStockAdjustmentBatch(changes, { reason, note, source, when });
   if (!res.applied) {
     releaseCommit(guardKey);
     return { ok: false, error: "บันทึกการขายไม่สำเร็จ" };
@@ -993,13 +1004,13 @@ async function commitQuickSale({ lines, reasonId, note, source }) {
    stay granular (the ProductDrawer history panel reads them per product).
    items = [{ sku, delta }] → { ok, applied, skipped, net, results }. */
 function applyStockAdjustmentBatch(items, opts) {
-  const { reason, note, source } = opts || {};
+  const { reason, note, source, when } = opts || {};
   const list = Array.isArray(items) ? items : [];
   const results = [];
   let applied = 0, skipped = 0, net = 0;
   list.forEach(it => {
     if (!it || !it.sku) { skipped++; return; }
-    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source }) || { ok: false };
+    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source, when }) || { ok: false };
     results.push({ sku: it.sku, ...res });
     // eff === 0 means the clamp ate the change (already 0 คงเหลือ) — not applied.
     if (res.ok && res.eff) { applied++; net += res.eff; } else skipped++;
@@ -2387,6 +2398,11 @@ function rememberIssueChannel(ch) {
    a backdated order gets no clock time (unknown) and a label timestamp of noon
    Bangkok so bangkokDateOf() lands on the chosen day. */
 function issueOrderDate(picked) {
+  // "YYYY-MM-DDTHH:MM" (the วันเวลา picker) or "" → exact moment, time kept.
+  if (!picked || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(String(picked))) {
+    const st = stockOutStamp(picked);
+    return { dateIso: st.dateIso, backdated: st.backdated, ts: st.ts, createdAt: st.createdAt };
+  }
   const today = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
   const d = /^\d{4}-\d{2}-\d{2}$/.test(String(picked || "")) ? String(picked) : today;
   const dateIso = d > today ? today : d;
@@ -2396,6 +2412,27 @@ function issueOrderDate(picked) {
     ts: backdated ? "" : new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }),
     createdAt: backdated ? new Date(dateIso + "T12:00:00+07:00").toISOString() : new Date().toISOString()
   };
+}
+/* ── วันเวลา picker for every stock-out (ตัดสต็อก, ปรับสต็อก, ขายออก, ขาย+จัดส่ง,
+   ขายชุด) ── value is a datetime-local "YYYY-MM-DDTHH:MM" read as Bangkok
+   wall-clock time; "" = now. Bangkok has no DST, so a fixed +07:00 is exact. */
+function nowBkkLocal(nowMs) {
+  const d = new Date((typeof nowMs === "number" ? nowMs : Date.now()) + 7 * 3600 * 1000);
+  return d.toISOString().slice(0, 16);
+}
+// → { dateIso, ts, createdAt, backdated }. A future value clamps to now; an
+// unparseable or empty one means now. Backdated = at least a minute in the past.
+function stockOutStamp(local) {
+  const now = Date.now();
+  let t = (typeof local === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(local))
+    ? Date.parse(local.slice(0, 16) + ":00+07:00") : NaN;
+  if (!Number.isFinite(t) || t > now) t = now;
+  const wall = nowBkkLocal(t);
+  return { dateIso: wall.slice(0, 10), ts: wall.slice(11, 16), createdAt: new Date(t).toISOString(), backdated: now - t >= 60 * 1000 };
+}
+// "30 ก.ย. 2569 14:30" — for toasts / audit notes / history reasons.
+function stockOutStampLabel(stamp) {
+  return stamp ? `${isoToThai(stamp.dateIso)} ${stamp.ts}`.trim() : "";
 }
 const ISSUE_CARRIERS = ["KEX", "Flash Express", "J&T Express", "ไปรษณีย์ไทย", "Ninja Van", "DHL", "Best Express", "SCG Express", "Alpha Fast", "Lalamove"];
 function issueShipFields(ship) {
@@ -3265,14 +3302,10 @@ async function flushOfflineQueue() {
           // (local-only, never reaches the DB). Leave it queued so it replays once
           // adjust-stock.sql is deployed (mirrors the "deduct" branch).
         } else if (item.type === "ledger" && typeof dbInsertStockAdjustment === "function") {
-          // A history row that couldn't be written when its movement happened.
-          // Its original time travels in the reason (created_at is server-set).
-          const rows = (item.payload || []).map(r => {
-            let when = "";
-            try { when = (typeof bangkokDateOf === "function" && typeof bangkokTimeOf === "function") ? `${bangkokDateOf(r.at)} ${bangkokTimeOf(r.at)}` : String(r.at || ""); } catch (e) {}
-            return { sku: r.sku, delta: r.delta, created_by: r.created_by,
-                     reason: (r.reason || "") + (when ? ` · บันทึกย้อนหลัง (เกิดเมื่อ ${when})` : "") };
-          });
+          // A history row that couldn't be written when its movement happened —
+          // dated when it HAPPENED, not when the phone got signal back.
+          const rows = (item.payload || []).map(r => ({ sku: r.sku, delta: r.delta, reason: r.reason || "",
+                                                       created_by: r.created_by, createdAt: r.at }));
           const r = await dbInsertStockAdjustment(rows);
           ok = !!(r && (r.ok || _ledgerRefused(r.error)));
           if (ok && typeof refreshSaleMovesSoon === "function") refreshSaleMovesSoon();
@@ -3473,6 +3506,7 @@ Object.assign(window, {
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem, buildIssuePlan,
   lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, ISSUE_CARRIERS, issueOrderDate,
+  nowBkkLocal, stockOutStamp, stockOutStampLabel,
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, writeLedgerRows, receiveStockAndRecord,

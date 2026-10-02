@@ -146,7 +146,7 @@ function BundleStockAlert({ issues, title }) {
 /* ──────────────────────────────────────
    SELL CONFIRMATION MODAL
 ────────────────────────────────────── */
-function SellConfirmModal({ bundle, qty, channels, onConfirm, onCancel }) {
+function SellConfirmModal({ bundle, qty, channels, when, onWhenChange, onConfirm, onCancel }) {
   const totalItems = bundle.items.map(item => {
     const p = PRODUCTS.find(x => x.sku === item.sku);
     return { ...item, name: p?.name || item.sku, deduct: item.qty * qty };
@@ -208,6 +208,12 @@ function SellConfirmModal({ bundle, qty, channels, onConfirm, onCancel }) {
                 ))}
               </div>
             </div>
+          )}
+
+          {/* วันเวลาที่ขาย — backdated bundle sale (shared field from screens.jsx). */}
+          {onWhenChange && typeof StockOutWhenField === "function" && (
+            <StockOutWhenField value={when} onChange={onWhenChange} label="วันเวลาที่ขาย" style={{ marginBottom: 0 }}
+              hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"/>
           )}
         </div>
         <div style={{ padding: "12px 20px 18px", display: "flex", gap: 8 }}>
@@ -371,6 +377,7 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
     Object.fromEntries(CHANNEL_LIST.map(c => [c.id, { on: c.id === "shopee", qty: c.id === "shopee" ? 1 : 0 }]))
   );
   const [showConfirm, setShowConfirm] = useBndState(false);
+  const [when, setWhen] = useBndState(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [stockKey, setStockKey] = useBndState(0);
   const sellBusyRef = useBndRef(false);
 
@@ -431,8 +438,11 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
     // track-lookup. Mirrors the desktop Outbound bundle path (screens.jsx
     // submitIssue): appendOrder is the convergence-safe single-row writer.
     const id = (typeof genOrderId === "function") ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000);
-    const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
-    const dateIso = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+    const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+    const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
+    const backLabel = createdAt ? stockOutStampLabel(stamp) : "";
+    const ts = stamp ? stamp.ts : new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+    const dateIso = stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10));
     const deductions = selectedChannels.length
       ? selectedChannels.map(c => ({ id: c.id, name: c.name, color: c.color, qty: c.qty }))
       : [{ id: "manual", name: "ตัดสต็อก", qty: sellQty }];
@@ -443,7 +453,7 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
       appendOrder({
         id, channel: channelLabel, customer: "ลูกค้าใหม่",
         items: bundle.items.length, status: "picking", carrier: "", tracking: "",
-        ts, dateIso, deductions, isBundle: true, bundleName: bundle.name,
+        ts, dateIso, ...(createdAt ? { createdAt } : {}), deductions, isBundle: true, bundleName: bundle.name,
         lineItems: bundle.items.map(it => (typeof snapLineItem === "function"
           ? snapLineItem(it.sku, null, it.qty * sellQty)
           : { sku: it.sku, name: it.sku, qty: it.qty * sellQty, price: 0, cost: 0 }))
@@ -464,13 +474,14 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
           from: `${before[item.sku]} ชิ้น`,
           to: `${getEffectiveQty(item.sku)} ชิ้น`
         })),
-        note: `ออร์เดอร์ ${id}`
+        note: `ออร์เดอร์ ${id}${backLabel ? ` · ย้อนหลัง ${backLabel}` : ""}`
       });
     }
     setShowConfirm(false);
     // The panel stays mounted for the next sale, so release the latch here.
     sellBusyRef.current = false;
-    pushToast(`ขายชุด "${bundle.name}" ${sellQty} ชุดสำเร็จ`);
+    setWhen("");
+    pushToast(`ขายชุด "${bundle.name}" ${sellQty} ชุดสำเร็จ${backLabel ? ` (ย้อนหลัง ${backLabel})` : ""}`);
     setStockKey(k => k + 1);
     setQty(1);
     setChannels(Object.fromEntries(CHANNEL_LIST.map(c => [c.id, { on: c.id === "shopee", qty: c.id === "shopee" ? 1 : 0 }])));
@@ -619,6 +630,8 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
           bundle={bundle}
           qty={sellQty}
           channels={selectedChannels}
+          when={when}
+          onWhenChange={setWhen}
           onConfirm={confirmSell}
           onCancel={() => setShowConfirm(false)}
         />

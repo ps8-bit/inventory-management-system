@@ -2469,8 +2469,8 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
   const [customer, setCustomer] = useState("");
   const [ship, setShip] = useState({ phone: "", carrier: "", tracking: "" });
   const [camOpen, setCamOpen] = useState(false);
-  const todayStr = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
-  const [orderDate, setOrderDate] = useState(todayStr);
+  // วันเวลาที่ขาย — "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM" (issueOrderDate).
+  const [orderDate, setOrderDate] = useState("");
   const [tab, setTab] = useState("product");   // picker tab: product | bundle
   const [q, setQ] = useState("");
   const [showN, setShowN] = useState(30);
@@ -2780,20 +2780,9 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
             </div>
           )}
 
-          {/* Sale date — backdating files a late-keyed order under the day it sold. */}
-          <div className="field" style={{ marginBottom: 14 }}>
-            <label>วันที่ขาย</label>
-            <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <input type="date" className="input" style={{ width: 170 }} value={orderDate} max={todayStr}
-                onChange={e => setOrderDate(e.target.value || todayStr)}/>
-              {orderDate !== todayStr
-                ? <>
-                    <span className="badge badge-warning" style={{ fontSize: 11 }}>ออร์เดอร์ย้อนหลัง · {typeof isoToThai === "function" ? isoToThai(orderDate) : orderDate}</span>
-                    <button className="btn btn-ghost btn-sm" onClick={() => setOrderDate(todayStr)}>กลับเป็นวันนี้</button>
-                  </>
-                : <span style={{ fontSize: 12, color: "var(--muted)" }}>วันนี้</span>}
-            </div>
-          </div>
+          {/* Sale date/time — backdating files a late-keyed order under the moment it sold. */}
+          <StockOutWhenField value={orderDate} onChange={setOrderDate} label="วันเวลาที่ขาย"
+            hint="ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"/>
 
           <div className="field" style={{ marginBottom: 14 }}>
             <label>ลูกค้า / เลขที่อ้างอิง <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span></label>
@@ -2877,7 +2866,7 @@ async function commitIssueOrder(data, pushToast) {
     : { dateIso: new Date().toISOString().slice(0, 10), ts: "", backdated: false };
   const ts = od.ts;
   const dateIso = od.dateIso;
-  const dateNote = od.backdated ? ` · ขายวันที่ ${typeof isoToThai === "function" ? isoToThai(dateIso) : dateIso}` : "";
+  const dateNote = od.backdated ? ` · ขายวันที่ ${typeof isoToThai === "function" ? isoToThai(dateIso) : dateIso}${ts ? " " + ts : ""}` : "";
 
   const pieces = plan.skuDeducts.reduce((s, d) => s + d.qty, 0);
 
@@ -2910,6 +2899,7 @@ async function commitIssueOrder(data, pushToast) {
     items: plan.lineCount, status: sf.status, carrier: sf.carrier, tracking: sf.tracking,
     ...(sf.phone ? { phone: sf.phone } : {}),
     ts, dateIso, deductions: plan.channelSplit,
+    ...(od.backdated && od.createdAt ? { createdAt: od.createdAt } : {}),
     isBundle: plan.hasBundle,
     bundleName: plan.hasBundle ? plan.bundleNames.join(", ") : undefined,
     lineItems: plan.lineItems
@@ -2917,9 +2907,9 @@ async function commitIssueOrder(data, pushToast) {
   if (res && res.error) toast("⚠️ ออร์เดอร์จะซิงค์อัตโนมัติเมื่อออนไลน์");
 
   const only = data.lines.filter(l => l && l.qty > 0)[0];
-  toast(plan.lineCount === 1 && only
+  toast((plan.lineCount === 1 && only
     ? `ตัดสต็อก ${only.name} ${pieces} ชิ้น — ${plan.channelLabel}`
-    : `ตัดสต็อก ${plan.lineCount} รายการ (${pieces} ชิ้น) — ${plan.channelLabel}`);
+    : `ตัดสต็อก ${plan.lineCount} รายการ (${pieces} ชิ้น) — ${plan.channelLabel}`) + (od.backdated ? ` (ย้อนหลัง ${typeof isoToThai === "function" ? isoToThai(dateIso) : dateIso}${ts ? " " + ts : ""})` : ""));
   return id;
 }
 
@@ -4487,6 +4477,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const [reasonId, setReasonIdRaw] = useState(() => (typeof lastAdjustReason === "function" ? lastAdjustReason() : ""));
   const setReasonId = (id) => { setReasonIdRaw(id); if (typeof rememberAdjustReason === "function") rememberAdjustReason(id); };
   const [note, setNote] = useState("");
+  const [when, setWhen] = useState(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [scan, setScan] = useState("");
   const [q, setQ] = useState("");
   const [showN, setShowN] = useState(30);
@@ -4562,14 +4553,14 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
     busyRef.current = true;
     setBusy(true);
     const guardKey = (typeof commitFingerprint === "function")
-      ? commitFingerprint("adjust-" + mode + "-" + reasonId, changes) : null;
+      ? commitFingerprint("adjust-" + mode + "-" + reasonId + (when ? "@" + when : ""), changes) : null;
     if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
       if (typeof duplicateCommitToast === "function") duplicateCommitToast();
       busyRef.current = false; setBusy(false);
       return;
     }
     const res = (typeof applyStockAdjustmentBatch === "function")
-      ? applyStockAdjustmentBatch(changes, { reason, note })
+      ? applyStockAdjustmentBatch(changes, { reason, note, when })
       : { applied: 0, net: 0 };
     if (!res.applied) {
       toast("ปรับสต็อกไม่สำเร็จ");
@@ -4588,9 +4579,11 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
       if (locRes && locRes.offline) toast("ปรับสต็อกแล้ว — จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์");
       else if (locRes && locRes.errors && locRes.errors.length) toast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + locRes.errors[0].error);
     }
-    toast(changes.length === 1
+    const backSt = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+    const backTxt = backSt && backSt.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backSt)})` : "";
+    toast((changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
-      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น) — ${reason.label}`);
+      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น) — ${reason.label}`) + backTxt);
     busyRef.current = false; setBusy(false);
     if (product) onApply?.();
     else resetForNext(); // batch loop: back to the picker for the next round
@@ -4738,6 +4731,8 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
                   : <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span>}</label>
                 <input className="input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, อ้างอิงการนับ"/>
               </div>
+              <StockOutWhenField value={when} onChange={setWhen} label="วันเวลาที่ปรับสต็อก"
+                hint="ปรับย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง — ประวัติ (และยอดขาย ถ้าเป็นเหตุผล ขายผ่าน…) จะลงวันนั้น"/>
               {changes.length > 0 && (
                 <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "var(--muted)" }}>จะปรับ {changes.length} รายการ</span>
@@ -5444,6 +5439,43 @@ function LocPickSelect({ sku, value, onChange, need, label }) {
 }
 
 /* ========= SELL PRODUCT MODAL (3-step wizard) ========= */
+/* วันเวลา picker for a stock-out (ตัดสต็อก / ปรับสต็อก / ขายออก / ขาย+จัดส่ง /
+   ขายชุด) — most stock-outs are keyed in after the fact, so the record must land
+   on the day it really happened. "" = now. The value is Bangkok wall-clock
+   "YYYY-MM-DDTHH:MM"; stockOutStamp (data.jsx) turns it into dateIso/ts/createdAt.
+   Mobile twin: MStockOutWhen in handheld.jsx. */
+function StockOutWhenField({ value, onChange, label, hint, style }) {
+  const maxLocal = (typeof nowBkkLocal === "function") ? nowBkkLocal() : "";
+  const stamp = value && typeof stockOutStamp === "function" ? stockOutStamp(value) : null;
+  const backdated = !!(stamp && stamp.backdated);
+  const setYesterday = () => {
+    const base = value || maxLocal;
+    const d = new Date(Date.parse(base.slice(0, 10) + "T00:00:00Z") - 86400000).toISOString().slice(0, 10);
+    onChange(d + "T" + (base.slice(11, 16) || "12:00"));
+  };
+  return (
+    <div className="field" style={{ marginBottom: 14, ...(style || {}) }}>
+      <label>{label || "วันเวลาที่ตัดสต็อก"}</label>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        <input
+          type="datetime-local" className="input" style={{ flex: "1 1 200px", minWidth: 0, ...(backdated ? { borderColor: "var(--warning)" } : {}) }}
+          value={value || maxLocal} max={maxLocal}
+          onChange={e => onChange(e.target.value && e.target.value < maxLocal ? e.target.value : "")}
+        />
+        <button type="button" className="btn" onClick={setYesterday}>เมื่อวาน</button>
+        <button type="button" className={"btn" + (!value ? " btn-primary" : "")} onClick={() => onChange("")}>ตอนนี้</button>
+      </div>
+      {backdated ? (
+        <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", color: "oklch(0.5 0.13 65)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+          <Icons.Calendar size={13}/> ย้อนหลัง · บันทึกเป็นวันที่ <strong>{stockOutStampLabel(stamp)}</strong>
+        </div>
+      ) : (
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{hint || "ทำย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง — จะบันทึกเป็นวันนั้น"}</div>
+      )}
+    </div>
+  );
+}
+
 /* ========= ขายออก (quick sale) — desktop =========
    One screen for the everyday sale: scan or search → quantity → channel → done.
    Writes through commitQuickSale (data.jsx), the same path ปรับสต็อก "ขายผ่าน …"
@@ -5456,6 +5488,9 @@ function QuickSellModal({ onClose, pushToast }) {
   const [lines, setLines] = useState([]);          // [{ sku, qty (string), loc }]
   const [q, setQ] = useState("");
   const [note, setNote] = useState("");
+  // วันเวลาที่ขาย — kept across consecutive sales (a batch of yesterday's orders
+  // is keyed in one after another); the orange bar keeps it visible.
+  const [when, setWhen] = useState("");
   const [camOpen, setCamOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
@@ -5509,11 +5544,13 @@ function QuickSellModal({ onClose, pushToast }) {
   const submit = async () => {
     if (!canSubmit || busyRef.current) return;
     busyRef.current = true; setBusy(true);   // synchronous latch — a double-click must not sell twice
-    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim() });
+    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim(), when });
     busyRef.current = false; setBusy(false);
     if (!res.ok) { if (res.error) toast(res.error); return; }
     const ch = channels.find(c => c.id === reasonId);
-    toast(`ขายออก ${res.pieces} ชิ้น (${res.applied} รายการ) · ${ch ? ch.label : ""}` + (res.locWarning ? " — " + res.locWarning : ""));
+    const st = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+    const backTxt = st && st.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(st)})` : "";
+    toast(`ขายออก ${res.pieces} ชิ้น (${res.applied} รายการ) · ${ch ? ch.label : ""}${backTxt}` + (res.locWarning ? " — " + res.locWarning : ""));
     setLines([]); setNote("");
     setTimeout(() => searchRef.current && searchRef.current.focus(), 60);
   };
@@ -5599,6 +5636,8 @@ function QuickSellModal({ onClose, pushToast }) {
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>หมายเหตุ <span style={{ fontWeight: 400, color: "var(--muted)" }}>(ไม่จำเป็น)</span></div>
             <input className="input" style={{ width: "100%" }} value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, ชื่อลูกค้า"/>
           </div>
+          <StockOutWhenField value={when} onChange={setWhen} label="วันเวลาที่ขาย" style={{ marginTop: 14, marginBottom: 0 }}
+            hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ยอดขายจะนับเป็นวันนั้น"/>
         </div>
         <div className="modal-foot" style={{ alignItems: "center" }}>
           <span style={{ marginRight: "auto", fontSize: 13, color: "var(--muted)" }}>
@@ -5616,6 +5655,7 @@ function QuickSellModal({ onClose, pushToast }) {
 
 function SellProductModal({ onClose, onSellComplete, presetSku }) {
   const [step, setStep] = useState(1);
+  const [when, setWhen] = useState(""); // วันเวลาที่ขาย — "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [sellBusy, setSellBusy] = useState(false);
   const sellBusyRef = useRef(false);
   // presetSku: opened from the Product Finder with an already-confirmed product —
@@ -5740,7 +5780,9 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
     }
 
     const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
-    const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+    const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+    const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
+    const ts = stamp ? stamp.ts : new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
     const hasBundle = cart.some(i => i.type === "bundle");
 
     if (typeof recordChange === "function") {
@@ -5752,7 +5794,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
           label: item.type === "bundle" ? `ชุด: ${item.name}` : item.name,
           to: `−${item.qty} ${item.type === "bundle" ? "ชุด" : "ชิ้น"}`
         })),
-        note: `ผู้รับ: ${ship.name} · ${ship.addr1} · ${ship.carrier}`
+        note: `ผู้รับ: ${ship.name} · ${ship.addr1} · ${ship.carrier}${createdAt ? ` · ย้อนหลัง ${stockOutStampLabel(stamp)}` : ""}`
       });
     }
 
@@ -5765,7 +5807,8 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
       carrier: ship.carrier,
       tracking: "",
       ts,
-      dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
+      dateIso: stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10)),
+      ...(createdAt ? { createdAt } : {}),
       deductions: [{ id: "direct", name: "ขายตรง", color: "#8B5CF6", qty: cartTotal }],
       isSellOrder: true,
       isBundle: hasBundle,
@@ -5798,6 +5841,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
           carrier: ship.carrier,
           cod: ship.cod ? (parseFloat(ship.codAmt) || 0) : 0,
           items: order.lineItems,
+          created_at: createdAt,
         });
       } catch (e) {}
     }
@@ -6112,6 +6156,9 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
                   ))}
                 </div>
               </div>
+
+              <StockOutWhenField value={when} onChange={setWhen} label="วันเวลาที่ขาย" style={{ marginBottom: 0 }}
+                hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"/>
 
               <div style={{ padding: "12px 14px", background: "var(--info-soft)", borderRadius: 10, fontSize: 12, color: "var(--info)" }}>
                 <div className="row" style={{ gap: 6, fontWeight: 600, marginBottom: 4 }}><Icons.Check size={13}/>พร้อมยืนยัน</div>
