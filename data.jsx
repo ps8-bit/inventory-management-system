@@ -216,6 +216,19 @@ async function renameProductSku(oldSku, newSku) {
   const finalSku = res.sku || to;
   const p = PRODUCTS.find(x => x.sku === from);
   if (p) p.sku = finalSku;
+  /* The shelf rows followed on the server (ON UPDATE CASCADE) but this device's
+     cached split was still keyed by the OLD sku — so the renamed product looked
+     shelf-less here, and a receive right after the rename never reached its
+     shelf (AFG-VT36/37-C-BK-M, 23 Sep: stock 22/28 vs shelf 2/10). */
+  if (typeof loadProductLocs === "function" && typeof _mirrorProductLocs === "function") {
+    const locMap = loadProductLocs();
+    if (locMap && locMap[from]) {
+      const next = { ...locMap };
+      next[finalSku] = next[from];
+      delete next[from];
+      _mirrorProductLocs(next);
+    }
+  }
   // The photo is keyed by sku in app_state, not FK-linked — carry it across by hand.
   if (typeof loadProductImages === "function" && typeof setProductImage === "function") {
     const img = loadProductImages()[from];
@@ -632,7 +645,34 @@ function recordStockMoves(entries, reason) {
     .map(e => ({ sku: e && e.sku, delta: Math.trunc(Number(e && e.delta) || 0), reason: (e && e.reason) || reason || "" }))
     .filter(e => e.sku && e.delta);
   if (!rows.length) return;
-  dbInsertStockAdjustment(rows).catch(() => {});
+  writeLedgerRows(rows);
+}
+/* Insert movement-history rows, and KEEP them if the insert can't land.
+   The qty write behind a movement is queued when the phone is offline and
+   replays later — but the history row used to be tried once and dropped, so a
+   stock change made with no signal reached the server with no record of it
+   ("ปรับสต็อกในมือถือ แต่รายงานไม่ครบ"). A failed insert now joins the same
+   offline queue. An RLS refusal is not retried (it won't fix itself). The
+   author is captured NOW so a replay can't credit whoever is logged in later.
+   Returns a promise of the first attempt's result. */
+// Only a transport failure is worth retrying. Anything the database answered
+// (RLS refusal, unknown sku FK, bad value) will fail the same way forever.
+function _ledgerRefused(err) {
+  return !/fetch|network|timeout|timed out|abort|offline|ECONN|5\d\d|gateway|unavailable/i.test(String(err || ""));
+}
+function writeLedgerRows(rows) {
+  if (typeof dbInsertStockAdjustment !== "function") return Promise.resolve({ ok: false });
+  const by = (window.__currentUser && window.__currentUser.name) || "ระบบ";
+  const at = new Date().toISOString();
+  const list = (Array.isArray(rows) ? rows : []).filter(r => r && r.sku && Number(r.delta))
+    .map(r => ({ sku: r.sku, delta: Math.trunc(Number(r.delta)), reason: r.reason || "", created_by: r.created_by || by, at: r.at || at }));
+  if (!list.length) return Promise.resolve({ ok: true });
+  const keep = () => { if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("ledger", list); };
+  if (typeof navigator !== "undefined" && navigator.onLine === false) { keep(); return Promise.resolve({ queued: true }); }
+  return dbInsertStockAdjustment(list).then(res => {
+    if (res && res.error && !_ledgerRefused(res.error)) keep();
+    return res || { ok: true };
+  }).catch(e => { keep(); return { error: String(e) }; });
 }
 
 /* Same contract as _syncQtyDelta: resolves with what the SERVER did, so the
@@ -773,7 +813,10 @@ function receiveStockAndRecord(lines, reason) {
     const qty = Math.round(Number(l && l.qty) || 0);
     if (!l || !l.sku || !qty) return;
     if (!PRODUCTS.some(p => p.sku === l.sku)) return;
-    jobs.push({ sku: l.sku, qty, loc: l.loc || "", write: adjustProductQty(l.sku, qty) });
+    // The shelf the batch really lands on (the line's pick, else the product's own
+    // shelf — what applyReceiveLocs files it under), so the history names it.
+    const loc = ("loc" in l) ? (receiveLineShelf(l) || "") : "";
+    jobs.push({ sku: l.sku, qty, loc, write: adjustProductQty(l.sku, qty) });
   });
   if (!jobs.length) return Promise.resolve();
   return Promise.all(jobs.map(j =>
@@ -857,11 +900,9 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
       }
       // Structured, queryable history (stock_adjustments table). Best-effort like
       // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
-      if (typeof dbInsertStockAdjustment === "function") {
-        dbInsertStockAdjustment([{ sku, delta: rEff, reason: noteOut }])
-          .then(() => { if (rEff < 0 && isAdjustSaleReason(noteOut)) refreshSaleMovesSoon(); })
-          .catch(() => {});
-      }
+      writeLedgerRows([{ sku, delta: rEff, reason: noteOut }])
+        .then(() => { if (rEff < 0 && isAdjustSaleReason(noteOut)) refreshSaleMovesSoon(); })
+        .catch(() => {});
     };
     Promise.resolve(write).then(res => {
       if (res && res.ok && typeof res.after === "number") {
@@ -1528,6 +1569,33 @@ async function applyReceiveLocs(lines) {
     if (r && r.ok === false) { out.ok = false; out.errors.push({ sku: job[0], error: r.error }); }
   }
   return out;
+}
+
+/* ── Receiving: never close a batch without knowing where it went ──
+   The shelf picker on a receive line is optional, and a product created by the
+   scan (quick-add) has no shelf to default to — so a whole batch could be
+   committed with nowhere recorded: the history said "รับเข้าสินค้า" with no
+   "→ shelf" and the product sat as ยังไม่จัดเก็บ (2026-10-02 audit: 72 of 76
+   receive lines since 19 Sep, 123 products / 706 pieces). Both Inbound forks use
+   these to warn before ปิดงาน and to fill every empty line in one pick. */
+function receiveLineShelf(line, set) {
+  if (!line || !line.sku) return "";
+  const s = set || storedLocSet();
+  if (locIsStored(line.loc, s)) return String(line.loc);
+  const p = PRODUCTS.find(x => x.sku === line.sku);
+  return p ? productHomeLoc(p, s) : "";
+}
+function receiveLinesWithoutShelf(lines) {
+  const s = storedLocSet();
+  return (Array.isArray(lines) ? lines : []).filter(l => l && l.sku && !receiveLineShelf(l, s));
+}
+// The shelf picked last on this device — a receiving session usually lands in one place.
+const RECV_LOC_KEY = "ims_last_receive_loc";
+function lastReceiveLoc() {
+  try { const v = localStorage.getItem(RECV_LOC_KEY) || ""; return locIsStored(v) ? v : ""; } catch (e) { return ""; }
+}
+function rememberReceiveLoc(loc) {
+  try { if (locIsStored(loc)) localStorage.setItem(RECV_LOC_KEY, String(loc)); } catch (e) {}
 }
 
 /* Product-finder search (ตำแหน่งสินค้า): match by SKU or name — the SKU doubles
@@ -3196,6 +3264,18 @@ async function flushOfflineQueue() {
           // NOTE: do NOT consume on RPC_MISSING — that would drop the delta forever
           // (local-only, never reaches the DB). Leave it queued so it replays once
           // adjust-stock.sql is deployed (mirrors the "deduct" branch).
+        } else if (item.type === "ledger" && typeof dbInsertStockAdjustment === "function") {
+          // A history row that couldn't be written when its movement happened.
+          // Its original time travels in the reason (created_at is server-set).
+          const rows = (item.payload || []).map(r => {
+            let when = "";
+            try { when = (typeof bangkokDateOf === "function" && typeof bangkokTimeOf === "function") ? `${bangkokDateOf(r.at)} ${bangkokTimeOf(r.at)}` : String(r.at || ""); } catch (e) {}
+            return { sku: r.sku, delta: r.delta, created_by: r.created_by,
+                     reason: (r.reason || "") + (when ? ` · บันทึกย้อนหลัง (เกิดเมื่อ ${when})` : "") };
+          });
+          const r = await dbInsertStockAdjustment(rows);
+          ok = !!(r && (r.ok || _ledgerRefused(r.error)));
+          if (ok && typeof refreshSaleMovesSoon === "function") refreshSaleMovesSoon();
         } else if (item.type === "delete-order" && typeof dbDeleteOrder === "function") {
           let allOk = true;
           for (const id of (item.payload || [])) {
@@ -3210,7 +3290,7 @@ async function flushOfflineQueue() {
             if (r && r.error && r.error !== "PERMISSION_OR_MISSING") allOk = false;
           }
           ok = allOk;
-        } else if (["orders", "labels", "deduct", "adjust", "delete-order", "delete-label"].includes(item.type)) {
+        } else if (["orders", "labels", "deduct", "adjust", "ledger", "delete-order", "delete-label"].includes(item.type)) {
           // The DB helper isn't loaded yet — DON'T consume (avoids silently
           // dropping a real write); leave it for the next flush.
           ok = false;
@@ -3395,7 +3475,7 @@ Object.assign(window, {
   lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, ISSUE_CARRIERS, issueOrderDate,
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
-  recordStockMoves, receiveStockAndRecord,
+  recordStockMoves, writeLedgerRows, receiveStockAndRecord,
   loadStockTake, saveStockTake, applyStockCounts,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   omit,
@@ -3412,6 +3492,7 @@ Object.assign(window, {
   isBlankDraftOrder, isPendingOrder, ORDER_STATUS_TH, orderShortId, orderChannelLabel,
   loadProductLocs, locSplitFor, hasLocSplit, locSplitTotal, productPositions, qtyAtLocation, productsInLocation, saveLocSplit,
   applyLocPicks, defaultPickLoc, moveStockToLocation, applyReceiveLocs,
+  receiveLineShelf, receiveLinesWithoutShelf, lastReceiveLoc, rememberReceiveLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions,

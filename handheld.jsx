@@ -505,8 +505,20 @@ function MInbound({ ctx }) {
     setTimeout(() => setFlash(null), 1500);
   };
   // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
-  const setReceivedLoc = (idx, locV) =>
+  const setReceivedLoc = (idx, locV) => {
+    if (typeof rememberReceiveLoc === "function") rememberReceiveLoc(locV);
     setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
+  };
+  // Lines that would be committed with NO shelf (none picked, none on the product)
+  // — the FG-ELWEB-BK case: 30 pieces received, filed nowhere, no warning.
+  const noShelf = (typeof receiveLinesWithoutShelf === "function") ? receiveLinesWithoutShelf(received) : [];
+  const noShelfSet = new Set(noShelf.map(r => r.sku));
+  const fillEmptyShelves = (locV) => {
+    if (!locV) return;
+    if (typeof rememberReceiveLoc === "function") rememberReceiveLoc(locV);
+    setReceived(prev => prev.map(r => (noShelfSet.has(r.sku) ? { ...r, loc: locV } : r)));
+    ctx.pushToast(`ตั้งตำแหน่ง ${noShelf.length} รายการแล้ว`);
+  };
   // Manual qty correction for an already-scanned line — keyed by sku, not index,
   // since `received` reorders on every new scan (most-recent first).
   const setReceivedQty = (sku, n) =>
@@ -561,6 +573,10 @@ function MInbound({ ctx }) {
       return;
     }
     const totalQty = received.reduce((s, r) => s + r.qty, 0);
+    if (noShelf.length) {
+      const list = noShelf.slice(0, 8).map(r => `• ${r.sku}`).join("\n") + (noShelf.length > 8 ? `\n…อีก ${noShelf.length - 8} รายการ` : "");
+      if (!confirm(`⚠ ยังไม่ได้เลือกตำแหน่งจัดเก็บ ${noShelf.length} รายการ:\n${list}\n\nถ้าปิดงานตอนนี้ สินค้าจะขึ้นว่า "ยังไม่จัดเก็บ"\nกด ยกเลิก เพื่อกลับไปเลือกตำแหน่ง (แนะนำ)\nกด ตกลง เพื่อปิดงานโดยไม่ระบุตำแหน่ง`)) return;
+    }
     if (!confirm(`ยืนยันปิดงานรับเข้า?\nจะเพิ่มสต็อก ${totalQty} ชิ้น ใน ${received.length} SKU เข้าระบบทันที`)) return;
     /* confirm() blocks the thread, so a second tap queues behind it and used to
        run the whole batch again with the stale `closed` closure — every sku
@@ -596,7 +612,10 @@ function MInbound({ ctx }) {
       recordChange({
         entity: "inbound", action: "close",
         summary: `ปิดงานรับเข้า (มือถือ) — เพิ่มสต็อก ${received.length} SKU รวม ${totalQty} ชิ้น`,
-        changes: received.map(r => ({ label: r.sku, to: `+${r.qty} ชิ้น` }))
+        changes: received.map(r => {
+          const sh = (typeof receiveLineShelf === "function") ? receiveLineShelf(r) : (r.loc || "");
+          return { label: r.sku, to: `+${r.qty} ชิ้น → ${sh || "ไม่ระบุตำแหน่ง"}` };
+        })
       });
     }
     setClosed(true);
@@ -755,6 +774,13 @@ function MInbound({ ctx }) {
         )}
 
         <div className="m-section-label" style={{ padding: "0 4px 8px" }}>นับแล้ว · {received.length} SKU</div>
+        {!closed && noShelf.length > 0 && (
+          <div style={{ padding: "10px 12px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 12, fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}><Icons.Warn size={14}/> ยังไม่ได้เลือกตำแหน่ง {noShelf.length} รายการ</div>
+            <LocationSelect mobile value="" onChange={fillEmptyShelves} noneLabel="ใส่ตำแหน่งให้ทุกรายการที่ว่าง…"
+              style={{ marginTop: 8, height: 38, fontSize: 13 }}/>
+          </div>
+        )}
         <div className="m-list">
           {received.map((r, i) => (
             <div key={i} className="m-row" style={{ cursor: "default", alignItems: "flex-start" }}>
@@ -765,7 +791,8 @@ function MInbound({ ctx }) {
                 {closed
                   ? <div className="m-row-sub mono">{r.loc || "—"}</div>
                   : <LocationSelect mobile value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
-                      noneLabel="— จัดเก็บที่… —" style={{ marginTop: 4, height: 34, fontSize: 12, padding: "0 8px" }}/>}
+                      noneLabel="— จัดเก็บที่… —" style={{ marginTop: 4, height: 34, fontSize: 12, padding: "0 8px",
+                               ...(noShelfSet.has(r.sku) ? { borderColor: "var(--danger)", boxShadow: "0 0 0 1px var(--danger)" } : {}) }}/>}
               </div>
               {closed
                 ? <div className="tnum" style={{ fontWeight: 600, fontSize: 15 }}>×{r.qty}</div>

@@ -164,7 +164,7 @@ function ConfirmDialog({ open, title, description, changes, count, action, dange
         <div className="modal-head">
           <div>
             <h3>{title}</h3>
-            {description && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{description}</div>}
+            {description && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, whiteSpace: "pre-line" }}>{description}</div>}
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onCancel}><Icons.X/></button>
         </div>

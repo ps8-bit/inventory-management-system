@@ -835,7 +835,9 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
   const [name,     setName]     = useState(prefill?.name || "");
   const [cat,      setCat]      = useState(prefill?.cat || cats[0] || "ทั่วไป");
   const [brand,    setBrand]    = useState(prefill?.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(sku) : ""));
-  const [loc,      setLoc]      = useState("");
+  // Start from the shelf this device received into last — a scan session
+  // usually lands in one place, and a blank shelf left the new product unstored.
+  const [loc,      setLoc]      = useState(() => (typeof lastReceiveLoc === "function" ? lastReceiveLoc() : ""));
   const [price,    setPrice]    = useState(prefill?.price ? String(prefill.price) : "");
   const [reorder,  setReorder]  = useState("2");   // was 30 — typical stock is ~4, so 30 flagged most SKUs as low
   const [supplier, setSupplier] = useState(suppliers[0] || "");
@@ -851,6 +853,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
     // Register a brand-new category typed here so it persists + syncs to the
     // shared list (addCategory no-ops if it already exists).
     if (typeof addCategory === "function") { try { addCategory(catVal); } catch (e) {} }
+    if (typeof rememberReceiveLoc === "function") rememberReceiveLoc(loc);
     const product = {
       sku,
       name:     name.trim(),
@@ -1317,8 +1320,20 @@ function Inbound({ goTo, pushToast }) {
     });
   };
   // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
-  const setReceivedLoc = (idx, locV) =>
+  const setReceivedLoc = (idx, locV) => {
+    if (typeof rememberReceiveLoc === "function") rememberReceiveLoc(locV);
     setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
+  };
+  // Lines that would be committed with NO shelf (none picked, none on the product).
+  const noShelf = (typeof receiveLinesWithoutShelf === "function") ? receiveLinesWithoutShelf(received) : [];
+  const noShelfSet = new Set(noShelf.map(r => r.sku));
+  // One pick fills every empty line — a scan batch usually lands on one shelf.
+  const fillEmptyShelves = (locV) => {
+    if (!locV) return;
+    if (typeof rememberReceiveLoc === "function") rememberReceiveLoc(locV);
+    setReceived(prev => prev.map(r => (noShelfSet.has(r.sku) ? { ...r, loc: locV } : r)));
+    pushToast(`ตั้งตำแหน่ง ${noShelf.length} รายการเป็น ${locV}`);
+  };
   // Manual qty correction for an already-scanned line (e.g. one scan actually
   // covered a multi-pack, or a rescan-to-bump would be slower than just typing
   // the count). Keyed by sku, not index — `received` reorders on every new scan
@@ -1410,7 +1425,11 @@ function Inbound({ goTo, pushToast }) {
             onClick={() => {
               if (received.length === 0 || closed) return;
               setCloseConfirm({
-                changes: received.map(r => ({ label: r.sku, to: `+${r.qty} ชิ้น` }))
+                changes: received.map(r => {
+                  const sh = (typeof receiveLineShelf === "function") ? receiveLineShelf(r) : (r.loc || "");
+                  return { label: r.sku, to: `+${r.qty} ชิ้น → ${sh || "⚠ ไม่ระบุตำแหน่ง"}` };
+                }),
+                missing: noShelf.length
               });
             }}
           >
@@ -1559,6 +1578,13 @@ function Inbound({ goTo, pushToast }) {
             <div className="sub">เรียงตามเวลาที่สแกนล่าสุด</div>
           </div>
           <div className="row">
+            {!closed && noShelf.length > 0 && (
+              <div className="row" style={{ gap: 6, padding: "4px 8px", borderRadius: 8, background: "var(--warning-soft)", color: "var(--warning)", fontSize: 12, fontWeight: 600 }}>
+                <Icons.Warn size={13}/> ยังไม่ระบุตำแหน่ง {noShelf.length} รายการ
+                <LocationSelect value="" onChange={fillEmptyShelves} noneLabel="ใส่ตำแหน่งให้ทุกรายการที่ว่าง…"
+                  style={{ padding: "4px 6px", fontSize: 12, minWidth: 200 }}/>
+              </div>
+            )}
             <button className="btn btn-ghost btn-sm" onClick={() => window.location.reload()}><Icons.Refresh size={14}/></button>
             {canDo("exportData") && <button className="btn btn-sm" onClick={() => {
               if (!received.length) return;
@@ -1592,7 +1618,9 @@ function Inbound({ goTo, pushToast }) {
                   {closed
                     ? <span className="badge badge-neutral"><Icons.Map size={11}/>{r.loc || "—"}</span>
                     : <LocationSelect value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
-                        noneLabel="— ยังไม่ระบุ —" style={{ padding: "6px 8px", fontSize: 12, width: "100%" }}/>}
+                        noneLabel="— ยังไม่ระบุ —"
+                        style={{ padding: "6px 8px", fontSize: 12, width: "100%",
+                                 ...(noShelfSet.has(r.sku) ? { borderColor: "var(--danger)", boxShadow: "0 0 0 1px var(--danger)" } : {}) }}/>}
                 </td>
                 <td className="t-num tnum">
                   {closed
@@ -1674,9 +1702,11 @@ function Inbound({ goTo, pushToast }) {
       <ConfirmDialog
         open={!!closeConfirm}
         title="ยืนยันปิดงานรับเข้า"
-        description={`จะเพิ่มสต็อกจำนวน ${received.reduce((s,r)=>s+r.qty,0)} ชิ้น ใน ${received.length} SKU เข้าระบบทันที`}
+        description={`จะเพิ่มสต็อกจำนวน ${received.reduce((s,r)=>s+r.qty,0)} ชิ้น ใน ${received.length} SKU เข้าระบบทันที`
+          + (closeConfirm?.missing ? `\n⚠ ${closeConfirm.missing} รายการยังไม่ได้เลือกตำแหน่งจัดเก็บ — สินค้าจะขึ้นว่า "ยังไม่จัดเก็บ" กด ยกเลิก เพื่อกลับไปเลือกตำแหน่ง` : "")}
         changes={closeConfirm?.changes || []}
-        action="ยืนยันปิดงาน"
+        danger={!!closeConfirm?.missing}
+        action={closeConfirm?.missing ? "ปิดงานโดยไม่ระบุตำแหน่ง" : "ยืนยันปิดงาน"}
         onCancel={() => setCloseConfirm(null)}
         onConfirm={() => {
           /* One receiving batch = one commit. Without this latch a double-click,
@@ -1718,7 +1748,10 @@ function Inbound({ goTo, pushToast }) {
             recordChange({
               entity: "inbound", action: "close",
               summary: `ปิดงานรับเข้า — เพิ่มสต็อก ${received.length} SKU รวม ${received.reduce((s,r)=>s+r.qty,0)} ชิ้น`,
-              changes: received.map(r => ({ label: r.sku, to: `+${r.qty} ชิ้น` }))
+              changes: received.map(r => {
+                const sh = (typeof receiveLineShelf === "function") ? receiveLineShelf(r) : (r.loc || "");
+                return { label: r.sku, to: `+${r.qty} ชิ้น → ${sh || "ไม่ระบุตำแหน่ง"}` };
+              })
             });
           }
           setCloseConfirm(null);

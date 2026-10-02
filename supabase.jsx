@@ -316,7 +316,7 @@ async function dbInsertStockAdjustment(entries) {
       sku: e.sku,
       delta: Number(e.delta),
       reason: e.reason || '',
-      created_by: (window.__currentUser && window.__currentUser.name) || 'ระบบ'
+      created_by: e.created_by || (window.__currentUser && window.__currentUser.name) || 'ระบบ'
     }));
   if (!rows.length) return { ok: true };
   const { data, error } = await sb.from('stock_adjustments').insert(rows).select('id');
@@ -696,6 +696,26 @@ async function dbLoadLocationImages() {
    same sku, which looks exactly like a duplicated entry even when it isn't.
    One statement = one created_at + sequential ids, and the list's
    `created_at desc, id desc` sort replays the batch in true order. */
+/* audit_log has no column for the per-field / per-SKU `changes` list, so it used
+   to stay on the device that made the change — every other device saw only
+   "ปิดงานรับเข้า — เพิ่มสต็อก 2 SKU รวม 40 ชิ้น" with no idea WHICH SKUs. Fold
+   the list into the stored note (local display is unchanged: it still has
+   `changes` itself). Capped so a huge batch can't produce a giant row. */
+function _auditNoteForDb(e) {
+  const base = String(e.note || '');
+  const ch = Array.isArray(e.changes) ? e.changes : [];
+  if (!ch.length) return base;
+  const detail = ch.map(c => {
+    if (!c) return '';
+    const lab = c.label != null ? String(c.label) : '';
+    const from = (c.from != null && c.from !== '') ? `${c.from} → ` : '';
+    const to = c.to != null ? String(c.to) : '';
+    return lab + (from || to ? `: ${from}${to}` : '');
+  }).filter(Boolean).join(' · ');
+  if (!detail) return base;
+  const out = base ? `${base} | ${detail}` : detail;
+  return out.length > 3000 ? out.slice(0, 2990) + ' …' : out;
+}
 async function dbInsertAuditEntry(entry) {
   const list = Array.isArray(entry) ? entry : [entry];
   const rows = list.filter(Boolean).map(e => ({
@@ -703,7 +723,7 @@ async function dbInsertAuditEntry(entry) {
     entity_id: e.entityId  || '',
     action:    e.action    || '',
     summary:   e.summary   || '',
-    note:      e.note      || '',
+    note:      _auditNoteForDb(e),
     user_name: e.user?.name || 'ระบบ'
   }));
   if (!rows.length) return;
