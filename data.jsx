@@ -459,7 +459,7 @@ function deductManyAndPersist(deductions) {
    forked but the logic must not be. Distinct from the sell/ตัดสต็อก flows: it
    never creates an order, so external sales recorded here deliberately do NOT
    feed revenue/channel analytics (those read orders — use ตัดสต็อก for that). */
-function applyStockAdjustment({ sku, delta, reason, note, source }) {
+function applyStockAdjustment({ sku, delta, reason, note, source, when }) {
   const d = Math.trunc(Number(delta) || 0);
   const p = PRODUCTS.find(x => x.sku === sku);
   if (!p || !d) return { ok: false };
@@ -481,7 +481,13 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
   const eff = to - from;
   const reasonLabel = (reason && reason.label) || String(reason || "");
   const noteText = String(note || "").trim();
-  const fullReason = noteText ? `${reasonLabel} — ${noteText}` : reasonLabel;
+  // Backdated adjustment (ปรับสต็อกย้อนหลัง): the stock moves now, but the
+  // history row is dated when it really happened and the reason says so. The
+  // audit-log row keeps its real edit time — it records WHEN someone keyed it in.
+  const stamp = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+  const back = stamp && stamp.backdated ? stamp : null;
+  const backText = back ? `ย้อนหลัง ${stockOutStampLabel(back)}` : "";
+  const fullReason = [noteText ? `${reasonLabel} — ${noteText}` : reasonLabel, backText].filter(Boolean).join(" · ");
   // Record the EFFECTIVE local delta (post-clamp), not the requested one, so the
   // trail never claims more than happened. Skip both writes when nothing moved.
   if (eff) {
@@ -498,7 +504,7 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
     // Structured, queryable history (stock_adjustments table). Best-effort like
     // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
     if (typeof dbInsertStockAdjustment === "function") {
-      dbInsertStockAdjustment([{ sku, delta: eff, reason: fullReason }]).catch(() => {});
+      dbInsertStockAdjustment([{ sku, delta: eff, reason: fullReason, createdAt: back ? back.createdAt : undefined }]).catch(() => {});
     }
   }
   return { ok: true, from, to, eff };
@@ -511,13 +517,13 @@ function applyStockAdjustment({ sku, delta, reason, note, source }) {
    stay granular (the ProductDrawer history panel reads them per product).
    items = [{ sku, delta }] → { ok, applied, skipped, net, results }. */
 function applyStockAdjustmentBatch(items, opts) {
-  const { reason, note, source } = opts || {};
+  const { reason, note, source, when } = opts || {};
   const list = Array.isArray(items) ? items : [];
   const results = [];
   let applied = 0, skipped = 0, net = 0;
   list.forEach(it => {
     if (!it || !it.sku) { skipped++; return; }
-    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source }) || { ok: false };
+    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source, when }) || { ok: false };
     results.push({ sku: it.sku, ...res });
     // eff === 0 means the clamp ate the change (already 0 คงเหลือ) — not applied.
     if (res.ok && res.eff) { applied++; net += res.eff; } else skipped++;
@@ -1356,6 +1362,31 @@ function bangkokDateStr(nowMs) {
 // TODAY_ISO is evaluated once at page load, so an always-on PWA/tablet left open
 // past midnight would otherwise stamp orders and filter with yesterday's date.
 function todayIso() { return bangkokDateStr(); }
+/* ── Backdated stock-out (ตัดสต็อกย้อนหลัง) ──
+   The ตัดสต็อก forms carry a "วันเวลาที่ตัดสต็อก" field, a datetime-local value
+   "YYYY-MM-DDTHH:MM" read as Bangkok wall-clock time ("" = now). Bangkok has no
+   DST, so a fixed +07:00 offset is exact. */
+function nowBkkLocal(nowMs) {
+  const d = new Date((typeof nowMs === "number" ? nowMs : Date.now()) + 7 * 3600 * 1000);
+  return d.toISOString().slice(0, 16);
+}
+// → { dateIso, ts, createdAt, backdated }. A future value clamps to now; an
+// unparseable or empty one means now.
+function stockOutStamp(local) {
+  const now = Date.now();
+  let t = (typeof local === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(local))
+    ? Date.parse(local.slice(0, 16) + ":00+07:00") : NaN;
+  if (!Number.isFinite(t) || t > now) t = now;
+  const wall = nowBkkLocal(t);
+  // Backdated only if it lands at least a minute in the past — a form left open
+  // for a while still stamps "now" when the user never touched the field.
+  const backdated = now - t >= 60 * 1000;
+  return { dateIso: wall.slice(0, 10), ts: wall.slice(11, 16), createdAt: new Date(t).toISOString(), backdated };
+}
+// "1 ต.ค. 2569 14:05" — for toasts / audit notes on a backdated stock-out.
+function stockOutStampLabel(stamp) {
+  return stamp ? `${isoToThai(stamp.dateIso)} ${stamp.ts}` : "";
+}
 // Convert a stored UTC ISO timestamp (e.g. label.created_at) to its Asia/Bangkok
 // calendar date. A raw .slice(0,10) on the UTC string gives the WRONG day for
 // anything created 00:00–06:59 Bangkok. Guards an unparseable input.
@@ -2202,6 +2233,7 @@ Object.assign(window, {
   omit,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, todayIso, bangkokDateOf, isoToThai,
+  nowBkkLocal, stockOutStamp, stockOutStampLabel,
   CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canOpenPage, canDo, capServerLocked, currentRoleId,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, importProductsBulk, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,

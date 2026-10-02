@@ -270,12 +270,17 @@ async function dbAdjustStock(adjustments) {
 async function dbInsertStockAdjustment(entries) {
   const rows = (entries || [])
     .filter(e => e && e.sku && Number(e.delta))
-    .map(e => ({
-      sku: e.sku,
-      delta: Number(e.delta),
-      reason: e.reason || '',
-      created_by: (window.__currentUser && window.__currentUser.name) || 'ระบบ'
-    }));
+    .map(e => {
+      const row = {
+        sku: e.sku,
+        delta: Number(e.delta),
+        reason: e.reason || '',
+        created_by: (window.__currentUser && window.__currentUser.name) || 'ระบบ'
+      };
+      // Backdated adjustment — date the history row when it really happened.
+      if (e.createdAt) row.created_at = e.createdAt;
+      return row;
+    });
   if (!rows.length) return { ok: true };
   const { data, error } = await sb.from('stock_adjustments').insert(rows).select('id');
   if (error) { console.error('[DB] insert stock_adjustments:', error.message); return { error: error.message }; }
@@ -434,6 +439,15 @@ async function dbUpsertOrders(orders) {
   if (!data || data.length < rows.length) {
     console.error('[DB] upsert orders blocked (RLS) —', data?.length ?? 0, 'of', rows.length);
     return { error: 'PERMISSION_OR_MISSING' };
+  }
+  // Backdated stock-out: stamp created_at so the order's time survives a reload
+  // (_rowToOrder derives ts from created_at). A scoped UPDATE rather than a column
+  // in _orderToRow, whose shape the public track-lookup function depends on.
+  // Best-effort — the date already persisted via date_iso.
+  for (const o of orders) {
+    if (!o || !o.createdAt) continue;
+    const { error: e2 } = await sb.from('orders').update({ created_at: o.createdAt }).eq('id', o.id);
+    if (e2) console.error('[DB] set order created_at:', e2.message);
   }
   return { ok: true };
 }
