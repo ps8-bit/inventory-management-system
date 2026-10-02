@@ -1655,6 +1655,7 @@ function MAdjust({ ctx }) {
   const [mode, setMode] = useStateM("remove"); // add | remove | set
   const [reasonId, setReasonId] = useStateM("");
   const [note, setNote] = useStateM("");
+  const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   useEffectM(() => () => setCamOpen(false), []);
 
   const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
@@ -1701,7 +1702,7 @@ function MAdjust({ ctx }) {
   const submit = async () => {
     if (!canSubmit) return;
     const res = (typeof applyStockAdjustmentBatch === "function")
-      ? applyStockAdjustmentBatch(changes, { reason, note, source: "mobile" })
+      ? applyStockAdjustmentBatch(changes, { reason, note, source: "mobile", when })
       : { applied: 0, net: 0 };
     if (!res.applied) { ctx.pushToast("ปรับสต็อกไม่สำเร็จ"); return; }
     // Re-balance the split from the applied results (a clamped row contributes nothing).
@@ -1712,9 +1713,11 @@ function MAdjust({ ctx }) {
       const locRes = await applyLocPicks(picks);
       if (locRes && locRes.errors && locRes.errors.length) ctx.pushToast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ — แก้ที่หน้าสินค้าบนเดสก์ท็อป");
     }
-    ctx.pushToast(changes.length === 1
+    const backStamp = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+    const backToast = backStamp && backStamp.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backStamp)})` : "";
+    ctx.pushToast((changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
-      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น)`);
+      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น)`) + backToast);
     ctx.back();
   };
 
@@ -1839,6 +1842,8 @@ function MAdjust({ ctx }) {
 
             <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>หมายเหตุ {reason && reason.requireNote ? "(จำเป็น)" : "(ไม่จำเป็น)"}</div>
             <input className="m-input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, อ้างอิงการนับ"/>
+
+            <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ปรับสต็อก" hint="ปรับย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง"/>
 
             {changes.length > 0 && (
               <div className="m-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
@@ -2164,7 +2169,7 @@ function MIssue({ ctx }) {
 
 /* Mobile twin of StockOutWhenField (screens.jsx) — วันเวลาที่ตัดสต็อก for a
    backdated stock-out. "" = now. */
-function MStockOutWhen({ value, onChange }) {
+function MStockOutWhen({ value, onChange, label, hint }) {
   const maxLocal = (typeof nowBkkLocal === "function") ? nowBkkLocal() : "";
   const stamp = value && typeof stockOutStamp === "function" ? stockOutStamp(value) : null;
   const backdated = !!(stamp && stamp.backdated);
@@ -2175,7 +2180,7 @@ function MStockOutWhen({ value, onChange }) {
   };
   return (
     <>
-      <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>วันเวลาที่ตัดสต็อก</div>
+      <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>{label || "วันเวลาที่ตัดสต็อก"}</div>
       <input
         type="datetime-local" className="m-input"
         value={value || maxLocal} max={maxLocal}
@@ -2187,10 +2192,10 @@ function MStockOutWhen({ value, onChange }) {
       </div>
       {backdated ? (
         <div style={{ margin: "6px 0 8px", padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", color: "oklch(0.5 0.13 65)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-          <Icons.Calendar size={13}/> ตัดสต็อกย้อนหลัง · <strong>{stockOutStampLabel(stamp)}</strong>
+          <Icons.Calendar size={13}/> ย้อนหลัง · <strong>{stockOutStampLabel(stamp)}</strong>
         </div>
       ) : (
-        <div style={{ fontSize: 11, color: "var(--muted)", margin: "4px 4px 8px" }}>ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง</div>
+        <div style={{ fontSize: 11, color: "var(--muted)", margin: "4px 4px 8px" }}>{hint || "ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง"}</div>
       )}
     </>
   );

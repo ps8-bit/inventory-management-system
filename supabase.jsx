@@ -270,12 +270,17 @@ async function dbAdjustStock(adjustments) {
 async function dbInsertStockAdjustment(entries) {
   const rows = (entries || [])
     .filter(e => e && e.sku && Number(e.delta))
-    .map(e => ({
-      sku: e.sku,
-      delta: Number(e.delta),
-      reason: e.reason || '',
-      created_by: (window.__currentUser && window.__currentUser.name) || 'ระบบ'
-    }));
+    .map(e => {
+      const row = {
+        sku: e.sku,
+        delta: Number(e.delta),
+        reason: e.reason || '',
+        created_by: (window.__currentUser && window.__currentUser.name) || 'ระบบ'
+      };
+      // Backdated adjustment — date the history row when it really happened.
+      if (e.createdAt) row.created_at = e.createdAt;
+      return row;
+    });
   if (!rows.length) return { ok: true };
   const { data, error } = await sb.from('stock_adjustments').insert(rows).select('id');
   if (error) { console.error('[DB] insert stock_adjustments:', error.message); return { error: error.message }; }

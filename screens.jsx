@@ -2243,7 +2243,7 @@ function SkuPicker({ value, onChange, products }) {
    happened (most deductions are keyed in after the fact). "" = now. The value is
    Bangkok wall-clock "YYYY-MM-DDTHH:MM"; stockOutStamp (data.jsx) turns it into
    the order's dateIso/ts/createdAt. Mobile twin: MStockOutWhen in handheld.jsx. */
-function StockOutWhenField({ value, onChange }) {
+function StockOutWhenField({ value, onChange, label, hint }) {
   const maxLocal = (typeof nowBkkLocal === "function") ? nowBkkLocal() : "";
   const stamp = value && typeof stockOutStamp === "function" ? stockOutStamp(value) : null;
   const backdated = !!(stamp && stamp.backdated);
@@ -2255,7 +2255,7 @@ function StockOutWhenField({ value, onChange }) {
   };
   return (
     <div className="field" style={{ marginBottom: 14 }}>
-      <label>วันเวลาที่ตัดสต็อก</label>
+      <label>{label || "วันเวลาที่ตัดสต็อก"}</label>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
         <input
           type="datetime-local" className="input" style={{ flex: "1 1 200px", minWidth: 0 }}
@@ -2267,10 +2267,10 @@ function StockOutWhenField({ value, onChange }) {
       </div>
       {backdated ? (
         <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", color: "oklch(0.5 0.13 65)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-          <Icons.Calendar size={13}/> ตัดสต็อกย้อนหลัง · บันทึกเป็นวันที่ <strong>{stockOutStampLabel(stamp)}</strong>
+          <Icons.Calendar size={13}/> ย้อนหลัง · บันทึกเป็นวันที่ <strong>{stockOutStampLabel(stamp)}</strong>
         </div>
       ) : (
-        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น</div>
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{hint || "ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"}</div>
       )}
     </div>
   );
@@ -3831,6 +3831,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const [mode, setMode] = useState("remove"); // add | remove | set
   const [reasonId, setReasonId] = useState("");
   const [note, setNote] = useState("");
+  const [when, setWhen] = useState(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [scan, setScan] = useState("");
   const [q, setQ] = useState("");
   const [showN, setShowN] = useState(30);
@@ -3891,14 +3892,14 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   );
 
   const resetForNext = () => {
-    setRows([]); setMode("remove"); setReasonId(""); setNote(""); setScan(""); setQ(""); setShowN(30); setPickOpen(true);
+    setRows([]); setMode("remove"); setReasonId(""); setNote(""); setWhen(""); setScan(""); setQ(""); setShowN(30); setPickOpen(true);
     setTimeout(() => scanRef.current?.focus(), 60);
   };
 
   const confirm = async () => {
     if (!canConfirm) return;
     const res = (typeof applyStockAdjustmentBatch === "function")
-      ? applyStockAdjustmentBatch(changes, { reason, note })
+      ? applyStockAdjustmentBatch(changes, { reason, note, when })
       : { applied: 0, net: 0 };
     if (!res.applied) { toast("ปรับสต็อกไม่สำเร็จ"); return; }
     /* Re-balance the split from the ACTUAL applied results — a row the clamp ate
@@ -3912,9 +3913,11 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
       if (locRes && locRes.offline) toast("ปรับสต็อกแล้ว — จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์");
       else if (locRes && locRes.errors && locRes.errors.length) toast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + locRes.errors[0].error);
     }
-    toast(changes.length === 1
+    const backStamp = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+    const backToast = backStamp && backStamp.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backStamp)})` : "";
+    toast((changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
-      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น) — ${reason.label}`);
+      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น) — ${reason.label}`) + backToast);
     if (product) onApply?.();
     else resetForNext(); // batch loop: back to the picker for the next round
   };
@@ -4061,6 +4064,8 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
                   : <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span>}</label>
                 <input className="input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, อ้างอิงการนับ"/>
               </div>
+              <StockOutWhenField value={when} onChange={setWhen} label="วันเวลาที่ปรับสต็อก"
+                hint="ปรับย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง — ประวัติการปรับจะลงวันนั้น"/>
               {changes.length > 0 && (
                 <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "var(--muted)" }}>จะปรับ {changes.length} รายการ</span>
