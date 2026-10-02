@@ -1356,6 +1356,31 @@ function bangkokDateStr(nowMs) {
 // TODAY_ISO is evaluated once at page load, so an always-on PWA/tablet left open
 // past midnight would otherwise stamp orders and filter with yesterday's date.
 function todayIso() { return bangkokDateStr(); }
+/* ── Backdated stock-out (ตัดสต็อกย้อนหลัง) ──
+   The ตัดสต็อก forms carry a "วันเวลาที่ตัดสต็อก" field, a datetime-local value
+   "YYYY-MM-DDTHH:MM" read as Bangkok wall-clock time ("" = now). Bangkok has no
+   DST, so a fixed +07:00 offset is exact. */
+function nowBkkLocal(nowMs) {
+  const d = new Date((typeof nowMs === "number" ? nowMs : Date.now()) + 7 * 3600 * 1000);
+  return d.toISOString().slice(0, 16);
+}
+// → { dateIso, ts, createdAt, backdated }. A future value clamps to now; an
+// unparseable or empty one means now.
+function stockOutStamp(local) {
+  const now = Date.now();
+  let t = (typeof local === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(local))
+    ? Date.parse(local.slice(0, 16) + ":00+07:00") : NaN;
+  if (!Number.isFinite(t) || t > now) t = now;
+  const wall = nowBkkLocal(t);
+  // Backdated only if it lands at least a minute in the past — a form left open
+  // for a while still stamps "now" when the user never touched the field.
+  const backdated = now - t >= 60 * 1000;
+  return { dateIso: wall.slice(0, 10), ts: wall.slice(11, 16), createdAt: new Date(t).toISOString(), backdated };
+}
+// "1 ต.ค. 2569 14:05" — for toasts / audit notes on a backdated stock-out.
+function stockOutStampLabel(stamp) {
+  return stamp ? `${isoToThai(stamp.dateIso)} ${stamp.ts}` : "";
+}
 // Convert a stored UTC ISO timestamp (e.g. label.created_at) to its Asia/Bangkok
 // calendar date. A raw .slice(0,10) on the UTC string gives the WRONG day for
 // anything created 00:00–06:59 Bangkok. Guards an unparseable input.
@@ -2202,6 +2227,7 @@ Object.assign(window, {
   omit,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
   USERS, ROLES, ROLE_NAV, CARRIERS, TODAY_ISO, todayIso, bangkokDateOf, isoToThai,
+  nowBkkLocal, stockOutStamp, stockOutStampLabel,
   CAPS, DEFAULT_ROLE_CAPS, ROLE_PERMS_KEY, loadRolePerms, saveRolePerms, roleNav, canOpenPage, canDo, capServerLocked, currentRoleId,
   saveProductStore, addProductToStore, updateProductInStore, updateManyProducts, adjustProductQty, setProductAbsolute, importProductsBulk, removeProductsFromStore, resetProductStore,
   deductStockAndPersist, deductManyAndPersist,

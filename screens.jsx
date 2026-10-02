@@ -1690,8 +1690,13 @@ function Outbound({ goTo, pushToast, focus }) {
     const totalQty = data.deductions.reduce((s, d) => s + d.qty, 0);
     const primary = data.deductions[0];
     const channelLabel = data.deductions.length === 1 ? primary.name : `${data.deductions.length} ช่องทาง`;
-    const ts = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
-    const dateIso = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+    // วันเวลาที่ตัดสต็อก — now, or the backdated moment picked in the modal.
+    const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(data.when) : null;
+    const ts = stamp ? stamp.ts : new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+    const dateIso = stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10));
+    const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
+    const backNote = createdAt ? ` · ย้อนหลัง ${stockOutStampLabel(stamp)}` : "";
+    const backToast = createdAt ? ` (ย้อนหลัง ${stockOutStampLabel(stamp)})` : "";
 
     if (data.mode === "bundle") {
       const bundle = data.bundle;
@@ -1705,16 +1710,16 @@ function Outbound({ goTo, pushToast, focus }) {
           changes: bundle.items.map(item => ({
             label: item.sku, to: `−${item.qty * totalQty} ชิ้น`
           })),
-          note: `ออร์เดอร์ ${id} · ${channelLabel}`
+          note: `ออร์เดอร์ ${id} · ${channelLabel}${backNote}`
         });
       }
       appendOrder({
         id, channel: channelLabel, customer: data.customer || "ลูกค้าใหม่",
         items: bundle.items.length, status: "picking", carrier: "", tracking: "",
-        ts, dateIso, deductions: data.deductions, isBundle: true, bundleName: bundle.name,
+        ts, dateIso, createdAt, deductions: data.deductions, isBundle: true, bundleName: bundle.name,
         lineItems: bundle.items.map(it => snapLineItem(it.sku, null, it.qty * totalQty))
       });
-      pushToast(`ตัดสต็อกชุด "${bundle.name}" ${totalQty} ชุด — ${bundle.items.length} รายการสินค้า`);
+      pushToast(`ตัดสต็อกชุด "${bundle.name}" ${totalQty} ชุด — ${bundle.items.length} รายการสินค้า${backToast}`);
       setIssueOpen(false);
       return;
     }
@@ -1726,16 +1731,16 @@ function Outbound({ goTo, pushToast, focus }) {
         entity: "product", entityId: data.sku, action: "deduct",
         summary: `ตัดสต็อก ${data.sku} จำนวน ${totalQty} ชิ้น ผ่านหน้าจัดส่ง`,
         changes: [{ label: data.sku, to: `−${totalQty} ชิ้น` }],
-        note: `ออร์เดอร์ ${id} · ${channelLabel}`
+        note: `ออร์เดอร์ ${id} · ${channelLabel}${backNote}`
       });
     }
     appendOrder({
       id, channel: channelLabel, customer: data.customer || "ลูกค้าใหม่",
       items: data.deductions.length, status: "picking", carrier: "", tracking: "",
-      ts, dateIso, deductions: data.deductions, sku: data.sku,
+      ts, dateIso, createdAt, deductions: data.deductions, sku: data.sku,
       lineItems: [snapLineItem(data.sku, null, totalQty, data.locPicks && data.locPicks[0] && data.locPicks[0].loc)]
     });
-    pushToast(`ตัดสต็อก ${data.sku} จำนวน ${totalQty} ชิ้น (${data.deductions.length} ช่องทาง)`);
+    pushToast(`ตัดสต็อก ${data.sku} จำนวน ${totalQty} ชิ้น (${data.deductions.length} ช่องทาง)${backToast}`);
     setIssueOpen(false);
   };
 
@@ -2234,6 +2239,43 @@ function SkuPicker({ value, onChange, products }) {
   );
 }
 
+/* วันเวลาที่ตัดสต็อก — lets a stock-out be recorded against the day it really
+   happened (most deductions are keyed in after the fact). "" = now. The value is
+   Bangkok wall-clock "YYYY-MM-DDTHH:MM"; stockOutStamp (data.jsx) turns it into
+   the order's dateIso/ts/createdAt. Mobile twin: MStockOutWhen in handheld.jsx. */
+function StockOutWhenField({ value, onChange }) {
+  const maxLocal = (typeof nowBkkLocal === "function") ? nowBkkLocal() : "";
+  const stamp = value && typeof stockOutStamp === "function" ? stockOutStamp(value) : null;
+  const backdated = !!(stamp && stamp.backdated);
+  const shownValue = value || maxLocal;
+  const setYesterday = () => {
+    const base = value || maxLocal;
+    const d = new Date(Date.parse(base.slice(0, 10) + "T00:00:00Z") - 86400000).toISOString().slice(0, 10);
+    onChange(d + "T" + (base.slice(11, 16) || "12:00"));
+  };
+  return (
+    <div className="field" style={{ marginBottom: 14 }}>
+      <label>วันเวลาที่ตัดสต็อก</label>
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        <input
+          type="datetime-local" className="input" style={{ flex: "1 1 200px", minWidth: 0 }}
+          value={shownValue} max={maxLocal}
+          onChange={e => onChange(e.target.value && e.target.value < maxLocal ? e.target.value : "")}
+        />
+        <button type="button" className="btn" onClick={setYesterday}>เมื่อวาน</button>
+        <button type="button" className={"btn" + (!value ? " btn-primary" : "")} onClick={() => onChange("")}>ตอนนี้</button>
+      </div>
+      {backdated ? (
+        <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", color: "oklch(0.5 0.13 65)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+          <Icons.Calendar size={13}/> ตัดสต็อกย้อนหลัง · บันทึกเป็นวันที่ <strong>{stockOutStampLabel(stamp)}</strong>
+        </div>
+      ) : (
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น</div>
+      )}
+    </div>
+  );
+}
+
 function IssueModal({ onClose, onSubmit }) {
   const [mode, setMode] = useState("single"); // single | bundle
   const bundles = useMemo(() => (typeof loadBundles === "function" ? loadBundles() : []), []);
@@ -2244,6 +2286,7 @@ function IssueModal({ onClose, onSubmit }) {
   const [skuId, setSkuId] = useState(PRODUCTS[0].sku);
   const [bundleId, setBundleId] = useState(bundles[0]?.id || "");
   const [customer, setCustomer] = useState("");
+  const [when, setWhen] = useState(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [channels, setChannels] = useState(() =>
     Object.fromEntries(CHANNEL_LIST.map(c => [c.id, { on: c.id === "shopee", qty: c.id === "shopee" ? 1 : 0 }]))
   );
@@ -2283,9 +2326,9 @@ function IssueModal({ onClose, onSubmit }) {
         const cp = PRODUCTS.find(x => x.sku === it.sku);
         return { sku: it.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" };
       });
-      onSubmit({ mode: "bundle", bundle, customer, deductions, total, locPicks });
+      onSubmit({ mode: "bundle", bundle, customer, deductions, total, locPicks, when });
     } else {
-      onSubmit({ mode: "single", sku: skuId, customer, deductions, total, locPicks: [{ sku: skuId, loc: pickLoc }] });
+      onSubmit({ mode: "single", sku: skuId, customer, deductions, total, locPicks: [{ sku: skuId, loc: pickLoc }], when });
     }
   };
 
@@ -2376,6 +2419,8 @@ function IssueModal({ onClose, onSubmit }) {
               </div>
             )
           )}
+
+          <StockOutWhenField value={when} onChange={setWhen}/>
 
           <div className="field" style={{ marginBottom: 16 }}>
             <label>ลูกค้า / เลขที่อ้างอิง <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span></label>

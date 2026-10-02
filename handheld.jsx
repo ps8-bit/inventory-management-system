@@ -1943,6 +1943,7 @@ function MIssue({ ctx }) {
   const bundles = useMemoM(() => (typeof loadBundles === "function" ? loadBundles() : []), []);
   const [bundleId, setBundleId] = useStateM(presetBundle || bundles[0]?.id || "");
   const [customer, setCustomer] = useStateM("");
+  const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [channels, setChannels] = useStateM(() =>
     Object.fromEntries(CHANNEL_LIST.map(c => [c.id, { on: c.id === "shopee", qty: c.id === "shopee" ? 1 : 0 }]))
   );
@@ -1993,12 +1994,16 @@ function MIssue({ ctx }) {
     const lineItems = isBundle
       ? bundle.items.map(it => snapLineItem(it.sku, null, it.qty * total))
       : [snapLineItem(skuId, product.name, total)];
+    // วันเวลาที่ตัดสต็อก — now, or the backdated moment picked above.
+    const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+    const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
+    const backLabel = createdAt ? stockOutStampLabel(stamp) : "";
 
     // The stock-out is a shipment too → create its label (single source of truth
     // for ติดตามพัสดุ / จัดส่ง). No customer address here, so recipient is name-only.
     if (typeof createSaleLabel === "function") {
       try {
-        createSaleLabel({ orderId: id, name: customer || "ลูกค้าใหม่", items: lineItems });
+        createSaleLabel({ orderId: id, name: customer || "ลูกค้าใหม่", items: lineItems, created_at: createdAt });
       } catch (e) {}
     }
 
@@ -2014,7 +2019,8 @@ function MIssue({ ctx }) {
         carrier: "",
         tracking: "",
         items: lineItems.length,
-        dateIso: (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10),
+        dateIso: stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10)),
+        createdAt,
         isBundle,
         bundleName: isBundle ? bundle.name : "",
         lineItems,
@@ -2036,10 +2042,10 @@ function MIssue({ ctx }) {
         changes: isBundle
           ? bundle.items.map(it => ({ label: it.sku, to: `−${it.qty * total} ชิ้น` }))
           : [{ label: skuId, to: `−${total} ชิ้น` }],
-        note: `ออร์เดอร์ ${id}`
+        note: `ออร์เดอร์ ${id}${backLabel ? ` · ย้อนหลัง ${backLabel}` : ""}`
       });
     }
-    ctx.pushToast(`ตัดสต็อก${isBundle ? `ชุด "${bundle.name}"` : ` ${skuId}`} ${total} ${unit}`);
+    ctx.pushToast(`ตัดสต็อก${isBundle ? `ชุด "${bundle.name}"` : ` ${skuId}`} ${total} ${unit}${backLabel ? ` (ย้อนหลัง ${backLabel})` : ""}`);
     ctx.back();
   };
 
@@ -2112,6 +2118,8 @@ function MIssue({ ctx }) {
           )
         )}
 
+        <MStockOutWhen value={when} onChange={setWhen}/>
+
         <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>ลูกค้า / อ้างอิง (ไม่จำเป็น)</div>
         <input className="m-input" placeholder="เช่น คุณ ปวีณา / Shopee #2025-119283" value={customer} onChange={e => setCustomer(e.target.value)} style={{ marginBottom: 8 }}/>
 
@@ -2150,6 +2158,40 @@ function MIssue({ ctx }) {
           <Icons.Check size={16}/> ยืนยันตัดสต็อก {total} {unit}
         </button>
       </div>
+    </>
+  );
+}
+
+/* Mobile twin of StockOutWhenField (screens.jsx) — วันเวลาที่ตัดสต็อก for a
+   backdated stock-out. "" = now. */
+function MStockOutWhen({ value, onChange }) {
+  const maxLocal = (typeof nowBkkLocal === "function") ? nowBkkLocal() : "";
+  const stamp = value && typeof stockOutStamp === "function" ? stockOutStamp(value) : null;
+  const backdated = !!(stamp && stamp.backdated);
+  const setYesterday = () => {
+    const base = value || maxLocal;
+    const d = new Date(Date.parse(base.slice(0, 10) + "T00:00:00Z") - 86400000).toISOString().slice(0, 10);
+    onChange(d + "T" + (base.slice(11, 16) || "12:00"));
+  };
+  return (
+    <>
+      <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>วันเวลาที่ตัดสต็อก</div>
+      <input
+        type="datetime-local" className="m-input"
+        value={value || maxLocal} max={maxLocal}
+        onChange={e => onChange(e.target.value && e.target.value < maxLocal ? e.target.value : "")}
+      />
+      <div className="row" style={{ gap: 6, marginTop: 6 }}>
+        <button type="button" className="btn" style={{ flex: 1 }} onClick={setYesterday}>เมื่อวาน</button>
+        <button type="button" className={"btn" + (!value ? " btn-primary" : "")} style={{ flex: 1 }} onClick={() => onChange("")}>ตอนนี้</button>
+      </div>
+      {backdated ? (
+        <div style={{ margin: "6px 0 8px", padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", color: "oklch(0.5 0.13 65)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+          <Icons.Calendar size={13}/> ตัดสต็อกย้อนหลัง · <strong>{stockOutStampLabel(stamp)}</strong>
+        </div>
+      ) : (
+        <div style={{ fontSize: 11, color: "var(--muted)", margin: "4px 4px 8px" }}>ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง</div>
+      )}
     </>
   );
 }

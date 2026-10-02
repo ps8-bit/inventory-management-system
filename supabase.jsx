@@ -435,6 +435,15 @@ async function dbUpsertOrders(orders) {
     console.error('[DB] upsert orders blocked (RLS) —', data?.length ?? 0, 'of', rows.length);
     return { error: 'PERMISSION_OR_MISSING' };
   }
+  // Backdated stock-out: stamp created_at so the order's time survives a reload
+  // (_rowToOrder derives ts from created_at). A scoped UPDATE rather than a column
+  // in _orderToRow, whose shape the public track-lookup function depends on.
+  // Best-effort — the date already persisted via date_iso.
+  for (const o of orders) {
+    if (!o || !o.createdAt) continue;
+    const { error: e2 } = await sb.from('orders').update({ created_at: o.createdAt }).eq('id', o.id);
+    if (e2) console.error('[DB] set order created_at:', e2.message);
+  }
   return { ok: true };
 }
 async function dbDeleteOrder(id) {
