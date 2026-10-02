@@ -1284,6 +1284,7 @@ function Inbound({ goTo, pushToast }) {
   const [similar, setSimilar] = useState(null); // null | { code, candidates } — near-duplicate prompt
   const [closeConfirm, setCloseConfirm] = useState(null); // null | { changes }
   const [closed, setClosed] = useState(false); // true once job is committed
+  const [report, setReport] = useState(null);   // what the closed batch did (buildReceiveReport)
   const [grQueue, setGRQueue] = useState(loadGRQueue);
   const [grModal, setGRModal] = useState(false); // add-GR modal open
   const inputRef = useRef(null);
@@ -1545,6 +1546,7 @@ function Inbound({ goTo, pushToast }) {
           ) : (
             <div className="row" style={{ padding: "10px 14px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 10, fontSize: 13, fontWeight: 500 }}>
               <Icons.Check size={18}/> รับเข้า {flash.sku} — {flash.name}
+              {(() => { const line = received.find(r => r.sku === flash.sku); return line ? <span className="tnum" style={{ marginLeft: "auto", fontWeight: 700 }}>รวมรอบนี้ {line.qty} ชิ้น</span> : null; })()}
             </div>
           )
         )}
@@ -1574,8 +1576,8 @@ function Inbound({ goTo, pushToast }) {
       <div className="card card-tight">
         <div className="card-head">
           <div>
-            <h3>รายการที่นับได้ในรอบนี้</h3>
-            <div className="sub">เรียงตามเวลาที่สแกนล่าสุด</div>
+            <h3>{closed ? "สรุปการรับเข้า" : "รายการที่นับได้ในรอบนี้"}</h3>
+            <div className="sub">{received.length} SKU · รวม <b className="tnum">{totalQty}</b> ชิ้น{closed ? " · รับเข้าสต็อกแล้ว" : " · เรียงตามเวลาที่สแกนล่าสุด"}</div>
           </div>
           <div className="row">
             {!closed && noShelf.length > 0 && (
@@ -1605,7 +1607,8 @@ function Inbound({ goTo, pushToast }) {
             <th>SKU</th>
             <th>ชื่อสินค้า</th>
             <th>ตำแหน่งจัดเก็บ</th>
-            <th className="t-num">จำนวน</th>
+            <th className="t-num">{closed ? "รับเข้า" : "จำนวน"}</th>
+            {closed && <th className="t-num">คงเหลือ ก่อน → หลัง</th>}
             <th style={{ width: 1 }}/>
           </tr></thead>
           <tbody>
@@ -1616,7 +1619,9 @@ function Inbound({ goTo, pushToast }) {
                 <td>{r.name}</td>
                 <td style={{ minWidth: 170 }}>
                   {closed
-                    ? <span className="badge badge-neutral"><Icons.Map size={11}/>{r.loc || "—"}</span>
+                    ? (() => { const rr = report && report.lines.find(x => x.sku === r.sku); const sh = (rr && rr.shelf) || r.loc;
+                        return sh ? <span className="badge badge-neutral"><Icons.Map size={11}/>{sh}</span>
+                                  : <span className="badge badge-warning"><Icons.Warn size={11}/>ไม่ระบุตำแหน่ง</span>; })()
                     : <LocationSelect value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
                         noneLabel="— ยังไม่ระบุ —"
                         style={{ padding: "6px 8px", fontSize: 12, width: "100%",
@@ -1624,7 +1629,7 @@ function Inbound({ goTo, pushToast }) {
                 </td>
                 <td className="t-num tnum">
                   {closed
-                    ? <span style={{ fontWeight: 500 }}>{r.qty}</span>
+                    ? <span style={{ fontWeight: 700, color: "var(--success)" }}>+{r.qty}</span>
                     : <div style={{ display: "flex", justifyContent: "flex-end" }}>
                         <QtyStepper small min={1}
                           value={qtyEdit && qtyEdit.sku === r.sku ? qtyEdit.val : String(r.qty)}
@@ -1637,6 +1642,10 @@ function Inbound({ goTo, pushToast }) {
                           title={`จำนวน ${r.sku}`}/>
                       </div>}
                 </td>
+                {closed && (() => {
+                  const rr = report && report.lines.find(x => x.sku === r.sku);
+                  return <td className="t-num tnum">{rr ? <>{rr.before} → <b>{rr.after}</b></> : "—"}</td>;
+                })()}
                 <td>
                   <div className="row" style={{ gap: 2 }}>
                     <button className="btn btn-ghost btn-icon" title={`แก้ไข ${r.sku}`} onClick={() => pushToast(`แก้ไข ${r.sku} — ใช้หน้า สินค้าคงคลัง เพื่อปรับจำนวน`)}><Icons.Edit size={14}/></button>
@@ -1726,12 +1735,14 @@ function Inbound({ goTo, pushToast }) {
           // between the stock write and that effect used to restore the batch
           // and invite a second ปิดงาน.
           if (typeof saveInboundDraft === "function") saveInboundDraft([]);
+          // Snapshot BEFORE the writes so the report can show stock before → after.
+          const rep = (typeof buildReceiveReport === "function") ? buildReceiveReport(received) : null;
           /* Applies every line (atomic +delta, concurrent-safe) and writes one
              movement-ledger row per sku using the quantity the SERVER confirms
              — not the quantity we asked for. Synchronous internally, so the
              applyReceiveLocs call below still sees the new p.qty this tick. */
           if (typeof receiveStockAndRecord === "function") {
-            receiveStockAndRecord(received, "รับเข้าสินค้า");
+            receiveStockAndRecord(received, "รับเข้าสินค้า", { audit: true });
           } else {
             received.forEach(r => { if (PRODUCTS.some(p => p.sku === r.sku)) adjustProductQty(r.sku, r.qty); });
           }
@@ -1755,8 +1766,9 @@ function Inbound({ goTo, pushToast }) {
             });
           }
           setCloseConfirm(null);
+          setReport(rep);
           setClosed(true);
-          pushToast(`ปิดงานรับเข้าแล้ว — อัปเดตสต็อก ${received.length} SKU`);
+          pushToast(`รับเข้าแล้ว ${received.length} SKU รวม ${received.reduce((s,r)=>s+r.qty,0)} ชิ้น`);
         }}
       />
     </div>

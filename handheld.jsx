@@ -473,6 +473,7 @@ function MInbound({ ctx }) {
   const [received, setReceived] = useStateM(() => typeof loadInboundDraft === "function" ? loadInboundDraft() : []);
   const [scan, setScan] = useStateM("");
   const [flash, setFlash] = useStateM(null);
+  const [report, setReport] = useStateM(null); // what the closed batch did (buildReceiveReport)
   const [camOpen, setCamOpen] = useStateM(false);
   const lastScanRef = useRefM(null);
   const [quickAdd, setQuickAdd] = useStateM(null); // null | { sku }
@@ -591,11 +592,13 @@ function MInbound({ ctx }) {
       return;
     }
     if (typeof saveInboundDraft === "function") saveInboundDraft([]);
+    // Snapshot BEFORE the writes so the report can show stock before → after.
+    const rep = (typeof buildReceiveReport === "function") ? buildReceiveReport(received) : null;
     // Apply + ledger in one shared helper (see the desktop twin): the recorded
     // quantity is the one the server confirms, and the loop stays synchronous so
     // applyReceiveLocs below still runs in the same tick as the qty writes.
     if (typeof receiveStockAndRecord === "function") {
-      receiveStockAndRecord(received, "รับเข้าสินค้า (มือถือ)");
+      receiveStockAndRecord(received, "รับเข้าสินค้า (มือถือ)", { audit: true });
     } else {
       received.forEach(r => { if (PRODUCTS.some(p => p.sku === r.sku)) adjustProductQty(r.sku, r.qty); });
     }
@@ -618,8 +621,9 @@ function MInbound({ ctx }) {
         })
       });
     }
+    setReport(rep);
     setClosed(true);
-    ctx.pushToast(`ปิดงานแล้ว — อัปเดตสต็อก ${received.length} SKU`);
+    ctx.pushToast(`รับเข้าแล้ว ${received.length} SKU รวม ${totalQty} ชิ้น`);
   };
 
   const total = received.reduce((s, r) => s + r.qty, 0);
@@ -740,8 +744,8 @@ function MInbound({ ctx }) {
           <div style={{ padding: "12px 14px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 14, fontSize: 13, fontWeight: 500, marginBottom: 12, display: "flex", gap: 8, alignItems: "center" }}>
             <Icons.Check size={16}/>
             <div>
-              <div>ปิดงานแล้ว — อัปเดตสต็อก {received.length} SKU</div>
-              <div style={{ fontSize: 11, fontWeight: 400, color: "var(--success)", opacity: 0.8, marginTop: 2 }}>ตรวจสอบยอดได้ที่แท็บ สินค้า</div>
+              <div>รับเข้าเรียบร้อย — {received.length} SKU รวม {total} ชิ้น</div>
+              <div style={{ fontSize: 11, fontWeight: 400, color: "var(--success)", opacity: 0.8, marginTop: 2 }}>จำนวนที่รับเข้าและสต็อกก่อน → หลัง แสดงในรายการด้านล่าง</div>
             </div>
           </div>
         ) : (
@@ -770,10 +774,16 @@ function MInbound({ ctx }) {
               <div className="mono" style={{ fontSize: 10 }}>{flash.sku}</div>
               <div style={{ fontSize: 12, color: "var(--fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{flash.name}</div>
             </div>
+            {(() => {
+              const line = received.find(r => r.sku === flash.sku);
+              return line ? <div className="tnum" style={{ fontWeight: 700, fontSize: 13, flexShrink: 0, textAlign: "right" }}>
+                รวม {line.qty} ชิ้น
+              </div> : null;
+            })()}
           </div>
         )}
 
-        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>นับแล้ว · {received.length} SKU</div>
+        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>{closed ? "รับเข้าแล้ว" : "นับแล้ว"} · {received.length} SKU · {total} ชิ้น</div>
         {!closed && noShelf.length > 0 && (
           <div style={{ padding: "10px 12px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 12, fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}><Icons.Warn size={14}/> ยังไม่ได้เลือกตำแหน่ง {noShelf.length} รายการ</div>
@@ -789,13 +799,19 @@ function MInbound({ ctx }) {
                 <div className="m-row-title">{r.name}</div>
                 <div className="m-row-sub mono">{r.sku} · {r.t}</div>
                 {closed
-                  ? <div className="m-row-sub mono">{r.loc || "—"}</div>
+                  ? (() => {
+                      const rr = report && report.lines.find(x => x.sku === r.sku);
+                      return <>
+                        <div className="m-row-sub mono">{(rr && rr.shelf) || r.loc || "ไม่ระบุตำแหน่ง"}</div>
+                        {rr && <div className="m-row-sub tnum">คงเหลือ {rr.before} → <b style={{ color: "var(--fg)" }}>{rr.after}</b> ชิ้น</div>}
+                      </>;
+                    })()
                   : <LocationSelect mobile value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
                       noneLabel="— จัดเก็บที่… —" style={{ marginTop: 4, height: 34, fontSize: 12, padding: "0 8px",
                                ...(noShelfSet.has(r.sku) ? { borderColor: "var(--danger)", boxShadow: "0 0 0 1px var(--danger)" } : {}) }}/>}
               </div>
               {closed
-                ? <div className="tnum" style={{ fontWeight: 600, fontSize: 15 }}>×{r.qty}</div>
+                ? <div className="tnum" style={{ fontWeight: 700, fontSize: 15, color: "var(--success)" }}>+{r.qty}</div>
                 : <QtyStepper small min={1}
                     value={qtyEdit && qtyEdit.sku === r.sku ? qtyEdit.val : String(r.qty)}
                     onChange={v => {

@@ -224,6 +224,8 @@ const ACTION_LABELS = {
   create: "สร้าง",
   delete: "ลบ",
   adjust: "ปรับสต็อก",
+  receive: "รับเข้า",
+  close: "ปิดงาน",
   "bulk-update": "แก้ไขกลุ่ม",
   "bulk-delete": "ลบกลุ่ม"
 };
@@ -233,6 +235,8 @@ const ACTION_TONES = {
   create: "badge-success",
   delete: "badge-danger",
   adjust: "badge-warning",
+  receive: "badge-success",
+  close: "badge-success",
   "bulk-update": "badge-info",
   "bulk-delete": "badge-danger"
 };

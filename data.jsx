@@ -808,7 +808,15 @@ function _recordDeduction(write, wanted, reason) {
    `qty` is a SIGNED delta: the receiving screens always pass positives, but the
    product edit sheet uses this too and can lower a count, so never clamp it to 0.
    lines = [{ sku, qty, loc }] */
-function receiveStockAndRecord(lines, reason) {
+/* opts.audit = true also writes ONE activity (audit_log) entry per received
+   product. The activity feed (กิจกรรมล่าสุด, desktop dashboard + mobile home)
+   reads audit_log, and a receive used to leave only the batch line "ปิดงาน
+   รับเข้า — 2 SKU รวม 40 ชิ้น" there — no product, no quantity, so a receive
+   looked unreported. Like ปรับสต็อก, the entry carries the SERVER's before →
+   after once it answers. The product edit sheet records its own audit, so it
+   leaves this off. */
+function receiveStockAndRecord(lines, reason, opts) {
+  const audit = !!(opts && opts.audit);
   const jobs = [];
   (Array.isArray(lines) ? lines : []).forEach(l => {
     const qty = Math.round(Number(l && l.qty) || 0);
@@ -835,6 +843,17 @@ function receiveStockAndRecord(lines, reason) {
       if (!d) return;
       const where = (job.loc && job.loc !== "—") ? ` → ${job.loc}` : "";
       rows.push({ sku: job.sku, delta: d, reason: reason + where + _pendingSuffix(res) });
+      if (audit && typeof recordChange === "function") {
+        const p = PRODUCTS.find(x => x.sku === job.sku);
+        const known = res && res.ok && typeof res.after === "number";
+        const after = known ? res.after : Math.max(0, Number(p && p.qty) || 0);
+        const before = known && typeof res.before === "number" ? res.before : after - d;
+        recordChange({
+          entity: "product", entityId: job.sku, action: "receive",
+          summary: `${reason} ${(p && p.name) || job.sku} (${job.sku}) ${d > 0 ? "+" : ""}${d} ชิ้น (${before} → ${after})`,
+          note: (job.loc && job.loc !== "—" ? `ตำแหน่ง: ${job.loc}` : "ไม่ระบุตำแหน่ง") + _pendingSuffix(res)
+        });
+      }
     });
     recordStockMoves(rows, reason);
   });
@@ -1599,6 +1618,25 @@ function receiveLineShelf(line, set) {
 function receiveLinesWithoutShelf(lines) {
   const s = storedLocSet();
   return (Array.isArray(lines) ? lines : []).filter(l => l && l.sku && !receiveLineShelf(l, s));
+}
+/* What a receive batch did, for the on-screen report after ปิดงาน. Call BEFORE
+   the qty writes: `before` is the stock this device held, `after` = before + qty
+   (the server applies the same atomic delta). Lines for the same sku merge.
+   → { lines: [{ sku, name, qty, shelf, before, after }], skus, pieces } */
+function buildReceiveReport(lines) {
+  const s = storedLocSet();
+  const bySku = new Map();
+  (Array.isArray(lines) ? lines : []).forEach(l => {
+    const qty = Math.round(Number(l && l.qty) || 0);
+    if (!l || !l.sku || !qty) return;
+    const cur = bySku.get(l.sku);
+    if (cur) { cur.qty += qty; return; }
+    const p = PRODUCTS.find(x => x.sku === l.sku);
+    const before = p ? Math.max(0, Number(p.qty) || 0) : 0;
+    bySku.set(l.sku, { sku: l.sku, name: (p && p.name) || l.name || "", qty, shelf: receiveLineShelf(l, s), before });
+  });
+  const out = [...bySku.values()].map(r => ({ ...r, after: Math.max(0, r.before + r.qty) }));
+  return { lines: out, skus: out.length, pieces: out.reduce((n, r) => n + r.qty, 0) };
 }
 // The shelf picked last on this device — a receiving session usually lands in one place.
 const RECV_LOC_KEY = "ims_last_receive_loc";
@@ -3526,7 +3564,7 @@ Object.assign(window, {
   isBlankDraftOrder, isPendingOrder, ORDER_STATUS_TH, orderShortId, orderChannelLabel,
   loadProductLocs, locSplitFor, hasLocSplit, locSplitTotal, productPositions, qtyAtLocation, productsInLocation, saveLocSplit,
   applyLocPicks, defaultPickLoc, moveStockToLocation, applyReceiveLocs,
-  receiveLineShelf, receiveLinesWithoutShelf, lastReceiveLoc, rememberReceiveLoc,
+  receiveLineShelf, receiveLinesWithoutShelf, buildReceiveReport, lastReceiveLoc, rememberReceiveLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions,
