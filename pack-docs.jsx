@@ -94,7 +94,17 @@ function openOrderFile(file) {
   const arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   const url = URL.createObjectURL(new Blob([arr], { type: f.type }));
-  window.open(url, "_blank");
+  // Pop-ups are often blocked (installed PWA, in-app browsers, some phones), and
+  // the CSP forbids framing a blob — so when the new tab is refused, download
+  // the file instead; the phone/PC then opens it in its own viewer to print.
+  const w = window.open(url, "_blank");
+  if (!w) {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = f.name || (f.type === "application/pdf" ? "label.pdf" : "label.jpg");
+    document.body.appendChild(a); a.click(); a.remove();
+    window.dispatchEvent(new CustomEvent("ims-toast", { detail: "ดาวน์โหลดใบปะหน้าแล้ว — เปิดไฟล์เพื่อพิมพ์" }));
+  }
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
