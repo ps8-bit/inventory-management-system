@@ -448,9 +448,41 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
       (shown.length < all.length ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:0.5mm">… และอีก ${all.length - shown.length} รายการ</div>` : "") : "") +
     `</div>`);
 }
+/* Phones (iOS Safari, Android Chrome, the installed PWA) ignore @page size:
+   the print sheet lays the label out on A4/Letter and the printer app shrinks
+   it, so it comes out smaller than the roll. There we build an exact-size PDF
+   instead — the same proven path as the mobile ฉลาก screen (labelsToPDF) — and
+   the phone's PDF viewer prints it at true size. */
+function _pdIsPhone() {
+  return document.documentElement.getAttribute("data-mobile") === "1"
+    || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+}
+function _pdToast(msg) { window.dispatchEvent(new CustomEvent("ims-toast", { detail: msg })); }
+async function _pdLabelPdf(html, size, name) {
+  if (typeof labelsToPDF !== "function" || !window.jspdf) return false;
+  // Lay out off-screen at real size in Sarabun — the face the rasteriser embeds —
+  // so the fit measurement matches what lands in the PDF.
+  const host = document.createElement("div");
+  host.setAttribute("style", "position:fixed;left:-10000px;top:0;background:#fff;color:#000;letter-spacing:normal;font-family:'Sarabun','Leelawadee UI',Tahoma,sans-serif");
+  host.innerHTML = html;
+  document.body.appendChild(host);
+  try {
+    try { await document.fonts.ready; } catch (e) {}
+    const lbl = host.firstElementChild;
+    if (!lbl) return false;
+    if (lbl.classList.contains("__pdLbl")) fitPackLabel(host);
+    return await labelsToPDF([lbl], size, name, _pdToast);
+  } finally { host.remove(); }
+}
 function printOrderAddress(order, lines, sizeId) {
   const size = PACK_LABEL_SIZES.find(x => x.id === sizeId) || packLabelSize();
-  _printPDHtml(buildPackLabelHtml(order, lines, size), size, fitPackLabel);
+  const html = buildPackLabelHtml(order, lines, size);
+  if (_pdIsPhone()) {
+    _pdToast("กำลังสร้างไฟล์ใบปะหน้า " + size.w + "×" + size.h + " มม.…");
+    _pdLabelPdf(html, size, (order && order.id) || "label").then(ok => { if (!ok) _printPDHtml(html, size, fitPackLabel); });
+    return;
+  }
+  _printPDHtml(html, size, fitPackLabel);
 }
 /* Shrink the recipient block step by step until nothing spills off the paper
    (floor 55% — still bigger than the sender/item text at that point). The
@@ -459,7 +491,8 @@ function fitPackLabel(root) {
   const lbl = root.querySelector(".__pdLbl");
   if (!lbl) return;
   const prev = root.getAttribute("style") || "";
-  root.setAttribute("style", "display:block;position:fixed;left:-10000px;top:0");
+  // Keep the caller's font while measuring — the PDF path lays out in Sarabun.
+  root.setAttribute("style", "display:block;position:fixed;left:-10000px;top:0;font-family:" + (root.style.fontFamily || "'IBM Plex Sans Thai','Sarabun',Tahoma,sans-serif"));
   let f = 1;
   lbl.style.setProperty("--fit", "1");
   while (lbl.scrollHeight > lbl.clientHeight + 1 && f > 0.55) {
@@ -472,7 +505,26 @@ function printOrderFile(file) {
   const f = safeOrderFile(file);
   if (!f) return;
   if (f.type === "application/pdf") { openOrderFile(f); return; }
-  _printPDHtml(`<img src="${_escPD(f.dataUrl)}" style="width:100mm;height:150mm;object-fit:contain;display:block">`);
+  const size = packLabelSize();
+  const img = `<img src="${_escPD(f.dataUrl)}" style="width:${size.w}mm;height:${size.h}mm;object-fit:contain;display:block">`;
+  if (_pdIsPhone() && window.jspdf) {
+    // Same @page problem on phones: put the photo on an exact-size PDF page.
+    const im = new Image();
+    im.onload = () => {
+      try {
+        const { jsPDF } = window.jspdf;
+        const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h], orientation: "portrait" });
+        const k = Math.min(size.w / im.naturalWidth, size.h / im.naturalHeight);
+        const w = im.naturalWidth * k, h = im.naturalHeight * k;
+        pdf.addImage(f.dataUrl, (/png/i.test(f.type) ? "PNG" : "JPEG"), (size.w - w) / 2, (size.h - h) / 2, w, h);
+        pdf.save(String(f.name || "label").replace(/\.[a-z0-9]+$/i, "").replace(/[/\\:*?"<>|]/g, "_") + "_" + size.id + ".pdf");
+      } catch (e) { _printPDHtml(img, size); }
+    };
+    im.onerror = () => _printPDHtml(img, size);
+    im.src = f.dataUrl;
+    return;
+  }
+  _printPDHtml(img, size);
 }
 
 
