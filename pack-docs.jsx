@@ -108,6 +108,36 @@ function openOrderFile(file) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
+/* Save the file to the device. Phones (iOS especially) ignore <a download> on
+   a blob inside an installed PWA, so where the browser can share files we open
+   the share sheet — "บันทึกรูปภาพ" / "บันทึกไปยังไฟล์" — else a plain download. */
+async function downloadOrderFile(file, fallbackName) {
+  const f = safeOrderFile(file);
+  if (!f) return;
+  const ext = f.type === "application/pdf" ? ".pdf" : ".jpg";
+  let name = String(f.name || fallbackName || "file").replace(/[\/:*?"<>|]+/g, "_");
+  if (!/\.(pdf|jpe?g)$/i.test(name)) name = name.replace(/\.[a-z0-9]{1,5}$/i, "") + ext;
+  const bin = atob(f.dataUrl.split(",")[1] || "");
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  const blob = new Blob([arr], { type: f.type });
+  const phone = (typeof _pdIsPhone === "function") ? _pdIsPhone() : /Android|iPhone|iPad/i.test(navigator.userAgent);
+  if (phone && typeof File === "function" && navigator.canShare) {
+    try {
+      const fileObj = new File([blob], name, { type: f.type });
+      if (navigator.canShare({ files: [fileObj] })) { await navigator.share({ files: [fileObj] }); return; }
+    } catch (e) {
+      if (e && e.name === "AbortError") return;   // user closed the share sheet
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  window.dispatchEvent(new CustomEvent("ims-toast", { detail: "ดาวน์โหลด " + name + " แล้ว" }));
+}
+
 /* ── attachments ── many photos/PDFs per order (order_attachments,
    supabase/order-attachments.sql). Unlike the single label slot above, the
    packer may add them too — e.g. a photo of the packed parcel as evidence. */
@@ -219,7 +249,13 @@ function PackAttachments({ orderId, pushToast, card }) {
                     ? <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#333", padding: 4, wordBreak: "break-all" }}><span style={{ fontSize: 26 }}>📄</span>{a.name}</div>
                     : <img src={a.dataUrl} alt={a.name || "ไฟล์แนบ"} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>}
                 </button>
-                <div style={{ fontSize: 10.5, padding: "2px 6px", color: "#555", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.createdByName || "—"}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "2px 2px 2px 6px" }}>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 10.5, color: "#555", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.createdByName || "—"}</span>
+                  <button onClick={() => downloadOrderFile(a, "ไฟล์แนบ-" + orderId)} title="ดาวน์โหลด"
+                    style={{ flexShrink: 0, width: 32, height: 28, display: "grid", placeItems: "center", border: 0, borderRadius: 6, background: "var(--accent-soft)", color: "var(--accent)", cursor: "pointer", padding: 0 }}>
+                    <Icons.Download size={14}/>
+                  </button>
+                </div>
                 {canDeleteOrderAttachment(a) && (
                   <button className="btn btn-sm btn-ghost" disabled={!!busy} onClick={() => remove(a)} title="ลบ"
                     style={{ position: "absolute", top: 4, right: 4, padding: 4, background: "rgba(255,255,255,.9)", color: "var(--danger)" }}>
@@ -739,6 +775,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
           <strong style={{ fontSize: 13 }}>ใบปะหน้าที่แนบ</strong>
           <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
             {file && <button className={btn} onClick={() => openOrderFile(file)}><Icons.Eye size={13}/> เปิด</button>}
+            {file && <button className={btn} onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={13}/> ดาวน์โหลด</button>}
             {file && <button className={btn} onClick={() => printOrderFile(file)}><Icons.Print size={13}/> พิมพ์</button>}
             {canUpload && <button className={btn} disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={13}/> {file ? "เปลี่ยน" : "แนบไฟล์"}</button>}
             {canAttach && file && <button className="btn btn-sm btn-ghost" disabled={busy} onClick={remove}><Icons.Trash size={13}/></button>}
@@ -1115,5 +1152,5 @@ Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
   packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
-  deleteOrderDocs, PackLabelButton
+  deleteOrderDocs, PackLabelButton, downloadOrderFile
 });
