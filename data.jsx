@@ -2673,11 +2673,50 @@ function packLinesForOrders(orders) {
 /* Orders waiting to be packed, oldest first so the queue is FIFO. Reads the
    Tracking model (buildOrders) so it sees exactly what Outbound/Tracking show;
    falls back to the raw cache if tracking.jsx hasn't loaded. */
-function packQueue() {
+function packQueue(mode) {
   const list = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
-  return (list || [])
-    .filter(o => o && o.status === "picking")
-    .sort((a, b) => String(a.dateIso || "").localeCompare(String(b.dateIso || "")) || String(a.ts || "").localeCompare(String(b.ts || "")));
+  return packSortOrders((list || []).filter(o => o && o.status === "picking"), mode || packSortMode());
+}
+
+/* Queue order — picked by the packer, remembered per device (two packers may
+   work the queue differently). Every mode falls back to oldest-first so ties
+   never shuffle between renders. */
+const PACK_SORTS = [
+  { id: "old",      label: "เก่าสุดก่อน" },
+  { id: "new",      label: "ใหม่สุดก่อน" },
+  { id: "channel",  label: "ตามช่องทาง" },
+  { id: "customer", label: "ตามชื่อลูกค้า" },
+  { id: "pieces",   label: "ชิ้นน้อยก่อน" }
+];
+const PACK_SORT_KEY = "ims_pack_sort";
+function packSortMode() {
+  let v = "";
+  try { v = localStorage.getItem(PACK_SORT_KEY) || ""; } catch (e) {}
+  return PACK_SORTS.some(x => x.id === v) ? v : "old";
+}
+function setPackSortMode(id) {
+  if (!PACK_SORTS.some(x => x.id === id)) return;
+  try { localStorage.setItem(PACK_SORT_KEY, id); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-pack-change"));
+}
+function _packTimeKey(o) { return String(o.dateIso || "") + " " + String(o.ts || "") + " " + String(o.id || ""); }
+function _packPieces(o) { return packLinesForOrder(o).reduce((n, l) => n + l.qty, 0); }
+function packSortOrders(list, mode) {
+  const old = (a, b) => _packTimeKey(a).localeCompare(_packTimeKey(b));
+  const arr = (list || []).slice();
+  if (mode === "new") return arr.sort((a, b) => old(b, a));
+  if (mode === "channel") return arr.sort((a, b) => String(a.channel || "").localeCompare(String(b.channel || ""), "th") || old(a, b));
+  if (mode === "customer") return arr.sort((a, b) => String(a.customer || "").localeCompare(String(b.customer || ""), "th") || old(a, b));
+  if (mode === "pieces") {
+    const n = new Map(arr.map(o => [o.id, _packPieces(o)]));
+    return arr.sort((a, b) => n.get(a.id) - n.get(b.id) || old(a, b));
+  }
+  return arr.sort(old);
+}
+// "7 ต.ค. 69 · 14:05" for a queue row.
+function packOrderTime(o) {
+  const d = o.date || (o.dateIso && typeof isoToThai === "function" ? isoToThai(o.dateIso) : (o.dateIso || ""));
+  return [d, o.ts].filter(Boolean).join(" · ");
 }
 
 // Other positions that still hold this sku — offered when a shelf comes up short.
@@ -3590,7 +3629,7 @@ Object.assign(window, {
   receiveLineShelf, receiveLinesWithoutShelf, buildReceiveReport, lastReceiveLoc, rememberReceiveLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
-  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions,
+  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
   loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
