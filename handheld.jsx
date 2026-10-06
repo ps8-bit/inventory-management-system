@@ -1791,7 +1791,7 @@ function MProductDetail({ ctx }) {
               <>
               <div className="row" style={{ gap: 12 }}>
                 {photo ? (
-                  <img src={photo} alt="" style={{ width: 76, height: 76, borderRadius: 10, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}/>
+                  <img src={photo} alt="" loading="lazy" decoding="async" style={{ width: 76, height: 76, borderRadius: 10, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}/>
                 ) : (
                   <div style={{ width: 76, height: 76, borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", display: "grid", placeItems: "center", color: "var(--accent)", flexShrink: 0 }}>
                     <Icons.Map size={24}/>
@@ -3975,7 +3975,7 @@ function MFinder({ ctx }) {
                   style={{ display: "flex", gap: 12, alignItems: "stretch", width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "inherit", padding: 10 }}>
                   <div style={{ width: 84, height: 84, borderRadius: 10, overflow: "hidden", background: "#fff", border: "1px solid var(--border)", flexShrink: 0, display: "grid", placeItems: "center" }}>
                     {url
-                      ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+                      ? <img src={url} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
                       : <Icons.Box size={26} style={{ color: "var(--muted)", opacity: 0.5 }}/>}
                   </div>
                   <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "2px 0" }}>
