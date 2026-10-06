@@ -108,10 +108,12 @@ function packRecipientFor(order) {
   const r = (lab && lab.recipient) || {};
   const locality = (typeof formatRecipientLocality === "function") ? formatRecipientLocality(r) : [r.tambon, r.amphoe, r.province, r.postal].filter(Boolean).join(" ");
   const addr = [r.addr1, r.addr2, locality].filter(Boolean).join(" ").trim();
+  // An address typed on the pack screen (order override `shipTo`) wins.
+  const t = order.shipTo || {};
   return {
-    name: r.name || order.customer || "",
-    phone: r.phone || order.phone || "",
-    addr,
+    name: t.name || r.name || order.customer || "",
+    phone: t.phone || r.phone || order.phone || "",
+    addr: t.addr || addr,
     cod: (lab && Number(lab.cod)) || 0,
     carrier: order.carrier || (lab && lab.carrier) || "",
     hasLabel: !!lab
@@ -176,6 +178,19 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   const canAttach = typeof canDo !== "function" || canDo("sell");
   const canCancel = typeof canDeleteData === "function" && canDeleteData();
   const r = packRecipientFor(order) || {};
+  const [edit, setEdit] = useStatePD(null);   // null | { name, phone, addr, paste }
+  const startEdit = () => setEdit({ name: r.name || "", phone: r.phone || "", addr: r.addr || "", paste: "" });
+  const splitPaste = () => {
+    const p = (typeof parseRecipientBlob === "function") ? parseRecipientBlob(edit.paste) : null;
+    if (!p) { pushToast("แยกที่อยู่ไม่ได้ — กรอกเองได้เลย"); return; }
+    setEdit(e => ({ ...e, paste: "", name: p.name || e.name, phone: p.phone || e.phone, addr: [p.addr1, p.addr2].filter(Boolean).join(" ") || e.addr }));
+  };
+  const saveAddr = () => {
+    if (typeof setOrderField !== "function") return;
+    setOrderField(order.id, { shipTo: { name: edit.name.trim(), phone: edit.phone.trim(), addr: edit.addr.trim() } });
+    setEdit(null);
+    pushToast("บันทึกที่อยู่แล้ว");
+  };
 
   useEffectPD(() => {
     let alive = true;
@@ -252,14 +267,33 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
       <div {...card} style={{ ...card.style, flex: 1, minWidth: 240 }}>
         <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
           <strong style={{ fontSize: 13 }}>ที่อยู่ผู้รับ</strong>
-          <div className="row" style={{ gap: 6 }}>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+            {canAttach && !edit && <button className={btn} onClick={startEdit}><Icons.Edit size={13}/> {r.addr ? "แก้ไข" : "เพิ่มที่อยู่"}</button>}
             <button className={btn} disabled={!r.name && !r.addr} onClick={() => { const t = [r.name, r.phone, r.addr].filter(Boolean).join("\n"); if (navigator.clipboard) navigator.clipboard.writeText(t).then(() => pushToast("คัดลอกที่อยู่แล้ว")).catch(() => {}); }}><Icons.Copy size={13}/> คัดลอก</button>
             <button className={btn} disabled={!r.addr} onClick={() => printOrderAddress(order, lines)}><Icons.Print size={13}/> พิมพ์ใบปะหน้า</button>
           </div>
         </div>
-        <div style={{ fontSize: 15, fontWeight: 600 }}>{r.name || "—"}</div>
-        {r.phone && <div className="mono" style={{ fontSize: 13 }}>{r.phone}</div>}
-        <div style={{ fontSize: 12.5, marginTop: 4, color: r.addr ? "var(--fg)" : "var(--muted)" }}>{r.addr || "ออร์เดอร์นี้ไม่มีที่อยู่ (สร้างจากขายออก/ตัดสต็อก) — ใช้ไฟล์ใบปะหน้าที่แนบ"}</div>
+        {edit ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div className="row" style={{ gap: 6 }}>
+              <textarea className="input" rows={2} value={edit.paste} onChange={e => setEdit({ ...edit, paste: e.target.value })} placeholder="วางที่อยู่ทั้งก้อนจากแชท/Shopee แล้วกด แยกอัตโนมัติ" style={{ flex: 1, resize: "vertical" }}/>
+              <button className={btn} disabled={!edit.paste.trim()} onClick={splitPaste}>แยกอัตโนมัติ</button>
+            </div>
+            <input className="input" value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} placeholder="ชื่อผู้รับ"/>
+            <input className="input" value={edit.phone} inputMode="tel" onChange={e => setEdit({ ...edit, phone: e.target.value })} placeholder="เบอร์โทร"/>
+            <textarea className="input" rows={3} value={edit.addr} onChange={e => setEdit({ ...edit, addr: e.target.value })} placeholder="ที่อยู่ ตำบล อำเภอ จังหวัด รหัสไปรษณีย์" style={{ resize: "vertical" }}/>
+            <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
+              <button className={btn} onClick={() => setEdit(null)}>ยกเลิก</button>
+              <button className="btn btn-sm btn-primary" disabled={!edit.name.trim() && !edit.addr.trim()} onClick={saveAddr}>บันทึกที่อยู่</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>{r.name || "—"}</div>
+            {r.phone && <div className="mono" style={{ fontSize: 13 }}>{r.phone}</div>}
+            <div style={{ fontSize: 12.5, marginTop: 4, color: r.addr ? "var(--fg)" : "var(--muted)" }}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</div>
+          </>
+        )}
         {(r.cod > 0 || r.carrier) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
       </div>
 
