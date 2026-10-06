@@ -212,7 +212,7 @@ function SellConfirmModal({ bundle, qty, channels, when, onWhenChange, onConfirm
 
           {/* วันเวลาที่ขาย — backdated bundle sale (shared field from screens.jsx). */}
           {onWhenChange && typeof StockOutWhenField === "function" && (
-            <StockOutWhenField value={when} onChange={onWhenChange} label="วันเวลาที่ขาย"
+            <StockOutWhenField value={when} onChange={onWhenChange} label="วันเวลาที่ขาย" style={{ marginBottom: 0 }}
               hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"/>
           )}
         </div>
@@ -379,6 +379,7 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
   const [showConfirm, setShowConfirm] = useBndState(false);
   const [when, setWhen] = useBndState(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   const [stockKey, setStockKey] = useBndState(0);
+  const sellBusyRef = useBndRef(false);
 
   useBndEffect(() => {
     const refresh = () => setStockKey(k => k + 1);
@@ -408,11 +409,16 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
   const selectedChannels = CHANNEL_LIST.filter(c => channels[c.id].on && channels[c.id].qty > 0)
     .map(c => ({ ...c, qty: channels[c.id].qty }));
 
+  /* Synchronous double-submit latch — see SellProductModal in screens.jsx for
+     why a state flag isn't enough (this awaits applyLocPicks before closing). */
   const confirmSell = async () => {
+    if (sellBusyRef.current) return;
+    sellBusyRef.current = true;
     // Capture before-qtys BEFORE deducting so the audit shows the true from→to
     // (the old code read qty AFTER deduction, which is wrong when a deduct clamps at 0).
     const before = Object.fromEntries(bundle.items.map(it => [it.sku, getEffectiveQty(it.sku)]));
-    deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })));
+    deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })),
+      `ขายชุดสินค้า ${bundle.name} ×${sellQty}`);
     /* Third sell path (shared by both forks) — without this every component of a
        bundle sale drifts its per-position split. No per-component picker: each
        takes its own pick-first shelf, the SAME default the other flows use. */
@@ -447,7 +453,7 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
       appendOrder({
         id, channel: channelLabel, customer: "ลูกค้าใหม่",
         items: bundle.items.length, status: "picking", carrier: "", tracking: "",
-        ts, dateIso, createdAt, deductions, isBundle: true, bundleName: bundle.name,
+        ts, dateIso, ...(createdAt ? { createdAt } : {}), deductions, isBundle: true, bundleName: bundle.name,
         lineItems: bundle.items.map(it => (typeof snapLineItem === "function"
           ? snapLineItem(it.sku, null, it.qty * sellQty)
           : { sku: it.sku, name: it.sku, qty: it.qty * sellQty, price: 0, cost: 0 }))
@@ -472,6 +478,8 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
       });
     }
     setShowConfirm(false);
+    // The panel stays mounted for the next sale, so release the latch here.
+    sellBusyRef.current = false;
     setWhen("");
     pushToast(`ขายชุด "${bundle.name}" ${sellQty} ชุดสำเร็จ${backLabel ? ` (ย้อนหลัง ${backLabel})` : ""}`);
     setStockKey(k => k + 1);

@@ -147,3 +147,7 @@ create policy "read"   on public.store_settings for select using (auth.role() = 
 create policy "insert" on public.store_settings for insert with check (public.auth_role() in ('admin','manager'));
 create policy "update" on public.store_settings for update using (public.auth_role() in ('admin','manager')) with check (public.auth_role() in ('admin','manager'));
 create policy "delete" on public.store_settings for delete using (public.auth_role() = 'admin');
+
+-- 7. พนักงานแพ็ค (packer) + order_files — see packer-role.sql. §3 drops EVERY
+--    policy in public, so after re-running this file, re-run packer-role.sql too
+--    or the packer can't save pick progress and order_files becomes deny-all.

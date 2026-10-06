@@ -86,7 +86,29 @@ function makeBlankLabel(existing) {
    Every sale (POS / stock-out / desktop) is a shipment, so it becomes a label —
    labels are the single source of truth that feeds คิวฉลาก + ติดตามพัสดุ + จัดส่ง.
    `created_at` is set so labelToOrder gives the row a real date (sorts correctly). */
-function createSaleLabel({ orderId, name, phone, addr1, addr2, tambon, amphoe, province, postal, carrier, cod, items, created_at }) {
+/* Append ONE label: optimistic local add + single-row DB upsert, offline-queued
+   on failure. The convergence-safe writer, and the twin of appendOrder(): unlike
+   saveLabels() it never rewrites the whole list and never diffs-and-deletes, so a
+   device holding a slightly stale queue can't erase a label another device just
+   created (which took its order off ติดตามพัสดุ with it, and had staff re-doing
+   the sale — one vanished record, one duplicate). */
+function appendLabel(label) {
+  if (!label || !label.id) return { ok: false };
+  const next = [...((typeof loadLabels === "function") ? loadLabels() : []).filter(l => l.id !== label.id), label];
+  try { localStorage.setItem("ims_labels", JSON.stringify(next)); } catch (e) {}
+  window._DB_LABELS = next;
+  window.dispatchEvent(new CustomEvent("ims-labels-change"));
+  if (typeof dbUpsertLabels !== "function") return { ok: true };
+  return dbUpsertLabels([label]).then(res => {
+    if (res && res.error && typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("labels", [label]);
+    return res || { ok: true };
+  }).catch(e => {
+    if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("labels", [label]);
+    return { error: String(e) };
+  });
+}
+
+function createSaleLabel({ orderId, name, phone, addr1, addr2, tambon, amphoe, province, postal, carrier, tracking, cod, items, created_at }) {
   const existing = (typeof loadLabels === "function") ? loadLabels() : [];
   const base = (typeof makeBlankLabel === "function")
     ? makeBlankLabel(existing)
@@ -97,10 +119,13 @@ function createSaleLabel({ orderId, name, phone, addr1, addr2, tambon, amphoe, p
     created_at: created_at || new Date().toISOString(),
     recipient: { name: name || "", phone: phone || "", addr1: addr1 || "", addr2: addr2 || "", tambon: tambon || "", amphoe: amphoe || "", province: province || "", postal: postal || "" },
     carrier: carrier || "",
+    // labelToOrder derives status from this — a tracking number = ส่งแล้ว.
+    ...(tracking ? { tracking: String(tracking) } : {}),
     cod: (typeof cod === "number" && cod > 0) ? cod : 0,
     items: (items || []).map(it => ({ sku: it.sku, name: it.name, qty: it.qty })),
   };
-  if (typeof saveLabels === "function") saveLabels([...existing, label]);
+  // Append-only write — never the whole queue (see appendLabel).
+  appendLabel(label);
   // A re-created label reusing a previously-deleted SO number must shed the old
   // {deleted:true} tombstone, or the new shipment stays hidden from staff.
   if (typeof clearOrderOverride === "function") {
@@ -721,6 +746,17 @@ function saveLabels(labels) {
       return changed ? { ...l, updatedAt: now } : l;
     });
   }
+  /* ── Self-feeding write loop guard (2026-09-19) ──
+     saveLabels ends by setting window._DB_LABELS and firing ims-labels-change.
+     The Labels screen listens for that event and does setLabels(window._DB_LABELS),
+     and it also persists on every [labels] change — so one save fed the next: the
+     map() above always returns a NEW array, the state ref always differed, and the
+     cycle repeated, firing a full-list upsert (with the delete-diff below!) over
+     and over for as long as the screen stayed open. When nothing actually changed
+     the mapped rows are the SAME objects in the same order, so an identity compare
+     ends the cycle after one real write — and cuts every redundant upsert. */
+  if (prev && prev.length === labels.length && prev.every((l, i) => l === labels[i])) return;
+
   if (prev) {
     const newIds = new Set(labels.map(l => l.id));
     prev.filter(l => !newIds.has(l.id)).forEach(l => {
@@ -1967,4 +2003,4 @@ function BatchView({ labels, selected, setSelected, size, zoom, store, onExportP
   );
 }
 
-Object.assign(window, { Labels, LabelPaper, loadLabels, saveLabels, parseRecipientBlob, computeRecipientLeftover, scoreRecipientParse, RecipientParseNote, blankLabel: makeBlankLabel, createSaleLabel, exportLabelPDF, printLabels, labelsToPDF, rasterizeLabel, SenderPicker, loadSenders, saveSenders, storeSenderTemplate, LabelDateFilter, labelDateKey, labelDateChipLabel, labelDateGroups });
+Object.assign(window, { Labels, LabelPaper, loadLabels, saveLabels, appendLabel, parseRecipientBlob, computeRecipientLeftover, scoreRecipientParse, RecipientParseNote, blankLabel: makeBlankLabel, createSaleLabel, exportLabelPDF, printLabels, labelsToPDF, rasterizeLabel, SenderPicker, loadSenders, saveSenders, storeSenderTemplate, LabelDateFilter, labelDateKey, labelDateChipLabel, labelDateGroups });

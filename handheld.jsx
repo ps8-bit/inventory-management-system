@@ -72,7 +72,7 @@ function PhoneFrame({ children }) {
 /* =============== MAIN MOBILE APP =============== */
 
 function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
-  const [route, setRouteRaw] = useStateM({ tab: "home", view: null, params: null, history: [] });
+  const [route, setRouteRaw] = useStateM(() => mStartRoute(user && user.role));
   const setRoute = (r) => setRouteRaw(r);
   /* switchTab("inventory") — plain tab switch (every existing caller).
      switchTab("inventory", { status: "low" }) — switch AND hand the tab screen a
@@ -97,12 +97,17 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
 
   /* Role permissions changed (edited here, or pushed from another device via
      realtime) → re-render so the menu and every canDo() gate re-resolve. */
-  const [, setPermTick] = useStateM(0);
+  const [permTick, setPermTick] = useStateM(0);
   useEffectM(() => {
     const h = () => setPermTick(t => t + 1);
     window.addEventListener("ims-perms-change", h);
     return () => window.removeEventListener("ims-perms-change", h);
   }, []);
+  // A tab revoked by an admin (or a role switch) → move to the role's start route.
+  useEffectM(() => {
+    const role = user && user.role;
+    if (!route.view && !mTabAllowed(route.tab, role)) setRouteRaw(mStartRoute(role));
+  }, [permTick, user && user.role]);
 
   const ctx = { route, switchTab, push, back, pushToast, user, onLogout, onSwitchUser, fullscreen, pendingSync };
 
@@ -112,7 +117,7 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
       <ErrorBoundary key={(route.view || "") + ":" + (route.tab || "")} mobile>
         <Screen ctx={ctx}/>
       </ErrorBoundary>
-      <TabBar tab={route.tab} onSwitch={switchTab}/>
+      <TabBar tab={route.tab} onSwitch={switchTab} role={user && user.role}/>
     </div>
   );
 }
@@ -132,25 +137,36 @@ function StatusBar() {
   );
 }
 
-/* Bottom tabs → the nav id each one maps to. "home"/"more" are always available
-   (dashboard is the landing screen and "more" is how you reach everything else);
-   the other three are real nav ids and must honour the role's page list, or the
-   permission editor's chips would be a no-op on the phone. */
-const M_TAB_NAV_ID = { inbound: "inbound", outbound: "outbound", inventory: "inventory" };
-function mTabAllowed(tabId) {
+/* Bottom tabs → the nav id each one maps to. "more" is always available (it's
+   how you reach everything else and holds logout); the others are real nav ids
+   and must honour the role's page list, or the permission editor's chips would
+   be a no-op on the phone. "home" is the dashboard — a role without it (the
+   pack-only พนักงานแพ็ค) gets no home screen at all.
+   `role` is passed explicitly where known: window.__currentUser is set by a
+   parent effect, which runs AFTER this subtree's first render. */
+const M_TAB_NAV_ID = { home: "dashboard", inbound: "inbound", outbound: "outbound", inventory: "inventory" };
+function mTabAllowed(tabId, role) {
   const navId = M_TAB_NAV_ID[tabId];
   if (!navId) return true;
-  return typeof canOpenPage !== "function" || canOpenPage(navId);
+  return typeof canOpenPage !== "function" || canOpenPage(navId, role);
+}
+/* Where the phone app opens: the first allowed tab, else straight into
+   แพ็คสินค้า when that's the role's page, else the More menu. */
+function mStartRoute(role) {
+  const tab = ["home", "inbound", "outbound", "inventory"].find(t => mTabAllowed(t, role));
+  if (tab) return { tab, view: null, params: null, history: [] };
+  if (typeof canOpenPage === "function" && canOpenPage("pack", role)) return { tab: "more", view: "pack", params: null, history: [] };
+  return { tab: "more", view: null, params: null, history: [] };
 }
 
-function TabBar({ tab, onSwitch }) {
+function TabBar({ tab, onSwitch, role }) {
   const tabs = [
     { id: "home",      label: "หน้าหลัก", icon: Icons.Dash },
     { id: "inbound",   label: "รับเข้า",  icon: Icons.In },
     { id: "outbound",  label: "จัดส่ง",   icon: Icons.Out },
     { id: "inventory", label: "สินค้า",   icon: Icons.Box },
-    { id: "more",      label: "เพิ่มเติม", icon: Icons.Setting }
-  ].filter(t => mTabAllowed(t.id));
+    { id: "more",      label: "เพิ่มเติม", icon: Icons.Menu }
+  ].filter(t => mTabAllowed(t.id, role));
   return (
     <div className="m-tabbar">
       {tabs.map(t => {
@@ -171,32 +187,43 @@ function TabBar({ tab, onSwitch }) {
    that page. The desktop shell redirects a revoked page; mobile shows a notice
    instead, because a deep link (a saved route, an old back-stack entry) can
    still point at a screen an admin has since taken away. */
-const M_GATED_VIEWS = ["locations", "labels", "tracking", "import", "bundles", "analytics", "stocktake", "adjust", "history", "users", "settings", "finder"];
+const M_GATED_VIEWS = ["locations", "labels", "tracking", "import", "bundles", "analytics", "stocktake", "adjust", "history", "users", "settings", "finder", "pack"];
 
 /* Screen dispatcher */
 function Screen({ ctx }) {
   const { route } = ctx;
+  const role = ctx.user && ctx.user.role;
   if (route.view && M_GATED_VIEWS.indexOf(route.view) !== -1
-      && typeof canOpenPage === "function" && !canOpenPage(route.view)) {
+      && typeof canOpenPage === "function" && !canOpenPage(route.view, role)) {
     return <MNoAccess ctx={ctx}/>;
   }
   // Tab screens are dispatched from route.tab, so they need their own check —
   // the tab bar hides a revoked tab, but a route saved before the change can
   // still land here.
-  if (!route.view && !mTabAllowed(route.tab)) return <MNoAccess ctx={ctx}/>;
+  if (!route.view && !mTabAllowed(route.tab, role)) return <MNoAccess ctx={ctx}/>;
   // Selling / issuing stock is a capability, not a page — MSell and MIssue have
   // several entry points, so the guard lives here rather than on each button.
-  if ((route.view === "sell" || route.view === "issue") && typeof canDo === "function" && !canDo("sell")) {
+  if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell") && typeof canDo === "function" && !canDo("sell")) {
     return <MNoAccess ctx={ctx}/>;
   }
   if (route.view === "adjust" && typeof canAdjustStock === "function" && !canAdjustStock()) {
+    return <MNoAccess ctx={ctx}/>;
+  }
+  // The pack sub-views (one order / one wave) are not nav ids of their own, so the
+  // M_GATED_VIEWS loop above can't see them — gate them on the แพ็คสินค้า page.
+  if ((route.view === "pack-order" || route.view === "pack-wave")
+      && typeof canOpenPage === "function" && !canOpenPage("pack", role)) {
     return <MNoAccess ctx={ctx}/>;
   }
   // sub-views
   if (route.view === "product")   return <MProductDetail ctx={ctx}/>;
   if (route.view === "finder")    return <MFinder ctx={ctx}/>;
   if (route.view === "issue")     return <MIssue ctx={ctx}/>;
+  if (route.view === "pack")      return <MPack ctx={ctx}/>;
+  if (route.view === "pack-order")return <MPackOrder ctx={ctx}/>;
+  if (route.view === "pack-wave") return <MPackWave ctx={ctx}/>;
   if (route.view === "sell")      return <MSell ctx={ctx}/>;
+  if (route.view === "quicksell") return <MQuickSell ctx={ctx}/>;
   if (route.view === "locations") return <MLocations ctx={ctx}/>;
   if (route.view === "labels")    return <MLabels ctx={ctx}/>;
   if (route.view === "label-view")return <MLabelView ctx={ctx}/>;
@@ -254,10 +281,33 @@ function MHome({ ctx }) {
   const lowStock = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder).length;
   const outOfStock = PRODUCTS.filter(p => p.qty === 0).length;
   const pendingOrders = (typeof buildOrders === "function" ? buildOrders() : [])
-    .filter(o => o.status === "picking" || o.status === "packed").length;
+    .filter(o => typeof isPendingOrder === "function" ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed")).length;
   const firstName = (ctx.user?.name || "สมชาย").split(" ")[0];
   const [notifOpen, setNotifOpen] = useStateM(false);
   const notifCount = lowStock + outOfStock + pendingOrders;
+
+  // Recent activity comes from the real audit log (the old static ACTIVITY
+  // array is empty, so this section used to render nothing at all).
+  const [auditTick, setAuditTick] = useStateM(0);
+  useEffectM(() => {
+    const refresh = () => setAuditTick(t => t + 1);
+    window.addEventListener("ims-audit-change", refresh);
+    return () => window.removeEventListener("ims-audit-change", refresh);
+  }, []);
+  const recentActivity = useMemoM(
+    () => (typeof loadAuditLog === "function" ? loadAuditLog() : []).slice(0, 6),
+    [auditTick]
+  );
+  const [, setSalesTick] = useStateM(0);
+  useEffectM(() => {
+    const h = () => setSalesTick(t => t + 1);
+    window.addEventListener("ims-sales-change", h);
+    window.addEventListener("ims-products-change", h);
+    return () => { window.removeEventListener("ims-sales-change", h); window.removeEventListener("ims-products-change", h); };
+  }, []);
+  const chToday = typeof channelToday === "function" ? channelToday() : [];
+  const chShown = chToday.filter(c => c.units > 0).sort((a, b) => b.units - a.units);
+  const soldToday = chToday.reduce((n, c) => n + c.units, 0);
 
   return (
     <>
@@ -301,52 +351,72 @@ function MHome({ ctx }) {
           </button>
         </div>
 
-        {/* Channels */}
-        <div className="m-card">
-          <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
-            <div style={{ fontWeight: 600, fontSize: 13 }}>ออร์เดอร์ตามช่องทาง</div>
-            <span style={{ fontSize: 11, color: "var(--muted)" }}>วันนี้ • {CHANNELS.reduce((s, c) => s + (c.today || 0), 0)}</span>
-          </div>
-          {CHANNELS.map(c => {
-            const meta = CHANNEL_LIST.find(x => x.id === c.id) || {};
-            return (
-              <div key={c.id} style={{ padding: "6px 0" }}>
-                <div className="row" style={{ justifyContent: "space-between", marginBottom: 4 }}>
-                  <span className="row" style={{ gap: 6, fontSize: 12 }}>
-                    <span style={{ width: 7, height: 7, borderRadius: 999, background: meta.color }}/>
-                    {c.name}
-                  </span>
-                  <span className="tnum" style={{ fontSize: 12, fontWeight: 500 }}>{c.today}</span>
-                </div>
-                <div className="prog" style={{ height: 4 }}><span style={{ width: c.pct + "%", background: meta.color }}/></div>
-              </div>
-            );
-          })}
-        </div>
-
         {/* Quick actions */}
         <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>ทางลัด</div>
         {/* Each shortcut is dropped when its capability/page is revoked — the
             Screen guard would otherwise bounce the tap to "ไม่มีสิทธิ์เข้าถึง". */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, marginBottom: 14 }}>
-          {canDo("sell") && <QuickTile icon={<Icons.Cart size={20}/>} label="ขายสินค้า" color="oklch(0.95 0.05 50)"  fg="oklch(0.5 0.16 40)"  onClick={() => ctx.push("sell")}/>}
+          {/* ปรับสต็อก first — it is how the team records Shopee / Facebook / หน้าร้าน sales. */}
+          {canDo("sell") && <QuickTile icon={<Icons.Cart size={20}/>} label="ขายออก" color="oklch(0.95 0.05 50)" fg="oklch(0.5 0.16 40)" onClick={() => ctx.push("quicksell")}/>}
+          {typeof canAdjustStock === "function" && canAdjustStock() && canOpenPage("adjust") && <QuickTile icon={<Icons.Refresh size={20}/>} label="ปรับสต็อก" color="oklch(0.96 0.03 90)" fg="oklch(0.45 0.1 80)" onClick={() => ctx.push("adjust")}/>}
+          {canDo("sell") && <QuickTile icon={<Icons.Truck size={20}/>} label="ขาย + จัดส่ง" color="oklch(0.95 0.03 250)"  fg="oklch(0.42 0.12 250)"  onClick={() => ctx.push("sell")}/>}
           {canOpenPage("inbound") && <QuickTile icon={<Icons.In size={20}/>}   label="รับเข้า"   color="oklch(0.96 0.04 150)" fg="oklch(0.4 0.13 150)" onClick={() => ctx.switchTab("inbound")}/>}
           {canDo("sell") && <QuickTile icon={<Icons.Out size={20}/>}  label="ตัดสต็อก"  color="oklch(0.95 0.04 230)" fg="oklch(0.4 0.13 230)" onClick={() => ctx.push("issue")}/>}
           {canOpenPage("labels") && <QuickTile icon={<Icons.Tag size={20}/>}  label="ฉลาก"     color="oklch(0.96 0.03 310)" fg="oklch(0.4 0.13 310)" onClick={() => ctx.push("labels")}/>}
         </div>
 
-        {/* Recent activity */}
-        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>กิจกรรมล่าสุด</div>
+        {/* Today's sales by channel — real orders + ปรับสต็อก "ขายผ่าน …" sales
+            (was a constant list that always read 0). Hidden from roles
+            without viewSales, like every other sales figure. */}
+        {(typeof canDo !== "function" || canDo("viewSales")) && (
+          <div className="m-card" style={{ marginBottom: 14 }}>
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: chShown.length ? 10 : 0 }}>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>ขายวันนี้ตามช่องทาง</div>
+              <span className="tnum" style={{ fontSize: 13, color: "var(--muted)" }}>{soldToday} ชิ้น</span>
+            </div>
+            {chShown.length === 0 && <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6 }}>ยังไม่มีการขายวันนี้</div>}
+            {chShown.map(c => (
+              <div key={c.id} style={{ padding: "6px 0" }}>
+                <div className="row" style={{ justifyContent: "space-between", marginBottom: 4 }}>
+                  <span className="row" style={{ gap: 6, fontSize: 13 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+                    {c.name}
+                  </span>
+                  <span className="tnum" style={{ fontSize: 13, fontWeight: 600 }}>{c.units} ชิ้น</span>
+                </div>
+                <div className="prog" style={{ height: 4 }}><span style={{ width: c.pct + "%", background: c.color }}/></div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Recent activity — each row carries its day, so an entry from an
+            earlier day can't be misread as today's. ดูทั้งหมด opens the full
+            log, where older days can be paged in or jumped to by date. */}
+        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", padding: "0 4px 8px" }}>
+          <div className="m-section-label" style={{ padding: 0 }}>กิจกรรมล่าสุด</div>
+          {canOpenPage("history") && (
+            <button onClick={() => ctx.push("history")}
+              style={{ background: "none", border: "none", padding: 0, font: "inherit", fontFamily: "inherit", fontSize: 12, color: "var(--accent)", cursor: "pointer" }}>
+              ดูทั้งหมด <Icons.Chev size={11}/>
+            </button>
+          )}
+        </div>
         <div className="m-list">
-          {ACTIVITY.slice(0, 5).map((a, i) => (
-            <div key={i} className="m-row" style={{ cursor: "default" }}>
-              <ActivityDot type={a.type}/>
+          {recentActivity.map((e, i) => (
+            <div key={e.id || i} className="m-row" style={{ cursor: "default" }}>
+              <ActivityDot type={auditTone(e)}/>
               <div className="m-row-main">
-                <div className="m-row-title" style={{ fontSize: 13, fontWeight: 400 }}>{a.text}</div>
-                <div className="m-row-sub">{a.t} · {a.who}</div>
+                <div className="m-row-title" style={{ fontSize: 13, fontWeight: 400, whiteSpace: "normal" }}>{e.summary || e.entityId || "เปลี่ยนแปลง"}</div>
+                <div className="m-row-sub">{thaiDayLabel(bangkokDateOf(e.ts))} {bangkokTimeOf(e.ts)} · {e.user?.name || "ระบบ"}</div>
               </div>
             </div>
           ))}
+          {recentActivity.length === 0 && (
+            <div style={{ padding: "22px 8px", textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
+              ยังไม่มีกิจกรรม — จะแสดงเมื่อเริ่มรับเข้า/ตัดสต็อก
+            </div>
+          )}
         </div>
       </div>
       {notifOpen && <MNotifSheet ctx={ctx} onClose={() => setNotifOpen(false)}/>}
@@ -360,7 +430,7 @@ function MNotifSheet({ ctx, onClose }) {
   const outOfStock = PRODUCTS.filter(p => p.qty === 0);
   const lowStock   = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder);
   const pending    = (typeof buildOrders === "function" ? buildOrders() : [])
-    .filter(o => o.status === "picking" || o.status === "packed");
+    .filter(o => typeof isPendingOrder === "function" ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed"));
   const nothing = !outOfStock.length && !lowStock.length && !pending.length;
   const go = (tab) => { onClose(); ctx.switchTab(tab); };
   /* Tapping a row must land on the THING that was tapped, not just its tab —
@@ -397,7 +467,7 @@ function MNotifSheet({ ctx, onClose }) {
           {lowStock.length > 0 && <div className="m-section-label" style={{ color: "var(--warning)", padding: "4px 2px" }}>ใกล้หมด ({lowStock.length})</div>}
           {lowStock.slice(0, 6).map(p => <Row key={"l" + p.sku} color="var(--warning)" title={p.name} sub={p.sku + " · เหลือ " + p.qty} onClick={() => goProduct(p.sku)}/>)}
           {pending.length > 0 && <div className="m-section-label" style={{ padding: "4px 2px" }}>ออร์เดอร์ค้าง ({pending.length})</div>}
-          {pending.slice(0, 6).map(o => <Row key={"p" + o.id} color="var(--accent)" title={o.customer || o.id} sub={o.id + " · " + (o.status === "picking" ? "กำลังหยิบ" : "พร้อมส่ง")} onClick={() => goOrder(o)}/>)}
+          {pending.slice(0, 6).map(o => <Row key={"p" + o.id} color="var(--accent)" title={o.customer || o.id} sub={(typeof orderShortId === "function" ? orderShortId(o) : o.id) + " · " + (ORDER_STATUS_TH[o.status] || o.status)} onClick={() => goOrder(o)}/>)}
         </div>
       </div>
     </>
@@ -408,7 +478,7 @@ function QuickTile({ icon, label, color, fg, onClick }) {
   return (
     <button onClick={onClick} style={{ background: color, border: "1px solid var(--border)", borderRadius: 14, padding: "14px 8px", color: "var(--fg)", cursor: "pointer", fontFamily: "inherit", display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
       <div style={{ width: 38, height: 38, borderRadius: 11, background: "rgba(255,255,255,0.6)", display: "grid", placeItems: "center", color: fg }}>{icon}</div>
-      <span style={{ fontSize: 11, fontWeight: 500 }}>{label}</span>
+      <span style={{ fontSize: 13, fontWeight: 600, textAlign: "center", lineHeight: 1.3 }}>{label}</span>
     </button>
   );
 }
@@ -420,12 +490,14 @@ function MInbound({ ctx }) {
   const [received, setReceived] = useStateM(() => typeof loadInboundDraft === "function" ? loadInboundDraft() : []);
   const [scan, setScan] = useStateM("");
   const [flash, setFlash] = useStateM(null);
+  const [report, setReport] = useStateM(null); // what the closed batch did (buildReceiveReport)
   const [camOpen, setCamOpen] = useStateM(false);
   const lastScanRef = useRefM(null);
   const [quickAdd, setQuickAdd] = useStateM(null); // null | { sku }
   const [similar, setSimilar] = useStateM(null); // null | { code, candidates } — near-duplicate prompt
   const [closed, setClosed] = useStateM(false);
   const [grQueue, setGRQueue] = useStateM(() => typeof loadGRQueue === "function" ? loadGRQueue() : []);
+  const [qtyEdit, setQtyEdit] = useStateM(null); // null | { sku, val } — raw text while a count is being typed
   const inputRef = useRefM(null);
   // Persist the receiving draft on every change; clear it once the job is committed.
   useEffectM(() => { if (typeof saveInboundDraft === "function") saveInboundDraft(closed ? [] : received); }, [received, closed]);
@@ -443,14 +515,41 @@ function MInbound({ ctx }) {
         const next = [...prev]; next[i] = { ...next[i], qty: next[i].qty + qty, t };
         return [next[i], ...next.filter((_, j) => j !== i)];
       }
-      return [{ sku: p.sku, name: p.name, qty, loc: p.loc || "", t }, ...prev];
+      // Default to the REAL shelf — p.loc is "-" on live data, and filing a batch
+      // under "-" created a fake pick-first shelf.
+      return [{ sku: p.sku, name: p.name, qty, loc: (typeof productHomeLoc === "function" ? productHomeLoc(p) : ""), t }, ...prev];
     });
     setFlash(p);
     setTimeout(() => setFlash(null), 1500);
   };
   // Per-line "จัดเก็บที่" — where this batch physically lands when the job closes.
-  const setReceivedLoc = (idx, locV) =>
+  const setReceivedLoc = (idx, locV) => {
+    if (typeof rememberReceiveLoc === "function") rememberReceiveLoc(locV);
     setReceived(prev => prev.map((r, i) => (i === idx ? { ...r, loc: locV } : r)));
+  };
+  // Lines that would be committed with NO shelf (none picked, none on the product)
+  // — the FG-ELWEB-BK case: 30 pieces received, filed nowhere, no warning.
+  const noShelf = (typeof receiveLinesWithoutShelf === "function") ? receiveLinesWithoutShelf(received) : [];
+  const noShelfSet = new Set(noShelf.map(r => r.sku));
+  const fillEmptyShelves = (locV) => {
+    if (!locV) return;
+    if (typeof rememberReceiveLoc === "function") rememberReceiveLoc(locV);
+    setReceived(prev => prev.map(r => (noShelfSet.has(r.sku) ? { ...r, loc: locV } : r)));
+    ctx.pushToast(`ตั้งตำแหน่ง ${noShelf.length} รายการแล้ว`);
+  };
+  // Manual qty correction for an already-scanned line — keyed by sku, not index,
+  // since `received` reorders on every new scan (most-recent first).
+  const setReceivedQty = (sku, n) =>
+    setReceived(prev => prev.map(r => (r.sku === sku ? { ...r, qty: n } : r)));
+  // Drop a line from this round's draft — a mis-scan, or a stale entry left over
+  // from a job that never got closed. Only touches the in-memory draft.
+  const removeReceived = (idx) => {
+    setReceived(prev => {
+      const r = prev[idx];
+      if (r && ctx && ctx.pushToast) ctx.pushToast(`ลบ ${r.sku} ออกจากรายการแล้ว`);
+      return prev.filter((_, i) => i !== idx);
+    });
+  };
 
   const submit = (override) => {
     if (closed) return;
@@ -492,12 +591,34 @@ function MInbound({ ctx }) {
       return;
     }
     const totalQty = received.reduce((s, r) => s + r.qty, 0);
+    if (noShelf.length) {
+      const list = noShelf.slice(0, 8).map(r => `• ${r.sku}`).join("\n") + (noShelf.length > 8 ? `\n…อีก ${noShelf.length - 8} รายการ` : "");
+      if (!confirm(`⚠ ยังไม่ได้เลือกตำแหน่งจัดเก็บ ${noShelf.length} รายการ:\n${list}\n\nถ้าปิดงานตอนนี้ สินค้าจะขึ้นว่า "ยังไม่จัดเก็บ"\nกด ยกเลิก เพื่อกลับไปเลือกตำแหน่ง (แนะนำ)\nกด ตกลง เพื่อปิดงานโดยไม่ระบุตำแหน่ง`)) return;
+    }
     if (!confirm(`ยืนยันปิดงานรับเข้า?\nจะเพิ่มสต็อก ${totalQty} ชิ้น ใน ${received.length} SKU เข้าระบบทันที`)) return;
-    received.forEach(r => {
-      const p = PRODUCTS.find(x => x.sku === r.sku);
-      if (!p) return;
-      adjustProductQty(r.sku, r.qty); // atomic +delta (concurrent-safe)
-    });
+    /* confirm() blocks the thread, so a second tap queues behind it and used to
+       run the whole batch again with the stale `closed` closure — every sku
+       received twice. The latch is synchronous and survives a reload, and the
+       draft is retired right here so a reload can't restore a committed batch.
+       Mirrors the desktop Inbound ปิดงาน guard. */
+    const guardKey = (typeof commitFingerprint === "function")
+      ? commitFingerprint("inbound-close", received) : null;
+    if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
+      if (typeof duplicateCommitToast === "function") duplicateCommitToast();
+      setClosed(true);
+      return;
+    }
+    if (typeof saveInboundDraft === "function") saveInboundDraft([]);
+    // Snapshot BEFORE the writes so the report can show stock before → after.
+    const rep = (typeof buildReceiveReport === "function") ? buildReceiveReport(received) : null;
+    // Apply + ledger in one shared helper (see the desktop twin): the recorded
+    // quantity is the one the server confirms, and the loop stays synchronous so
+    // applyReceiveLocs below still runs in the same tick as the qty writes.
+    if (typeof receiveStockAndRecord === "function") {
+      receiveStockAndRecord(received, "รับเข้าสินค้า (มือถือ)", { audit: true });
+    } else {
+      received.forEach(r => { if (PRODUCTS.some(p => p.sku === r.sku)) adjustProductQty(r.sku, r.qty); });
+    }
     // Same tick as the qty writes (see applyReceiveLocs): file each batch at
     // its picked position so the split rows follow the new stock.
     if (typeof applyReceiveLocs === "function") {
@@ -511,11 +632,15 @@ function MInbound({ ctx }) {
       recordChange({
         entity: "inbound", action: "close",
         summary: `ปิดงานรับเข้า (มือถือ) — เพิ่มสต็อก ${received.length} SKU รวม ${totalQty} ชิ้น`,
-        changes: received.map(r => ({ label: r.sku, to: `+${r.qty} ชิ้น` }))
+        changes: received.map(r => {
+          const sh = (typeof receiveLineShelf === "function") ? receiveLineShelf(r) : (r.loc || "");
+          return { label: r.sku, to: `+${r.qty} ชิ้น → ${sh || "ไม่ระบุตำแหน่ง"}` };
+        })
       });
     }
+    setReport(rep);
     setClosed(true);
-    ctx.pushToast(`ปิดงานแล้ว — อัปเดตสต็อก ${received.length} SKU`);
+    ctx.pushToast(`รับเข้าแล้ว ${received.length} SKU รวม ${totalQty} ชิ้น`);
   };
 
   const total = received.reduce((s, r) => s + r.qty, 0);
@@ -555,8 +680,10 @@ function MInbound({ ctx }) {
           </div>
         )}
 
-        {/* Active GR document — reads from the shared GR queue */}
-        <div className="m-card">
+        {/* Active GR document — reads from the shared GR queue. Hidden when the
+            queue is empty: receiving works without a document, and an empty card
+            telling staff to "go to the desktop" was just noise on the phone. */}
+        {activeGR && <div className="m-card">
           {activeGR ? (
             <>
               <div className="row" style={{ justifyContent: "space-between" }}>
@@ -579,11 +706,9 @@ function MInbound({ ctx }) {
               </div>
             </>
           ) : (
-            <div style={{ textAlign: "center", padding: "12px 0", color: "var(--muted)", fontSize: 12 }}>
-              ไม่มีเอกสารรับเข้าในคิว — เพิ่มได้ที่หน้าเดสก์ท็อป
-            </div>
+            null
           )}
-        </div>
+        </div>}
 
         {/* Camera viewfinder — tap to open real camera scanner */}
         {!closed && <button onClick={() => setCamOpen(true)} style={{ display:"block", width:"100%", background:"#111", borderRadius:16, padding:0, border:"none", cursor:"pointer", marginBottom:12, overflow:"hidden" }}>
@@ -623,7 +748,7 @@ function MInbound({ ctx }) {
               addReceived(product, qty);
               if (typeof recordChange === "function") {
                 recordChange({
-                  entity: "product", action: "add",
+                  entity: "product", entityId: product.sku, action: "add",
                   summary: `เพิ่มสินค้าใหม่ ${product.sku} — ${product.name} (สร้างจากการสแกนรับเข้า)`,
                 });
               }
@@ -636,8 +761,8 @@ function MInbound({ ctx }) {
           <div style={{ padding: "12px 14px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 14, fontSize: 13, fontWeight: 500, marginBottom: 12, display: "flex", gap: 8, alignItems: "center" }}>
             <Icons.Check size={16}/>
             <div>
-              <div>ปิดงานแล้ว — อัปเดตสต็อก {received.length} SKU</div>
-              <div style={{ fontSize: 11, fontWeight: 400, color: "var(--success)", opacity: 0.8, marginTop: 2 }}>ตรวจสอบยอดได้ที่แท็บ สินค้า</div>
+              <div>รับเข้าเรียบร้อย — {received.length} SKU รวม {total} ชิ้น</div>
+              <div style={{ fontSize: 11, fontWeight: 400, color: "var(--success)", opacity: 0.8, marginTop: 2 }}>จำนวนที่รับเข้าและสต็อกก่อน → หลัง แสดงในรายการด้านล่าง</div>
             </div>
           </div>
         ) : (
@@ -656,14 +781,6 @@ function MInbound({ ctx }) {
                 <Icons.Plus size={18}/>
               </button>
             </div>
-            <div className="row" style={{ gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>ทดลอง:</span>
-              {PRODUCTS.slice(0, 3).map(p => (
-                <button key={p.sku} className="m-chip" onClick={() => submit(p.sku)}>
-                  <span className="mono" style={{ fontSize: 10 }}>{p.sku}</span>
-                </button>
-              ))}
-            </div>
           </>
         )}
 
@@ -674,10 +791,23 @@ function MInbound({ ctx }) {
               <div className="mono" style={{ fontSize: 10 }}>{flash.sku}</div>
               <div style={{ fontSize: 12, color: "var(--fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{flash.name}</div>
             </div>
+            {(() => {
+              const line = received.find(r => r.sku === flash.sku);
+              return line ? <div className="tnum" style={{ fontWeight: 700, fontSize: 13, flexShrink: 0, textAlign: "right" }}>
+                รวม {line.qty} ชิ้น
+              </div> : null;
+            })()}
           </div>
         )}
 
-        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>นับแล้ว · {received.length} SKU</div>
+        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>{closed ? "รับเข้าแล้ว" : "นับแล้ว"} · {received.length} SKU · {total} ชิ้น</div>
+        {!closed && noShelf.length > 0 && (
+          <div style={{ padding: "10px 12px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 12, fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}><Icons.Warn size={14}/> ยังไม่ได้เลือกตำแหน่ง {noShelf.length} รายการ</div>
+            <LocationSelect mobile value="" onChange={fillEmptyShelves} noneLabel="ใส่ตำแหน่งให้ทุกรายการที่ว่าง…"
+              style={{ marginTop: 8, height: 38, fontSize: 13 }}/>
+          </div>
+        )}
         <div className="m-list">
           {received.map((r, i) => (
             <div key={i} className="m-row" style={{ cursor: "default", alignItems: "flex-start" }}>
@@ -686,11 +816,38 @@ function MInbound({ ctx }) {
                 <div className="m-row-title">{r.name}</div>
                 <div className="m-row-sub mono">{r.sku} · {r.t}</div>
                 {closed
-                  ? <div className="m-row-sub mono">{r.loc || "—"}</div>
+                  ? (() => {
+                      const rr = report && report.lines.find(x => x.sku === r.sku);
+                      return <>
+                        <div className="m-row-sub mono">{(rr && rr.shelf) || r.loc || "ไม่ระบุตำแหน่ง"}</div>
+                        {rr && <div className="m-row-sub tnum">คงเหลือ {rr.before} → <b style={{ color: "var(--fg)" }}>{rr.after}</b> ชิ้น</div>}
+                      </>;
+                    })()
                   : <LocationSelect mobile value={r.loc && r.loc !== "—" ? r.loc : ""} onChange={v => setReceivedLoc(i, v)}
-                      noneLabel="— จัดเก็บที่… —" style={{ marginTop: 4, height: 34, fontSize: 12, padding: "0 8px" }}/>}
+                      noneLabel="— จัดเก็บที่… —" style={{ marginTop: 4, height: 34, fontSize: 12, padding: "0 8px",
+                               ...(noShelfSet.has(r.sku) ? { borderColor: "var(--danger)", boxShadow: "0 0 0 1px var(--danger)" } : {}) }}/>}
               </div>
-              <div className="tnum" style={{ fontWeight: 600, fontSize: 15 }}>×{r.qty}</div>
+              {closed
+                ? <div className="tnum" style={{ fontWeight: 700, fontSize: 15, color: "var(--success)" }}>+{r.qty}</div>
+                : <QtyStepper small min={1}
+                    value={qtyEdit && qtyEdit.sku === r.sku ? qtyEdit.val : String(r.qty)}
+                    onChange={v => {
+                      setQtyEdit({ sku: r.sku, val: v });
+                      const n = parseInt(v, 10);
+                      if (Number.isFinite(n) && n >= 1) setReceivedQty(r.sku, n);
+                    }}
+                    onBlur={() => setQtyEdit(null)}
+                    title={`จำนวน ${r.sku}`}/>}
+              {!closed && (
+                <button
+                  className="m-action"
+                  style={{ width: 30, height: 30, flexShrink: 0, background: "var(--danger-soft)", color: "var(--danger)", marginLeft: 4 }}
+                  title={`ลบ ${r.sku} ออกจากรายการ`}
+                  onClick={() => { if (!confirm(`ลบ ${r.sku} ออกจากรายการรับเข้ารอบนี้?`)) return; removeReceived(i); }}
+                >
+                  <Icons.Trash size={13}/>
+                </button>
+              )}
             </div>
           ))}
           {received.length === 0 && <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>สแกนบาร์โค้ดหรือพิมพ์ SKU เพื่อเริ่มนับ</div>}
@@ -711,16 +868,28 @@ function MInbound({ ctx }) {
 /* =============== OUTBOUND =============== */
 
 function MOutbound({ ctx }) {
-  const tabs = ["ทั้งหมด", "รอหยิบ", "พร้อมส่ง", "ส่งแล้ว"];
-  // Opened from the home "ออร์เดอร์ค้าง" tile → start on รอหยิบ, not ทั้งหมด.
-  const [tab, setTab] = useStateM(() => (ctx.route.params && ctx.route.params.pending) ? 1 : 0);
-  const [q, setQ] = useStateM("");
-  const [chanFilter, setChanFilter] = useStateM("all");
+  // "ค้างส่ง" = รอแพ็ค + พร้อมส่ง, minus blank label drafts — the work that is
+  // actually waiting. Status names come from ORDER_STATUS_TH so every screen
+  // uses the same words (this tab used to say รอหยิบ, desktop กำลังหยิบ).
+  const tabs = ["ทั้งหมด", "ค้างส่ง", ORDER_STATUS_TH.picking, ORDER_STATUS_TH.packed, ORDER_STATUS_TH.shipped];
   // Single source of truth shared with ติดตามพัสดุ: labels-as-shipments + overrides.
   const orders = useOrders();
+  const pendingOf = (o) => typeof isPendingOrder === "function" ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed");
+  // Opens on the work that is waiting (or everything when nothing is).
+  const [tab, setTab] = useStateM(() => ((ctx.route.params && ctx.route.params.pending) || orders.some(pendingOf)) ? 1 : 0);
+  const [q, setQ] = useStateM("");
+  const [chanFilter, setChanFilter] = useStateM("all");
+  const [showN, setShowN] = useStateM(60);
+  useEffectM(() => { setShowN(60); }, [tab, q, chanFilter]);
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
   const [bulkMenu, setBulkMenu] = useStateM(null);
+  // Switching tab / search / channel drops the ticks (selecting mode stays on),
+  // so a bulk ลบ / ยกเลิก / status change can't hit orders no longer on screen.
+  useEffectM(() => {
+    setSelected(s => (Object.keys(s).length ? {} : s));
+    setBulkMenu(null);
+  }, [tab, q, chanFilter]);
 
   const channels = useMemoM(() => {
     const set = new Set(orders.map(o => (o.channel || "").trim()).filter(Boolean));
@@ -730,13 +899,17 @@ function MOutbound({ ctx }) {
   const filtered = useMemoM(() => {
     const lq = q.trim().toLowerCase();
     const byStatus = tab === 0 ? orders :
-      tab === 1 ? orders.filter(o => o.status === "picking") :
-      tab === 2 ? orders.filter(o => o.status === "packed") :
-      orders.filter(o => o.status === "shipped");
+      tab === 1 ? orders.filter(pendingOf) :
+      tab === 2 ? orders.filter(o => o.status === "picking") :
+      tab === 3 ? orders.filter(o => o.status === "packed") :
+      orders.filter(o => o.status === "shipped" || o.status === "delivered");
     return byStatus
       .filter(o => chanFilter === "all" || (o.channel || "").trim() === chanFilter)
       .filter(o => !lq || (o.id || "").toLowerCase().includes(lq) || (o.customer || "").toLowerCase().includes(lq));
   }, [orders, tab, q, chanFilter]);
+
+  // Orders still waiting to be packed — drives the แพ็คสินค้า shortcut below.
+  const pickingCount = useMemoM(() => orders.filter(o => o.status === "picking").length, [orders]);
 
   const selectedIds = Object.keys(selected).filter(k => selected[k]);
   const selectedCount = selectedIds.length;
@@ -773,6 +946,20 @@ function MOutbound({ ctx }) {
     ctx.pushToast(`อัปเดต ${selectedCount} ออร์เดอร์`);
     clear();
   };
+  // Cancel = delete + put every piece back on the shelf the sale took it from.
+  const bulkCancelRestock = async () => {
+    const sel = orders.filter(o => selected[o.id]);
+    const pieces = sel.reduce((s, o) => s + ((typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []).reduce((n, l) => n + l.qty, 0), 0);
+    if (!confirm(`ยกเลิก ${selectedCount} ออร์เดอร์ และคืนสต็อก ${pieces} ชิ้นกลับเข้าตำแหน่งเดิม?`)) return;
+    const r = await cancelOrdersAndRestock(sel);
+    if (r.blocked) { ctx.pushToast("ยกเลิกไม่ได้ — ต้องมีสิทธิ์ลบข้อมูล"); return; }
+    if (!r.ok) return;
+    let msg = `ยกเลิก ${r.restocked.length} ออร์เดอร์ — คืน ${r.pieces} ชิ้น`;
+    if (r.skipped.length) msg += ` · ข้าม ${r.skipped.length}`;
+    if (r.locError) msg += " · ปรับตำแหน่งไม่สำเร็จ";
+    ctx.pushToast(msg);
+    clear();
+  };
   const bulkDelete = async () => {
     if (!confirm(`ลบ ${selectedCount} ออร์เดอร์ที่เลือก?`)) return;
     let res = null;
@@ -807,25 +994,42 @@ function MOutbound({ ctx }) {
         {!selecting && canDo("sell") && <button className="m-action accent" onClick={() => ctx.push("sell")}><Icons.Cart size={18}/></button>}
       </div>
       <div className="m-content">
-        {!selecting && (
-          <div className="m-card">
-            <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 500, marginBottom: 8 }}>ตามช่องทาง วันนี้</div>
-            <div style={{ display: "flex", gap: 8, overflowX: "auto", margin: "0 -14px", padding: "0 14px", scrollbarWidth: "none" }}>
-              {CHANNELS.map(c => {
-                const meta = CHANNEL_LIST.find(x => x.id === c.id) || {};
-                return (
+        {/* Jump straight to the packer's work list. Wrapped in canOpenPage because
+            goTo/Screen refuse a page the role no longer has. */}
+        {!selecting && pickingCount > 0 && (typeof canOpenPage !== "function" || canOpenPage("pack")) && (
+          <button className="m-card" onClick={() => ctx.push("pack")}
+            style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left", font: "inherit", cursor: "pointer", border: "1px solid var(--accent)", background: "var(--accent-soft)" }}>
+            <div style={{ width: 38, height: 38, borderRadius: 10, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", flexShrink: 0 }}>
+              <Icons.Box size={18}/>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--accent)" }}>มี {pickingCount} ออร์เดอร์รอแพ็ค</div>
+              <div style={{ fontSize: 11, color: "var(--muted)" }}>เปิดรายการหยิบของตามชั้นวาง</div>
+            </div>
+            <Icons.Chev size={15} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+          </button>
+        )}
+        {/* Today's sales by channel — real, and only when there is something to show. */}
+        {!selecting && (typeof canDo !== "function" || canDo("viewSales")) && (() => {
+          const rows = (typeof channelToday === "function" ? channelToday() : []).filter(c => c.units > 0);
+          if (!rows.length) return null;
+          return (
+            <div className="m-card">
+              <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 500, marginBottom: 8 }}>ขายวันนี้ตามช่องทาง (ชิ้น)</div>
+              <div style={{ display: "flex", gap: 8, overflowX: "auto", margin: "0 -14px", padding: "0 14px", scrollbarWidth: "none" }}>
+                {rows.map(c => (
                   <div key={c.id} style={{ flexShrink: 0, padding: "10px 12px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)", minWidth: 96 }}>
                     <div className="row" style={{ gap: 6, marginBottom: 4 }}>
-                      <span style={{ width: 7, height: 7, borderRadius: 999, background: meta.color }}/>
-                      <span style={{ fontSize: 10, color: "var(--muted)" }}>{c.name}</span>
+                      <span style={{ width: 7, height: 7, borderRadius: 999, background: c.color }}/>
+                      <span style={{ fontSize: 12, color: "var(--muted)" }}>{c.name}</span>
                     </div>
-                    <div className="tnum" style={{ fontSize: 20, fontWeight: 600 }}>{c.today}</div>
+                    <div className="tnum" style={{ fontSize: 20, fontWeight: 600 }}>{c.units}</div>
                   </div>
-                );
-              })}
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         <div className="m-search" style={{ marginBottom: 8 }}>
           <Icons.Search size={14} style={{ color: "var(--muted)" }}/>
@@ -846,7 +1050,7 @@ function MOutbound({ ctx }) {
               return (
                 <button key={ch} className={"m-chip" + (chanFilter === ch ? " on" : "")} onClick={() => setChanFilter(ch)}
                   style={chanFilter === ch && meta ? { background: meta.color, borderColor: meta.color, color: "#fff" } : {}}>
-                  {ch === "all" ? "ทุกช่องทาง" : ch}
+                  {ch === "all" ? "ทุกช่องทาง" : ch === "ฉลาก" ? "จากฉลาก" : ch}
                 </button>
               );
             })}
@@ -866,8 +1070,9 @@ function MOutbound({ ctx }) {
           const unnamed = filtered.filter(isUnnamed).sort(byNewest);
           const renderRow = (o) => {
             const chMeta = CHANNEL_LIST.find(c => c.name === o.channel);
-            const stCls = o.status === "shipped" ? "badge-success" : o.status === "packed" ? "badge-info" : "badge-warning";
-            const stLab = o.status === "shipped" ? "ส่งแล้ว" : o.status === "packed" ? "พร้อมส่ง" : "กำลังหยิบ";
+            const stCls = (o.status === "shipped" || o.status === "delivered") ? "badge-success" : o.status === "packed" ? "badge-info" : "badge-warning";
+            const stLab = ORDER_STATUS_TH[o.status] || o.status;
+            const nm = (o.customer || "").trim();
             const isSelected = !!selected[o.id];
             const when = [o.date || o.dateIso || "", o.ts || ""].filter(Boolean).join(" · ");
             return (
@@ -875,27 +1080,42 @@ function MOutbound({ ctx }) {
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
                 <div className="m-row-thumb" style={{ background: chMeta?.color || "var(--surface-2)", color: chMeta?.color ? "white" : "var(--fg-2)", fontSize: 11, fontWeight: 600 }}>{chMeta?.short || (o.channel || "?").slice(0,2)}</div>
                 <div className="m-row-main">
-                  <div className="row" style={{ justifyContent: "space-between" }}>
-                    <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{o.id}</span>
-                    <span className={"badge " + stCls} style={{ fontSize: 10 }}><span className="dot"/>{stLab}</span>
+                  {/* Customer first — a person reads "who", not "LBL-NEW-1781451656731-762". */}
+                  <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+                    <span style={{ fontSize: 14, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: nm && nm !== "ไม่ระบุชื่อ" ? "var(--fg)" : "var(--muted)" }}>{nm && nm !== "ไม่ระบุชื่อ" ? nm : "ไม่ระบุชื่อผู้รับ"}</span>
+                    <span className={"badge " + stCls} style={{ flexShrink: 0 }}><span className="dot"/>{stLab}</span>
                   </div>
-                  <div className="m-row-sub">{(o.customer || "").trim() || "ไม่ระบุชื่อ"} · {o.items} รายการ{o.carrier ? " · " + o.carrier : ""}</div>
+                  <div className="m-row-sub">
+                    <span className="mono">{typeof orderShortId === "function" ? orderShortId(o) : o.id}</span>
+                    {Number(o.items) > 0 ? ` · ${o.items} ชิ้น` : ""}{o.carrier ? " · " + o.carrier : ""}{o.tracking ? " · " + o.tracking : ""}
+                  </div>
                   {when && <div className="m-row-sub" style={{ fontSize: 11, color: "var(--faint)", marginTop: 1 }}>{when}</div>}
                 </div>
               </button>
             );
           };
-          if (!filtered.length) return <div className="m-list"><div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่มีออร์เดอร์</div></div>;
+          if (!filtered.length) return (
+            <div className="m-list"><div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+              {tab === 1 ? "ไม่มีออร์เดอร์ค้างส่ง" : "ไม่มีออร์เดอร์"}
+              {tab !== 0 && <div><button className="m-chip" style={{ marginTop: 10 }} onClick={() => setTab(0)}>ดูทั้งหมด</button></div>}
+            </div></div>
+          );
           return (
             <>
+              {/* Rendered in pages — drawing all 265 rows at once made the tab slow on phones. */}
               {named.length > 0 && (<>
                 {unnamed.length > 0 && <div className="m-section-label" style={{ padding: "0 4px 6px" }}>มีชื่อผู้รับ ({named.length})</div>}
-                <div className="m-list">{named.map(renderRow)}</div>
+                <div className="m-list">{named.slice(0, showN).map(renderRow)}</div>
               </>)}
-              {unnamed.length > 0 && (<>
+              {unnamed.length > 0 && showN >= named.length && (<>
                 <div className="m-section-label" style={{ padding: "12px 4px 6px" }}>ฉลากไม่ระบุชื่อ ({unnamed.length})</div>
-                <div className="m-list">{unnamed.map(renderRow)}</div>
+                <div className="m-list">{unnamed.slice(0, Math.max(0, showN - named.length)).map(renderRow)}</div>
               </>)}
+              {filtered.length > showN && (
+                <button className="m-btn-big outline" style={{ marginTop: 10 }} onClick={() => setShowN(n => n + 60)}>
+                  ดูเพิ่ม — แสดง {showN} จาก {filtered.length}
+                </button>
+              )}
             </>
           );
         })()}
@@ -907,6 +1127,7 @@ function MOutbound({ ctx }) {
           <span style={{ fontSize: 12, flex: 1 }}>เลือก {selectedCount} ออร์เดอร์</span>
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkMenu(bulkMenu === "status" ? null : "status")}><Icons.Truck size={14}/></button>
           <button className="m-action" style={{ background: "rgba(90,180,255,0.3)", color: "white", width: 36, height: 36 }} title="ฉลากของออร์เดอร์ที่เลือก" onClick={openSelectedLabels}><Icons.Tag size={14}/></button>
+          {canDeleteData() && <button className="m-action" style={{ background: "rgba(255,170,60,0.35)", color: "white", width: 36, height: 36 }} title="ยกเลิก + คืนสต็อก" onClick={bulkCancelRestock}><Icons.Refresh size={14}/></button>}
           {canDeleteData() && <button className="m-action" style={{ background: "rgba(255,90,90,0.3)", color: "white", width: 36, height: 36 }} onClick={bulkDelete}><Icons.Trash size={14}/></button>}
           {bulkMenu === "status" && (
             <div style={{
@@ -916,11 +1137,7 @@ function MOutbound({ ctx }) {
               boxShadow: "var(--shadow-lg)", padding: 6, minWidth: 180, zIndex: 30
             }}>
               <div style={{ padding: "6px 10px 4px", fontSize: 11, color: "var(--muted)", fontWeight: 500 }}>เปลี่ยนสถานะเป็น</div>
-              {[
-                { id: "picking", label: "กำลังหยิบ" },
-                { id: "packed",  label: "พร้อมส่ง" },
-                { id: "shipped", label: "ส่งแล้ว" }
-              ].map(s => (
+              {["picking", "packed", "shipped"].map(id => ({ id, label: ORDER_STATUS_TH[id] })).map(s => (
                 <button key={s.id} className="popover-item" onClick={() => bulkStatus(s.id)}>
                   <span style={{ flex: 1 }}>{s.label}</span>
                 </button>
@@ -941,6 +1158,9 @@ function MInventory({ ctx }) {
   // all | ok | low | out — preset when opened from the home "ต้องสั่งซื้อ" tile.
   const [statusFilter, setStatusFilter] = useStateM(() => (ctx.route.params && ctx.route.params.status) || "all");
   const [locFilter, setLocFilter] = useStateM(false); // true = only products not stored in a real position
+  // Rendered in pages: all 424 rows (with photos) on every tab switch was slow on phones.
+  const [showN, setShowN] = useStateM(50);
+  useEffectM(() => { setShowN(50); }, [q, cat, statusFilter, locFilter]);
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
   const [bulkOpen, setBulkOpen] = useStateM(false);
@@ -966,13 +1186,13 @@ function MInventory({ ctx }) {
 
   // Loc codes that are real positions — stale codes (e.g. legacy "A") count as unstored.
   const storedCodes = useMemoM(() => storedLocSet(), [stockKey]);
-  const unstoredCount = useMemoM(() => products.reduce((n, p) => n + (locIsStored(p.loc, storedCodes) ? 0 : 1), 0), [products, storedCodes]);
+  const unstoredCount = useMemoM(() => products.reduce((n, p) => n + (productIsStored(p, storedCodes) ? 0 : 1), 0), [products, storedCodes]);
 
   const cats = useMemoM(() => ["ทั้งหมด", ...(typeof loadCategories === "function" ? loadCategories() : [...new Set(products.map(p => p.cat))])], [products]);
   const filtered = products.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     if (statusFilter !== "all" && stockStatus(p).key !== statusFilter) return false;
-    if (locFilter && locIsStored(p.loc, storedCodes)) return false;
+    if (locFilter && productIsStored(p, storedCodes)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
@@ -1094,7 +1314,7 @@ function MInventory({ ctx }) {
         </div>
 
         <div className="m-list">
-          {filtered.map(p => {
+          {filtered.slice(0, showN).map(p => {
             const s = stockStatus(p);
             const isSelected = !!selected[p.sku];
             return (
@@ -1110,21 +1330,23 @@ function MInventory({ ctx }) {
                   <div className="row" style={{ gap: 6, marginTop: 2, flexWrap: "wrap" }}>
                     <span className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>{p.sku}</span>
                     <span className={"badge " + s.cls} style={{ fontSize: 9, padding: "1px 6px" }}><span className="dot"/>{s.label}</span>
-                    {!locIsStored(p.loc, storedCodes) && <span className="badge badge-warning" style={{ fontSize: 9, padding: "1px 6px", flexShrink: 0 }}><Icons.Warn size={9}/> ยังไม่จัดเก็บ</span>}
+                    {!productIsStored(p, storedCodes) && <span className="badge badge-warning" style={{ fontSize: 9, padding: "1px 6px", flexShrink: 0 }}><Icons.Warn size={9}/> ยังไม่จัดเก็บ</span>}
                   </div>
                   {/* Every shelf this SKU sits on, with the pieces at each — the list
                       used to name only the primary one, hiding split stock entirely. */}
-                  {locIsStored(p.loc, storedCodes) && (() => {
+                  {productIsStored(p, storedCodes) && (() => {
                     const spots = (typeof productPositions === "function") ? productPositions(p) : [];
                     if (!spots.length) return null;
+                    // A row filed under "-" / a deleted shelf reads as unplaced, not "-".
+                    const anyFake = spots.some(s2 => !locIsStored(s2.loc, storedCodes));
                     const label = spots.map(s2 => {
-                      const lp = locParts(s2.loc);
-                      return (lp && lp.pos ? lp.pos : s2.loc) + (spots.length > 1 ? " ×" + s2.qty : "");
+                      const lp = locIsStored(s2.loc, storedCodes) ? locParts(s2.loc) : null;
+                      return (lp && lp.pos ? lp.pos : "ยังไม่ระบุตำแหน่ง") + (spots.length > 1 ? " ×" + s2.qty : "");
                     }).join(" · ");
                     return (
                       <div className="row" style={{ gap: 4, marginTop: 2, minWidth: 0 }}>
                         <Icons.Map size={10} style={{ color: "var(--accent)", flexShrink: 0 }}/>
-                        <span className="mono" style={{ fontSize: 10, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+                        <span className={anyFake ? undefined : "mono"} style={{ fontSize: 10, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
                       </div>
                     );
                   })()}
@@ -1143,6 +1365,11 @@ function MInventory({ ctx }) {
             </div>
           )}
         </div>
+        {filtered.length > showN && (
+          <button className="m-btn-big outline" style={{ marginTop: 10 }} onClick={() => setShowN(n => n + 50)}>
+            ดูเพิ่ม — แสดง {showN} จาก {filtered.length}
+          </button>
+        )}
       </div>
 
       {selecting && selectedCount > 0 && (
@@ -1175,7 +1402,7 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
     qty: String(editing.qty ?? ""), reorder: String(editing.reorder ?? "50"), loc: editing.loc
   } : {
     sku: "", name: "", cat: categories[0] || "", brand: "", supplier: "",
-    cost: "", price: "", qty: "", reorder: "50", loc: ""
+    cost: "", price: "", qty: "", reorder: "2", loc: ""
   });
   const set = (k, v) => setF(prev => ({ ...prev, [k]: v }));
   const [pickedImage, setPickedImage] = useStateM("");
@@ -1367,7 +1594,7 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
 
 function MBulkEdit({ count, categories, products, onClose, onApply }) {
   const [enabled, setEnabled] = useStateM({ cat: false, loc: false, supplier: false, reorder: false });
-  const [vals, setVals] = useStateM({ cat: categories[0] || "", loc: "", supplier: "", reorder: 50 });
+  const [vals, setVals] = useStateM({ cat: categories[0] || "", loc: "", supplier: "", reorder: 2 });
   const suppliers = useMemoM(() => [...new Set(products.map(p => p.supplier))], [products]);
   const has = Object.values(enabled).some(Boolean);
   const apply = () => {
@@ -1426,6 +1653,7 @@ function MBulkEdit({ count, categories, products, onClose, onApply }) {
 function MProductDetail({ ctx }) {
   const [stockKey, setStockKey] = useStateM(0);
   const [editOpen, setEditOpen] = useStateM(false);
+  const [renameOpen, setRenameOpen] = useStateM(false);
   useEffectM(() => {
     const refresh = () => setStockKey(k => k + 1);
     window.addEventListener("ims-products-change", refresh);
@@ -1437,6 +1665,34 @@ function MProductDetail({ ctx }) {
   }, []);
 
   const locImages = useLocationImages();
+
+  /* Movement history (stock_adjustments) — the same ledger the desktop product
+     drawer reads. Mobile never had one, so a picker standing at the shelf could
+     not tell whether the piece they were missing had been sold, received or
+     counted. Re-fetched a beat after any stock change so a correction made here
+     shows up instead of looking like it wasn't saved. */
+  const [moves, setMoves] = useStateM(null);
+  const [movesTick, setMovesTick] = useStateM(0);
+  useEffectM(() => {
+    let t = null;
+    const bump = () => { if (t) clearTimeout(t); t = setTimeout(() => setMovesTick(v => v + 1), 900); };
+    window.addEventListener("ims-products-change", bump);
+    // Fired once a history row has actually been written (this device), and on
+    // a realtime stock event from another one — no more racing the insert.
+    const now = () => setMovesTick(v => v + 1);
+    window.addEventListener("ims-ledger-change", now);
+    return () => { if (t) clearTimeout(t); window.removeEventListener("ims-products-change", bump); window.removeEventListener("ims-ledger-change", now); };
+  }, []);
+  const moveSku = ctx.route.params?.sku;
+  useEffectM(() => {
+    let dead = false;
+    if (typeof dbLoadStockAdjustments === "function" && moveSku) {
+      dbLoadStockAdjustments(moveSku, 12)
+        .then(rows => { if (!dead) setMoves(Array.isArray(rows) ? rows : []); })
+        .catch(() => { if (!dead) setMoves([]); });
+    } else setMoves([]);
+    return () => { dead = true; };
+  }, [moveSku, movesTick]);
 
   const base = PRODUCTS.find(x => x.sku === ctx.route.params?.sku) || ctx.route.params;
   if (!base) { ctx.back(); return null; }
@@ -1450,14 +1706,23 @@ function MProductDetail({ ctx }) {
     const _qtyDelta = changes._qtyDelta;
     const fields = omit(changes, "_qtyDelta");
     updateProductInStore(p.sku, fields);                 // catalog fields — scoped, no qty
-    if (_qtyDelta) adjustProductQty(p.sku, _qtyDelta);   // qty edit → atomic delta, never an absolute clobber
+    if (_qtyDelta) {
+      // qty edit → atomic delta, never an absolute clobber. Routed through the
+      // shared helper so the history row carries the SERVER's confirmed amount.
+      if (typeof receiveStockAndRecord === "function") {
+        receiveStockAndRecord([{ sku: p.sku, qty: _qtyDelta }], "แก้ไขจำนวนจากหน้าสินค้า (มือถือ)");
+      } else {
+        adjustProductQty(p.sku, _qtyDelta);
+      }
+    }
     ctx.pushToast(`บันทึกการแก้ไข ${p.sku} แล้ว`);
     if (typeof recordChange === "function") {
       const auditChanges = Object.entries(fields).map(([k, v]) => ({ label: k, to: String(v) }));
       if (_qtyDelta) auditChanges.push({ label: "qty", to: `${_qtyDelta > 0 ? "+" : ""}${_qtyDelta} ชิ้น` });
       recordChange({
         entity: "product", entityId: p.sku, action: "update",
-        summary: `แก้ไขข้อมูลสินค้า ${fields.name || p.name} (${p.sku}) (มือถือ)`,
+        // The quantity goes in the summary — it is all the activity feed shows.
+        summary: `แก้ไขข้อมูลสินค้า ${fields.name || p.name} (${p.sku})${_qtyDelta ? ` จำนวน ${_qtyDelta > 0 ? "+" : ""}${_qtyDelta} ชิ้น` : ""} (มือถือ)`,
         changes: auditChanges
       });
     }
@@ -1468,6 +1733,7 @@ function MProductDetail({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub" style={{ fontSize: 14 }}>{p.sku}</div>
+        {canDo("renameSku") && <button className="m-action" title="แก้ไขรหัส SKU" onClick={() => setRenameOpen(true)}><Icons.Tag size={14}/></button>}
         {canDo("editProduct") && <button className="m-action" onClick={() => setEditOpen(true)}><Icons.Edit size={14}/></button>}
       </div>
       <div className="m-content">
@@ -1506,20 +1772,21 @@ function MProductDetail({ ctx }) {
         <div className="m-section-label" style={{ padding: "8px 4px" }}>ตำแหน่งจัดเก็บ</div>
         <div className="m-card" style={{ padding: 12 }}>
           {(() => {
-            const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
+            const home = productHomeLoc(p);
+            const parts = home ? locParts(home) : null;
             if (!parts) return (
               <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "8px 0", display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
                 <span className="badge badge-warning" style={{ fontSize: 10 }}><Icons.Warn size={10}/> ยังไม่จัดเก็บ</span>
-                <span>แก้ไขสินค้าเพื่อกำหนดตำแหน่งจัดเก็บ{p.loc ? ` (ค่าเดิม: ${p.loc})` : ""}</span>
+                <span>แก้ไขสินค้าเพื่อกำหนดตำแหน่งจัดเก็บ</span>
               </div>
             );
-            const photo = typeof getLocationImage === "function" ? getLocationImage(p.loc, locImages) : "";
+            const photo = typeof getLocationImage === "function" ? getLocationImage(home, locImages) : "";
             /* Stock kept in more than one place: p.loc is only the FIRST shelf to
                try. Showing it alone sent pickers to zone A for 83 pieces when 51
                of them were upstairs — so list every position with its own count. */
             const split = typeof productPositions === "function" ? productPositions(p) : [];
             const isSplit = split.length > 1;
-            const here = isSplit ? (split.find(r => r.loc === p.loc) || {}).qty : null;
+            const here = isSplit ? (split.find(r => r.loc === home) || {}).qty : null;
             return (
               <>
               <div className="row" style={{ gap: 12 }}>
@@ -1546,12 +1813,16 @@ function MProductDetail({ ctx }) {
                   <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>
                     อีก {split.length - 1} ตำแหน่ง (รวม {p.qty} ชิ้น)
                   </div>
-                  {split.filter(r => r.loc !== p.loc).map((r, i) => {
-                    const lp = typeof locParts === "function" ? locParts(r.loc) : null;
+                  {split.filter(r => r.loc !== home).map((r, i) => {
+                    // A row filed under "-" / a deleted shelf reads as unplaced, not "-".
+                    const real = locIsStored(r.loc);
+                    const lp = real && typeof locParts === "function" ? locParts(r.loc) : null;
                     return (
                       <div key={r.loc + i} className="row" style={{ justifyContent: "space-between", padding: "5px 0" }}>
                         <div style={{ minWidth: 0 }}>
-                          <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{lp ? lp.pos : r.loc}</span>
+                          {real
+                            ? <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{lp ? lp.pos : r.loc}</span>
+                            : <span style={{ fontSize: 13, fontWeight: 600, color: "var(--warning)" }}>ยังไม่ระบุตำแหน่ง</span>}
                           <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 6 }}>
                             {lp ? lp.building + (lp.floor ? " · " + lp.floor : "") : ""}
                           </span>
@@ -1601,6 +1872,30 @@ function MProductDetail({ ctx }) {
         </div>
         </>}
 
+        <div className="m-section-label" style={{ padding: "8px 4px" }}>ความเคลื่อนไหวสต็อกล่าสุด</div>
+        <div className="m-card" style={{ padding: "6px 10px" }}>
+          {moves === null && (
+            <div style={{ fontSize: 12, color: "var(--muted)", padding: "10px 0", textAlign: "center" }}>กำลังโหลด…</div>
+          )}
+          {moves && moves.length === 0 && (
+            <div style={{ fontSize: 12, color: "var(--muted)", padding: "10px 0", textAlign: "center" }}>ยังไม่มีการเคลื่อนไหวสต็อก</div>
+          )}
+          {(moves || []).map(m => (
+            <div key={m.id} className="row" style={{ gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+              <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: m.delta > 0 ? "var(--success)" : "var(--danger)" }}/>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.reason || "ปรับสต็อก"}</div>
+                <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1 }}>
+                  {new Date(m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} · {m.created_by || "ระบบ"}
+                </div>
+              </div>
+              <div className="tnum" style={{ fontSize: 13, fontWeight: 600, color: m.delta > 0 ? "var(--success)" : "var(--danger)" }}>
+                {m.delta > 0 ? "+" : ""}{m.delta}
+              </div>
+            </div>
+          ))}
+        </div>
+
         <div className="m-section-label" style={{ padding: "8px 4px" }}>บาร์โค้ดสินค้า</div>
         <div className="m-card" style={{ textAlign: "center", padding: "14px 12px" }}>
           <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -1632,6 +1927,24 @@ function MProductDetail({ ctx }) {
       {editOpen && (
         <MAddSku categories={cats} products={PRODUCTS} editing={base} onClose={() => setEditOpen(false)} onAdd={doEdit}/>
       )}
+      {renameOpen && typeof RenameSkuModal === "function" && (
+        <RenameSkuModal
+          sku={p.sku}
+          pushToast={ctx.pushToast}
+          onClose={() => setRenameOpen(false)}
+          onRenamed={(newSku) => {
+            if (typeof recordChange === "function") {
+              recordChange({
+                entity: "product", entityId: newSku, action: "update",
+                summary: `เปลี่ยนรหัส SKU ${p.sku} → ${newSku} (มือถือ)`,
+                changes: [{ label: "sku", from: p.sku, to: newSku }]
+              });
+            }
+            setRenameOpen(false);
+            ctx.back();
+          }}
+        />
+      )}
     </>
   );
 }
@@ -1643,6 +1956,167 @@ function MProductDetail({ ctx }) {
    รูปแบบ/เหตุผล/หมายเหตุ — and both funnel through applyStockAdjustmentBatch →
    applyStockAdjustment (data.jsx) so the forks can't diverge. Never creates an
    order — that's MIssue (ตัดสต็อก)'s job. */
+/* =============== ขายออก (quick sale) — mobile twin of QuickSellModal ===============
+   Scan / search → quantity → channel → confirm, through commitQuickSale (data.jsx):
+   the same write as ปรับสต็อก "ขายผ่าน …", so analytics counts it. The screen stays
+   open with the channel kept after each sale, ready for the next one. */
+function MQuickSell({ ctx }) {
+  const channels = useMemoM(() => (typeof quickSaleChannels === "function" ? quickSaleChannels() : []), []);
+  const [reasonId, setReasonId] = useStateM(() => (typeof lastAdjustReason === "function" ? lastAdjustReason() : ""));
+  const [lines, setLines] = useStateM(() => {
+    const want = ctx.route.params && ctx.route.params.sku;
+    const p = want && PRODUCTS.find(x => x.sku === want);
+    return p ? [{ sku: p.sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "" }] : [];
+  });
+  const [q, setQ] = useStateM("");
+  const [note, setNote] = useStateM("");
+  const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
+  const [camOpen, setCamOpen] = useStateM(false);
+  const [busy, setBusy] = useStateM(false);
+  const busyRef = useRefM(false);
+  const [, setTick] = useStateM(0);
+  useEffectM(() => {
+    const h = () => setTick(t => t + 1);
+    window.addEventListener("ims-products-change", h);
+    window.addEventListener("ims-stock-adj-change", h);
+    return () => { window.removeEventListener("ims-products-change", h); window.removeEventListener("ims-stock-adj-change", h); setCamOpen(false); };
+  }, []);
+  const effQty = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : ((PRODUCTS.find(p => p.sku === sku) || {}).qty || 0));
+
+  const add = (sku) => {
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (!p) return;
+    if (effQty(sku) <= 0) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast(`${p.sku} หมดสต็อก`); return; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setLines(ls => {
+      const hit = ls.find(l => l.sku === sku);
+      if (hit) return ls.map(l => l.sku === sku ? { ...l, qty: String(Math.min(effQty(sku), (parseInt(l.qty, 10) || 0) + 1)) } : l);
+      return [...ls, { sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "" }];
+    });
+    setQ("");
+  };
+  const lq = q.trim().toLowerCase();
+  const hits = !lq ? [] : PRODUCTS.filter(p => p.sku.toLowerCase().includes(lq) || String(p.name || "").toLowerCase().includes(lq))
+    .sort((a, b) => (a.sku.toLowerCase() === lq ? -1 : b.sku.toLowerCase() === lq ? 1 : 0))
+    .slice(0, 8);
+  const onSearchKey = (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const exact = PRODUCTS.find(p => p.sku.toLowerCase() === lq);
+    if (exact) { add(exact.sku); return; }
+    if (hits.length === 1) { add(hits[0].sku); return; }
+    if (lq && !hits.length) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast("ไม่พบสินค้า: " + q.trim()); }
+  };
+  const onCamScan = (code) => {
+    const c = String(code || "").trim();
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === c.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast("ไม่พบ SKU: " + c); return; }
+    add(p.sku);
+  };
+  const setLine = (sku, patch) => setLines(ls => ls.map(l => l.sku === sku ? { ...l, ...patch } : l));
+  const pieces = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0), 0);
+  const overStock = lines.find(l => (parseInt(l.qty, 10) || 0) > effQty(l.sku));
+  const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy;
+
+  const submit = async () => {
+    if (!canSubmit || busyRef.current) return;
+    busyRef.current = true; setBusy(true);   // synchronous latch — a double-tap must not sell twice
+    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim(), source: "mobile", when });
+    busyRef.current = false; setBusy(false);
+    if (!res.ok) { if (res.error) ctx.pushToast(res.error); return; }
+    const ch = channels.find(c => c.id === reasonId);
+    const st = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+    const backTxt = st && st.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(st)})` : "";
+    ctx.pushToast(`ขายออก ${res.pieces} ชิ้น · ${ch ? ch.label : ""}${backTxt}` + (res.locWarning ? " — " + res.locWarning : ""));
+    setLines([]); setNote("");
+  };
+
+  return (
+    <>
+      <div className="m-topbar">
+        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+        <div className="m-title-sub">ขายออก</div>
+        <button className="m-action" onClick={() => setCamOpen(o => !o)} aria-label="สแกน"><Icons.Camera size={16}/></button>
+      </div>
+      <div className="m-content">
+        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>ช่องทางขาย</div>
+        <div className="adj-reasons" style={{ marginBottom: 14 }}>
+          {channels.map(c => (
+            <button key={c.id} type="button" className={"adj-reason" + (reasonId === c.id ? " on" : "")} onClick={() => setReasonId(c.id)}>
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 999, background: c.color, marginRight: 6 }}/>{c.label}
+            </button>
+          ))}
+        </div>
+
+        {camOpen && <div style={{ marginBottom: 10 }}><CameraScanner continuous onScan={onCamScan} onClose={() => setCamOpen(false)}/></div>}
+        <div className="m-search" style={{ marginBottom: hits.length ? 6 : 12 }}>
+          <Icons.Search size={14}/>
+          <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={onSearchKey} placeholder="สแกน / พิมพ์ SKU หรือชื่อสินค้า"/>
+          {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+        </div>
+        {hits.length > 0 && (
+          <div className="m-list" style={{ marginBottom: 12 }}>
+            {hits.map(p => {
+              const left = effQty(p.sku);
+              return (
+                <button key={p.sku} className="m-row" style={{ opacity: left > 0 ? 1 : 0.5 }} onClick={() => add(p.sku)}>
+                  <ProductImageThumb sku={p.sku} size={40} radius={8}/>
+                  <div className="m-row-main">
+                    <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    <div className="m-row-sub"><span className="mono">{p.sku}</span> · {left > 0 ? `เหลือ ${left}` : "หมด"}</div>
+                  </div>
+                  <Icons.Plus size={18} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="m-section-label" style={{ padding: "0 4px 8px" }}>สินค้าที่ขาย {lines.length > 0 && <span style={{ color: "var(--accent)" }}>({lines.length})</span>}</div>
+        {lines.length === 0 ? (
+          <div className="m-card" style={{ textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)" }}>
+            สแกนหรือค้นหาด้านบน — สแกนซ้ำ = +1 ชิ้น
+          </div>
+        ) : (
+          <div className="m-list">
+            {lines.map(l => {
+              const p = PRODUCTS.find(x => x.sku === l.sku) || { sku: l.sku, name: l.sku };
+              const left = effQty(l.sku);
+              const n = parseInt(l.qty, 10) || 0;
+              return (
+                <div key={l.sku} className="m-row" style={{ cursor: "default", alignItems: "flex-start" }}>
+                  <ProductImageThumb sku={l.sku} size={40} radius={8}/>
+                  <div className="m-row-main">
+                    <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    <div className="m-row-sub" style={{ color: n > left ? "var(--danger)" : undefined }}>
+                      <span className="mono">{l.sku}</span> · เหลือ {left}{n > left ? " — เกินสต็อก" : ""}
+                    </div>
+                    <MLocPickChips sku={l.sku} value={l.loc} need={n} onChange={loc => setLine(l.sku, { loc })}/>
+                  </div>
+                  <QtyStepper small value={l.qty} min={1} max={left} onChange={v => setLine(l.sku, { qty: v })} title={`จำนวน ${l.sku}`}/>
+                  <button onClick={() => setLines(ls => ls.filter(x => x.sku !== l.sku))} aria-label="เอาออก"
+                    style={{ display: "grid", placeItems: "center", width: 36, height: 36, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0 }}>
+                    <Icons.X size={15}/>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="m-section-label" style={{ padding: "14px 4px 8px" }}>หมายเหตุ (ไม่จำเป็น)</div>
+        <input className="m-input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, ชื่อลูกค้า"/>
+
+        <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ขาย" hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ยอดขายจะนับเป็นวันนั้น"/>
+
+        <button className="m-btn-big" style={{ marginTop: 14 }} disabled={!canSubmit} onClick={submit}>
+          <Icons.Check size={16}/> {busy ? "กำลังบันทึก…" : !reasonId ? "เลือกช่องทางขายก่อน" : `ยืนยันขาย${pieces ? " " + pieces + " ชิ้น" : ""}`}
+        </button>
+      </div>
+    </>
+  );
+}
+
 function MAdjust({ ctx }) {
   const [rows, setRows] = useStateM(() => {
     const want = ctx.route.params?.sku;
@@ -1653,12 +2127,18 @@ function MAdjust({ ctx }) {
   const [showN, setShowN] = useStateM(40);
   const [camOpen, setCamOpen] = useStateM(false);
   const [mode, setMode] = useStateM("remove"); // add | remove | set
-  const [reasonId, setReasonId] = useStateM("");
+  const [reasonId, setReasonIdRaw] = useStateM(() => (typeof lastAdjustReason === "function" ? lastAdjustReason() : ""));
+  const setReasonId = (id) => { setReasonIdRaw(id); if (typeof rememberAdjustReason === "function") rememberAdjustReason(id); };
+  const [busy, setBusy] = useStateM(false);
+  const [fillValue, setFillValue] = useStateM("");   // "ใส่เท่ากันทุกแถว" box
+  const busyRef = useRefM(false);
   const [note, setNote] = useStateM("");
   const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
   useEffectM(() => () => setCamOpen(false), []);
 
-  const reason = ADJUST_REASONS.find(r => r.id === reasonId) || null;
+  // Same mode filter as the desktop modal (adjustReasonsFor in data.jsx).
+  const modeReasons = typeof adjustReasonsFor === "function" ? adjustReasonsFor(mode) : ADJUST_REASONS;
+  const reason = modeReasons.find(r => r.id === reasonId) || null;
   const effQty = (sku) => (typeof getEffectiveQty === "function"
     ? getEffectiveQty(sku)
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
@@ -1700,11 +2180,27 @@ function MAdjust({ ctx }) {
   };
 
   const submit = async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || busyRef.current) return;
+    // Synchronous latch + payload fingerprint — the desktop StockAdjustModal twin.
+    // A double-tap used to apply the same correction twice.
+    busyRef.current = true;
+    setBusy(true);
+    const guardKey = (typeof commitFingerprint === "function")
+      ? commitFingerprint("adjust-" + mode + "-" + reasonId + (when ? "@" + when : ""), changes) : null;
+    if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
+      if (typeof duplicateCommitToast === "function") duplicateCommitToast();
+      busyRef.current = false; setBusy(false);
+      return;
+    }
     const res = (typeof applyStockAdjustmentBatch === "function")
       ? applyStockAdjustmentBatch(changes, { reason, note, source: "mobile", when })
       : { applied: 0, net: 0 };
-    if (!res.applied) { ctx.pushToast("ปรับสต็อกไม่สำเร็จ"); return; }
+    if (!res.applied) {
+      ctx.pushToast("ปรับสต็อกไม่สำเร็จ");
+      if (guardKey && typeof releaseCommit === "function") releaseCommit(guardKey);
+      busyRef.current = false; setBusy(false);
+      return;
+    }
     // Re-balance the split from the applied results (a clamped row contributes nothing).
     if (typeof applyLocPicks === "function") {
       const locBySku = {};
@@ -1713,11 +2209,11 @@ function MAdjust({ ctx }) {
       const locRes = await applyLocPicks(picks);
       if (locRes && locRes.errors && locRes.errors.length) ctx.pushToast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ — แก้ที่หน้าสินค้าบนเดสก์ท็อป");
     }
-    const backStamp = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
-    const backToast = backStamp && backStamp.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backStamp)})` : "";
+    const backSt = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+    const backTxt = backSt && backSt.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backSt)})` : "";
     ctx.pushToast((changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
-      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น)`) + backToast);
+      : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น)`) + backTxt);
     ctx.back();
   };
 
@@ -1747,7 +2243,7 @@ function MAdjust({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.X size={14}/></button>
         <div className="m-title-sub">ปรับสต็อก</div>
-        <button className="m-action accent" disabled={!canSubmit} onClick={submit} style={!canSubmit ? { opacity: 0.4 } : {}}>
+        <button className="m-action accent" disabled={!canSubmit || busy} onClick={submit} style={(!canSubmit || busy) ? { opacity: 0.4 } : {}}>
           <Icons.Check size={14}/>
         </button>
       </div>
@@ -1795,9 +2291,12 @@ function MAdjust({ ctx }) {
               {rows.length > 1 && (
                 <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 400 }}>
                   <span style={{ fontSize: 10, color: "var(--muted)" }}>ใส่เท่ากันทุกแถว</span>
-                  <input className="m-input" type="number" min="0" inputMode="numeric" placeholder="0"
-                    style={{ width: 64, padding: "6px 8px", fontSize: 13, textAlign: "right", marginBottom: 0 }}
-                    onChange={e => fillAll(e.target.value)}/>
+                  {typeof QtyStepper === "function"
+                    ? <QtyStepper small value={fillValue}
+                        onChange={v => { setFillValue(v); fillAll(v); }} title="ใส่จำนวนเท่ากันทุกแถว"/>
+                    : <input className="m-input" type="text" inputMode="numeric" placeholder="0"
+                        style={{ width: 64, padding: "6px 8px", fontSize: 13, textAlign: "right", marginBottom: 0 }}
+                        onChange={e => fillAll(e.target.value.replace(/[^\d]/g, ""))}/>}
                 </span>
               )}
             </div>
@@ -1821,9 +2320,14 @@ function MAdjust({ ctx }) {
                       {/* Neutral label — the delta can be positive. */}
                       <MLocPickChips sku={r.sku} value={r.loc} need={d < 0 ? -d : 0} label="ตำแหน่ง" onChange={loc => setRowLoc(r.sku, loc)}/>
                     </div>
-                    <input className="m-input" type="number" min="0" inputMode="numeric" value={r.amount} placeholder="0"
-                      onChange={e => setAmount(r.sku, e.target.value)}
-                      style={{ width: 66, padding: "8px 10px", fontSize: 14, textAlign: "right", marginBottom: 0, flexShrink: 0 }}/>
+                    {/* Typed or − / + only. A number input increments on wheel/scroll,
+                        which quietly corrupted counts — see QtyStepper in screens.jsx. */}
+                    {typeof QtyStepper === "function"
+                      ? <QtyStepper small value={r.amount} onChange={v => setAmount(r.sku, v)}
+                          max={mode === "remove" ? cur : undefined} title={`จำนวนสำหรับ ${r.sku}`}/>
+                      : <input className="m-input" type="text" inputMode="numeric" value={r.amount} placeholder="0"
+                          onChange={e => setAmount(r.sku, e.target.value.replace(/[^\d]/g, ""))}
+                          style={{ width: 66, padding: "8px 10px", fontSize: 14, textAlign: "right", marginBottom: 0, flexShrink: 0 }}/>}
                     <button onClick={() => removeSku(r.sku)} title="เอาออก"
                       style={{ display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0, cursor: "pointer" }}>
                       <Icons.X size={14}/>
@@ -1835,7 +2339,7 @@ function MAdjust({ ctx }) {
 
             <div className="m-section-label" style={{ padding: "4px 4px 8px" }}>เหตุผล (จำเป็น)</div>
             <div className="adj-reasons">
-              {ADJUST_REASONS.map(r => (
+              {modeReasons.map(r => (
                 <button key={r.id} type="button" className={"adj-reason" + (reasonId === r.id ? " on" : "")} onClick={() => setReasonId(r.id)}>{r.label}</button>
               ))}
             </div>
@@ -1941,116 +2445,203 @@ function MetaRow({ label, value, mono }) {
 
 /* =============== ISSUE (stock-out) FULL-SCREEN VIEW =============== */
 
+/* MULTI-ITEM — mobile twin of the desktop IssueModal. A cart of products AND
+   bundles, each line with its own จำนวน, ช่องทาง and (for a split sku) shelf,
+   confirmed once into ONE order. buildIssuePlan (data.jsx) turns the cart into
+   deductions/shelf picks/line items so the two forks can't diverge.
+   Deep links still work: push("issue", {sku}) / push("issue", {bundleId}) just
+   seed the cart with that one line. */
+const M_ISSUE_DEFAULT_CH = "shopee";
 function MIssue({ ctx }) {
-  const presetBundle = ctx.route.params?.bundleId;
-  const [mode, setMode] = useStateM(presetBundle ? "bundle" : "single"); // single | bundle
-  const [skuId, setSkuId] = useStateM(ctx.route.params?.sku || PRODUCTS[0].sku);
   const bundles = useMemoM(() => (typeof loadBundles === "function" ? loadBundles() : []), []);
-  const [bundleId, setBundleId] = useStateM(presetBundle || bundles[0]?.id || "");
-  const [customer, setCustomer] = useStateM("");
-  const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
-  const [channels, setChannels] = useStateM(() =>
-    Object.fromEntries(CHANNEL_LIST.map(c => [c.id, { on: c.id === "shopee", qty: c.id === "shopee" ? 1 : 0 }]))
-  );
-  const [submitting, setSubmitting] = useStateM(false);
-
   const effQty = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
-  const product = PRODUCTS.find(p => p.sku === skuId) || PRODUCTS[0];
-  const bundle = bundles.find(b => b.id === bundleId);
-  const bundleMax = bundle && typeof bundleAvail === "function" ? bundleAvail(bundle) : 0;
-  const isBundle = mode === "bundle";
-  const unit = isBundle ? "ชุด" : "ชิ้น";
-  const noBundles = isBundle && bundles.length === 0;
 
-  const total = Object.values(channels).reduce((s, c) => s + (c.on ? c.qty : 0), 0);
-  const selectedCount = Object.values(channels).filter(c => c.on && c.qty > 0).length;
-  const stockCap = isBundle ? bundleMax : effQty(skuId);
-  const overStock = total > stockCap;
-  const canSubmit = total > 0 && !overStock && !noBundles && (isBundle ? !!bundle : true);
+  const lineIdOf = (l) => (l.type === "bundle" ? l.id : l.sku);
+  const mkKey = (type, id, ch) => `${type}:${id}:${ch}`;
+  const productLine = (p, ch) => ({
+    key: mkKey("product", p.sku, ch), type: "product", sku: p.sku, name: p.name,
+    price: p.price, qty: 1, ch,
+    loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(p) : (p.loc || "")
+  });
+  const bundleLine = (b, ch) => ({
+    key: mkKey("bundle", b.id, ch), type: "bundle", id: b.id, name: b.name,
+    price: b.price, items: b.items, qty: 1, ch
+  });
 
-  // Shelf to take from — reset whenever the chosen product changes.
-  const [pickLoc, setPickLoc] = useStateM("");
-  useEffectM(() => {
-    setPickLoc((typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === skuId)) : "");
-  }, [skuId]);
+  const [startCh] = useStateM(() => (typeof lastIssueChannel === "function") ? lastIssueChannel() : M_ISSUE_DEFAULT_CH);
+  const [cart, setCart] = useStateM(() => {
+    const wantSku = ctx.route.params?.sku;
+    const wantBundle = ctx.route.params?.bundleId;
+    const b = wantBundle && bundles.find(x => x.id === wantBundle);
+    if (b) return [bundleLine(b, startCh)];
+    const p = wantSku && PRODUCTS.find(x => x.sku === wantSku);
+    return p ? [productLine(p, startCh)] : [];
+  });
+  const [defCh, setDefChRaw] = useStateM(startCh);
+  const setDefCh = (ch) => { setDefChRaw(ch); if (typeof rememberIssueChannel === "function") rememberIssueChannel(ch); };
+  const [customer, setCustomer] = useStateM("");
+  const [ship, setShip] = useStateM({ phone: "", carrier: "", tracking: "" });
+  const [shipOpen, setShipOpen] = useStateM(false);
+  const todayStr = (typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10);
+  // วันเวลาที่ขาย — "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM" (issueOrderDate).
+  const [orderDate, setOrderDate] = useStateM("");
+  const [pickOpen, setPickOpen] = useStateM(false);
+  const [tab, setTab] = useStateM("product");   // picker tab: product | bundle
+  const [q, setQ] = useStateM("");
+  const [showN, setShowN] = useStateM(40);
+  const [camOpen, setCamOpen] = useStateM(false);
+  const [submitting, setSubmitting] = useStateM(false);
+  const submitRef = useRefM(false);
+  useEffectM(() => () => setCamOpen(false), []);
+
+  const addProduct = (p) => setCart(prev => {
+    const k = mkKey("product", p.sku, defCh);
+    const idx = prev.findIndex(l => l.key === k);
+    if (idx > -1) { const n = [...prev]; n[idx] = { ...n[idx], qty: n[idx].qty + 1 }; return n; }
+    return [...prev, productLine(p, defCh)];
+  });
+  const addBundle = (b) => setCart(prev => {
+    const k = mkKey("bundle", b.id, defCh);
+    const idx = prev.findIndex(l => l.key === k);
+    if (idx > -1) { const n = [...prev]; n[idx] = { ...n[idx], qty: n[idx].qty + 1 }; return n; }
+    return [...prev, bundleLine(b, defCh)];
+  });
+  const removeLine = (key) => setCart(prev => prev.filter(l => l.key !== key));
+  const setLineQty = (key, qty) => {
+    if (qty <= 0) { removeLine(key); return; }
+    setCart(prev => prev.map(l => (l.key === key ? { ...l, qty } : l)));
+  };
+  const setLineLoc = (key, loc) => setCart(prev => prev.map(l => (l.key === key ? { ...l, loc } : l)));
+  // Moving a line onto a channel that already holds the same item merges the two.
+  const setLineCh = (key, ch) => setCart(prev => {
+    const row = prev.find(l => l.key === key);
+    if (!row || row.ch === ch) return prev;
+    const twin = prev.find(l => l.key !== key && l.type === row.type && lineIdOf(l) === lineIdOf(row) && l.ch === ch);
+    if (twin) return prev.filter(l => l.key !== key).map(l => (l.key === twin.key ? { ...l, qty: l.qty + row.qty } : l));
+    return prev.map(l => (l.key === key ? { ...l, ch, key: mkKey(row.type, lineIdOf(row), ch) } : l));
+  });
+  const applyChToAll = () => setCart(prev => {
+    const out = [];
+    prev.forEach(l => {
+      const hit = out.find(x => x.type === l.type && lineIdOf(x) === lineIdOf(l));
+      if (hit) hit.qty += l.qty;
+      else out.push({ ...l, ch: defCh, key: mkKey(l.type, lineIdOf(l), defCh) });
+    });
+    return out;
+  });
+
+  // Camera selection funnel — exact-match + beeps, same pattern as MAdjust.
+  const pick = (code) => {
+    const s = String(code || "").trim();
+    if (!s) return;
+    const p = PRODUCTS.find(x => x.sku.toLowerCase() === s.toLowerCase());
+    if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); ctx.pushToast("ไม่พบ SKU: " + s); return; }
+    if (typeof playScanBeep === "function") playScanBeep();
+    addProduct(p);
+    ctx.pushToast(`เพิ่ม ${p.name}`);
+  };
+
+  /* Stock is validated per SKU across the WHOLE cart (bundle components folded
+     in) — two lines of the same sku on different channels must not each pass. */
+  const needBySku = {};
+  cart.forEach(l => {
+    if (l.type === "bundle") (l.items || []).forEach(ci => { needBySku[ci.sku] = (needBySku[ci.sku] || 0) + (Number(ci.qty) || 0) * l.qty; });
+    else needBySku[l.sku] = (needBySku[l.sku] || 0) + l.qty;
+  });
+  const shortages = Object.keys(needBySku)
+    .filter(s => needBySku[s] > effQty(s))
+    .map(s => {
+      const p = PRODUCTS.find(x => x.sku === s);
+      return `${p ? p.name : s}: ต้องการ ${needBySku[s]} แต่มี ${effQty(s)}`;
+    });
+  const shortSku = (sku) => needBySku[sku] > effQty(sku);
+  const totalPieces = Object.keys(needBySku).reduce((s, k) => s + needBySku[k], 0);
+  const chSummary = CHANNEL_LIST
+    .map(c => ({ ...c, qty: cart.filter(l => l.ch === c.id).reduce((s, l) => s + l.qty, 0) }))
+    .filter(c => c.qty > 0);
+  const canSubmit = cart.length > 0 && totalPieces > 0 && shortages.length === 0;
+
+  const qL = q.toLowerCase();
+  const prodMatches = PRODUCTS.filter(p =>
+    !q || p.sku.toLowerCase().includes(qL) || p.name.toLowerCase().includes(qL) || (p.cat || "").toLowerCase().includes(qL)
+  );
+  const bundleMatches = bundles.filter(b => !q || b.name.toLowerCase().includes(qL) || b.id.toLowerCase().includes(qL));
 
   const submit = async () => {
-    if (!canSubmit || submitting) return;
+    // Ref, not just the `submitting` state: this handler awaits applyLocPicks
+    // before ctx.back(), so on a slow connection the button stays live long
+    // enough for a second tap to land before React re-renders it disabled.
+    if (!canSubmit || submitting || submitRef.current) return;
     if (!navigator.onLine) { ctx.pushToast("ไม่มีการเชื่อมต่ออินเทอร์เน็ต — กรุณาตรวจสอบเครือข่าย"); return; }
+    const plan = (typeof buildIssuePlan === "function") ? buildIssuePlan(cart) : null;
+    if (!plan || !plan.skuDeducts.length) return;
+    submitRef.current = true;
     setSubmitting(true);
-    let locPicks = [];
-    if (isBundle) {
-      deductManyAndPersist(bundle.items.map(it => ({ sku: it.sku, qty: it.qty * total })));
-      locPicks = bundle.items.map(it => {
-        const cp = PRODUCTS.find(x => x.sku === it.sku);
-        return { sku: it.sku, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(cp) : (cp && cp.loc) || "" };
-      });
-    } else {
-      deductStockAndPersist(skuId, total);
-      locPicks = [{ sku: skuId, loc: pickLoc }];
-    }
+
+    // The order id is minted BEFORE the stock write so the movement ledger row
+    // can name the order it belongs to (same order as desktop commitIssueOrder).
+    const id = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
+    const pieces = plan.skuDeducts.reduce((s, d) => s + d.qty, 0);
+    const sf = (typeof issueShipFields === "function")
+      ? issueShipFields(ship)
+      : { tracking: "", carrier: "", phone: "", status: "picking" };
+    const od = (typeof issueOrderDate === "function")
+      ? issueOrderDate(orderDate)
+      : { dateIso: todayStr, ts: "", backdated: false, createdAt: new Date().toISOString() };
+    const dateNote = od.backdated ? ` · ขายวันที่ ${typeof isoToThai === "function" ? isoToThai(od.dateIso) : od.dateIso}${od.ts ? " " + od.ts : ""}` : "";
+
+    deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก (มือถือ) · ออร์เดอร์ ${id} (${plan.channelLabel})${dateNote}`);
     // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
     if (typeof applyLocPicks === "function") {
-      const r = await applyLocPicks(locPicks);
+      const r = await applyLocPicks(plan.locPicks);
       if (r && r.errors && r.errors.length) ctx.pushToast("ตัดสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ — แก้ที่หน้าสินค้าบนเดสก์ท็อป");
     }
-
-    const id = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
-    const lineItems = isBundle
-      ? bundle.items.map(it => snapLineItem(it.sku, null, it.qty * total))
-      : [snapLineItem(skuId, product.name, total)];
-    // วันเวลาที่ตัดสต็อก — now, or the backdated moment picked above.
-    const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
-    const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
-    const backLabel = createdAt ? stockOutStampLabel(stamp) : "";
 
     // The stock-out is a shipment too → create its label (single source of truth
     // for ติดตามพัสดุ / จัดส่ง). No customer address here, so recipient is name-only.
     if (typeof createSaleLabel === "function") {
       try {
-        createSaleLabel({ orderId: id, name: customer || "ลูกค้าใหม่", items: lineItems, created_at: createdAt });
+        createSaleLabel({ orderId: id, name: customer || "ลูกค้าใหม่", items: plan.lineItems, phone: sf.phone, carrier: sf.carrier, tracking: sf.tracking, created_at: od.createdAt });
       } catch (e) {}
     }
 
-    // Also persist an orders-table row so it shows in the desktop จัดส่ง (Outbound)
-    // queue — mirrors the desktop stock-out (submitIssue). Synced via the orders
-    // realtime arm; track-lookup dedups id|tracking so no double-show for customers.
-    if (typeof dbUpsertOrders === "function") {
-      const issueRow = [{
-        id,
-        channel: "ตัดสต็อก",
-        customer: customer || "ลูกค้าใหม่",
-        status: "picking",
-        carrier: "",
-        tracking: "",
-        items: lineItems.length,
-        dateIso: stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10)),
-        createdAt,
-        isBundle,
-        bundleName: isBundle ? bundle.name : "",
-        lineItems,
-      }];
-      const dbRes = await dbUpsertOrders(issueRow);
-      if (dbRes && dbRes.error) {
-        if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("orders", issueRow);
-        ctx.pushToast("⚠️ ออร์เดอร์จะซิงค์อัตโนมัติเมื่อออนไลน์");
-      }
-    }
+    // One order row via appendOrder — the convergence-safe writer (optimistic
+    // local cache + single-row upsert + offline queue), same as desktop.
+    const res = await appendOrder({
+      id,
+      channel: plan.channelLabel,
+      customer: customer || "ลูกค้าใหม่",
+      items: plan.lineCount,
+      status: sf.status,
+      carrier: sf.carrier,
+      tracking: sf.tracking,
+      ...(sf.phone ? { phone: sf.phone } : {}),
+      ts: od.ts,
+      dateIso: od.dateIso,
+      ...(od.backdated && od.createdAt ? { createdAt: od.createdAt } : {}),
+      deductions: plan.channelSplit,
+      isBundle: plan.hasBundle,
+      bundleName: plan.hasBundle ? plan.bundleNames.join(", ") : "",
+      lineItems: plan.lineItems
+    });
+    if (res && res.error) ctx.pushToast("⚠️ ออร์เดอร์จะซิงค์อัตโนมัติเมื่อออนไลน์");
 
     if (typeof recordChange === "function") {
       recordChange({
-        entity: isBundle ? "bundle" : "product",
-        entityId: isBundle ? bundle.id : skuId, action: "update",
-        summary: isBundle
-          ? `ตัดสต็อกชุด "${bundle.name}" ${total} ชุด (มือถือ)`
-          : `ตัดสต็อก ${product.name} (${skuId}) ${total} ชิ้น (มือถือ)`,
-        changes: isBundle
-          ? bundle.items.map(it => ({ label: it.sku, to: `−${it.qty * total} ชิ้น` }))
-          : [{ label: skuId, to: `−${total} ชิ้น` }],
-        note: `ออร์เดอร์ ${id}${backLabel ? ` · ย้อนหลัง ${backLabel}` : ""}`
+        entity: "order", entityId: id, action: "create",
+        summary: `ตัดสต็อก ${plan.lineCount} รายการ (${pieces} ชิ้น) (มือถือ)`,
+        count: plan.lineCount,
+        changes: cart.map(l => ({
+          label: l.type === "bundle" ? `ชุด: ${l.name}` : l.name,
+          to: `−${l.qty} ${l.type === "bundle" ? "ชุด" : "ชิ้น"}`
+        })),
+        note: `ออร์เดอร์ ${id} · ${plan.channelLabel}${dateNote}`
       });
     }
-    ctx.pushToast(`ตัดสต็อก${isBundle ? `ชุด "${bundle.name}"` : ` ${skuId}`} ${total} ${unit}${backLabel ? ` (ย้อนหลัง ${backLabel})` : ""}`);
+    ctx.pushToast((plan.lineCount === 1
+      ? `ตัดสต็อก ${cart[0].name} ${pieces} ชิ้น — ${plan.channelLabel}`
+      : `ตัดสต็อก ${plan.lineCount} รายการ (${pieces} ชิ้น) — ${plan.channelLabel}`)
+      + (od.backdated ? ` (ย้อนหลัง ${typeof isoToThai === "function" ? isoToThai(od.dateIso) : od.dateIso}${od.ts ? " " + od.ts : ""})` : ""));
     ctx.back();
   };
 
@@ -2064,111 +2655,254 @@ function MIssue({ ctx }) {
         </button>
       </div>
       <div className="m-content">
-        <div className="seg" style={{ width: "100%", marginBottom: 12 }}>
-          <button className={mode === "single" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("single")}>
-            <Icons.Box size={13}/> สินค้าเดี่ยว
-          </button>
-          <button className={mode === "bundle" ? "on" : ""} style={{ flex: 1 }} onClick={() => setMode("bundle")}>
-            <Icons.Bundle size={13}/> ชุดสินค้า
-          </button>
+        <div style={{ fontSize: 11, color: "var(--muted)", margin: "0 4px 10px" }}>
+          เลือกได้หลายรายการพร้อมกัน — สินค้าเดี่ยวและชุดสินค้า ตัดพร้อมกันในออร์เดอร์เดียว
         </div>
 
-        {!isBundle && (
+        {/* Default channel — new lines inherit it, so a whole batch is one tap */}
+        <div className="m-section-label" style={{ padding: "0 4px 8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>ช่องทาง <span style={{ fontWeight: 400, color: "var(--muted)" }}>(รายการใหม่)</span></span>
+          {cart.length > 0 && (
+            <button onClick={applyChToAll} style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 11, cursor: "pointer", padding: 0 }}>ใช้กับทุกแถว</button>
+          )}
+        </div>
+        <div className="row" style={{ gap: 6, flexWrap: "wrap", margin: "0 4px 12px" }}>
+          {CHANNEL_LIST.map(c => (
+            <button key={c.id} onClick={() => setDefCh(c.id)}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 10px", borderRadius: 999,
+                border: "1px solid " + (defCh === c.id ? "var(--accent)" : "var(--border)"),
+                background: defCh === c.id ? "var(--accent-soft)" : "var(--surface)",
+                color: defCh === c.id ? "var(--accent)" : "var(--fg-2)",
+                fontSize: 12, fontWeight: defCh === c.id ? 600 : 400, fontFamily: "inherit", cursor: "pointer"
+              }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>{c.name}
+            </button>
+          ))}
+        </div>
+
+        <button className="m-btn-big" style={{ background: "var(--surface)", color: "var(--fg)", border: "1px solid var(--border)", marginBottom: 8 }}
+          onClick={() => { setQ(""); setShowN(40); setPickOpen(true); }}>
+          <Icons.Search size={16}/> {cart.length ? `เลือกสินค้าเพิ่ม (เลือกแล้ว ${cart.length})` : "เลือกสินค้า — เลือกได้หลายรายการ"}
+        </button>
+
+        {!camOpen && (
+          <button className="m-btn-big dark" style={{ marginTop: 0, marginBottom: 0 }} onClick={() => setCamOpen(true)}>
+            <Icons.Camera size={18}/> สแกนบาร์โค้ดเพิ่มรายการ
+          </button>
+        )}
+        {camOpen && <CameraScanner continuous onScan={code => pick(code)} onClose={() => setCamOpen(false)}/>}
+
+        {cart.length === 0 && (
+          <div className="m-card" style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, border: "1px dashed var(--border)", marginTop: 10 }}>
+            ยังไม่ได้เลือกสินค้า — แตะ “เลือกสินค้า” หรือสแกนบาร์โค้ด
+          </div>
+        )}
+
+        {cart.length > 0 && (
           <>
-            <div className="m-section-label" style={{ padding: "0 4px 8px" }}>สินค้า</div>
-            <MSkuPicker value={skuId} onChange={setSkuId}/>
-            <div style={{ fontSize: 11, color: "var(--muted)", margin: "8px 4px 0" }}>
-              คงเหลือ <strong style={{ color: "var(--fg)" }}>{effQty(skuId)}</strong> ชิ้น · ตำแหน่ง <span className="mono">{locIsStored(product.loc) ? product.loc : "—"}</span> · ราคา ฿{product.price.toLocaleString()}
+            <div className="m-section-label" style={{ padding: "12px 4px 8px", display: "flex", justifyContent: "space-between" }}>
+              <span>รายการที่จะตัด <span style={{ color: "var(--accent)" }}>({cart.length})</span></span>
+              <button onClick={() => setCart([])} style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 11, cursor: "pointer", padding: 0 }}>ล้างทั้งหมด</button>
             </div>
-            {/* That line names only the primary shelf — let the picker override it. */}
-            <div style={{ margin: "0 4px" }}>
-              <MLocPickChips sku={skuId} value={pickLoc} need={total} onChange={setPickLoc}/>
+            <div className="m-list">
+              {cart.map(l => {
+                const isB = l.type === "bundle";
+                const short = isB ? (l.items || []).some(ci => shortSku(ci.sku)) : shortSku(l.sku);
+                return (
+                  <div key={l.key} className="m-row" style={{ cursor: "default", alignItems: "flex-start", background: short ? "var(--danger-soft)" : undefined }}>
+                    {isB ? (
+                      <span style={{ width: 40, height: 40, borderRadius: 8, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}>
+                        <Icons.Bundle size={18}/>
+                      </span>
+                    ) : <ProductImageThumb sku={l.sku} size={40} radius={8}/>}
+                    <div className="m-row-main">
+                      <div className="m-row-title" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {isB && <span className="badge badge-neutral" style={{ fontSize: 9, marginRight: 5 }}>ชุด</span>}{l.name}
+                      </div>
+                      <div className="row" style={{ gap: 6, marginTop: 2 }}>
+                        <span className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>{isB ? l.id : l.sku}</span>
+                        <span className="tnum" style={{ fontSize: 10, color: short ? "var(--danger)" : "var(--muted)" }}>
+                          {isB ? `${(l.items || []).length} รายการ/ชุด` : `${effQty(l.sku)} → ${Math.max(0, effQty(l.sku) - (needBySku[l.sku] || 0))}`}
+                        </span>
+                      </div>
+                      <select className="m-input" value={l.ch} onChange={e => setLineCh(l.key, e.target.value)}
+                        style={{ marginTop: 6, marginBottom: 0, padding: "6px 8px", fontSize: 12, height: "auto" }}>
+                        {CHANNEL_LIST.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                      {!isB && <MLocPickChips sku={l.sku} value={l.loc} need={l.qty} onChange={loc => setLineLoc(l.key, loc)}/>}
+                    </div>
+                    <div className="qty-stepper" style={{ flexShrink: 0 }}>
+                      <button onClick={() => setLineQty(l.key, l.qty - 1)}>−</button>
+                      <input value={l.qty} onChange={e => setLineQty(l.key, Math.max(0, parseInt(e.target.value, 10) || 0))} style={{ width: 34, fontSize: 12 }}/>
+                      <button onClick={() => setLineQty(l.key, l.qty + 1)}>+</button>
+                    </div>
+                    <button onClick={() => removeLine(l.key)} title="เอาออก"
+                      style={{ display: "grid", placeItems: "center", width: 26, height: 26, borderRadius: 8, border: "none", background: "transparent", color: "var(--muted)", flexShrink: 0, cursor: "pointer" }}>
+                      <Icons.X size={13}/>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </>
         )}
 
-        {isBundle && (
-          noBundles ? (
-            <div className="m-card" style={{ textAlign: "center", color: "var(--muted)", fontSize: 13, padding: 20 }}>
-              <Icons.Bundle size={22} style={{ opacity: 0.4, marginBottom: 6 }}/>
-              <div>ยังไม่มีชุดสินค้า</div>
-            </div>
-          ) : (
-            <>
-              <div className="m-section-label" style={{ padding: "0 4px 8px" }}>ชุดสินค้า</div>
-              <select className="m-input" value={bundleId} onChange={e => setBundleId(e.target.value)}>
-                {bundles.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-              </select>
-              {bundle && (
-                <div className="m-card" style={{ marginTop: 8 }}>
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>
-                    ขายได้สูงสุด <strong style={{ color: bundleMax === 0 ? "var(--danger)" : "var(--fg)" }}>{bundleMax}</strong> ชุด · ราคา ฿{bundle.price.toLocaleString()}
-                  </div>
-                  {bundle.items.map(it => {
-                    const p = PRODUCTS.find(x => x.sku === it.sku);
-                    const eq = effQty(it.sku);
-                    const need = it.qty * total;
-                    return (
-                      <div key={it.sku} className="row" style={{ gap: 8, fontSize: 12, padding: "3px 0" }}>
-                        <span style={{ width: 6, height: 6, borderRadius: 999, background: eq < need ? "var(--danger)" : "var(--success)", flexShrink: 0 }}/>
-                        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p?.name || it.sku}</span>
-                        <span className="mono" style={{ color: "var(--muted)" }}>×{it.qty}</span>
-                        <span className="tnum" style={{ color: "var(--muted)" }}>เหลือ {eq}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </>
-          )
-        )}
+        {/* Sale date/time — backdating files a late-keyed order under the moment it sold. */}
+        <MStockOutWhen value={orderDate} onChange={setOrderDate} label="วันเวลาที่ขาย" hint="ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง"/>
 
-        <MStockOutWhen value={when} onChange={setWhen}/>
-
-        <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>ลูกค้า / อ้างอิง (ไม่จำเป็น)</div>
+        <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>ลูกค้า / อ้างอิง (ไม่จำเป็น)</div>
         <input className="m-input" placeholder="เช่น คุณ ปวีณา / Shopee #2025-119283" value={customer} onChange={e => setCustomer(e.target.value)} style={{ marginBottom: 8 }}/>
 
-        <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>ตัดสต็อกตามช่องทาง ({unit})</div>
-        <div className="m-list">
-          {CHANNEL_LIST.map(c => {
-            const v = channels[c.id];
-            const toggle = () => setChannels(s => ({ ...s, [c.id]: { ...s[c.id], on: !s[c.id].on, qty: !s[c.id].on && s[c.id].qty === 0 ? 1 : s[c.id].qty } }));
-            const setQ = (q) => setChannels(s => ({ ...s, [c.id]: { ...s[c.id], qty: Math.max(0, q), on: q > 0 ? true : s[c.id].on } }));
-            return (
-              <div key={c.id} className="m-row" style={{ cursor: "default", background: v.on ? "var(--accent-soft)" : undefined }}>
-                <span className={"check" + (v.on ? " on" : "")} onClick={toggle}/>
-                <span style={{ width: 10, height: 10, borderRadius: 999, background: c.color }}/>
-                <span style={{ flex: 1, fontSize: 13, fontWeight: v.on ? 500 : 400 }}>{c.name}</span>
-                <div className="qty-stepper">
-                  <button onClick={() => setQ(v.qty - 1)} disabled={v.qty <= 0}>−</button>
-                  <input value={v.qty} onChange={e => setQ(parseInt(e.target.value) || 0)} style={{ width: 36, fontSize: 12 }}/>
-                  <button onClick={() => setQ(v.qty + 1)}>+</button>
-                </div>
-              </div>
-            );
-          })}
+        {/* Optional shipping details — collapsed so a quick cut stays one screen. */}
+        {!shipOpen && !ship.tracking ? (
+          <button onClick={() => setShipOpen(true)}
+            style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 12, cursor: "pointer", padding: "0 4px 10px", fontFamily: "inherit" }}>
+            + เบอร์โทร / ขนส่ง / เลขพัสดุ
+          </button>
+        ) : (
+          <div className="m-card" style={{ marginBottom: 8 }}>
+            <input className="m-input" inputMode="tel" placeholder="เบอร์โทร (ไม่จำเป็น)" value={ship.phone}
+              onChange={e => setShip(s => ({ ...s, phone: e.target.value }))} style={{ marginBottom: 8 }}/>
+            <select className="m-input" value={ship.carrier} onChange={e => setShip(s => ({ ...s, carrier: e.target.value }))} style={{ marginBottom: 8 }}>
+              <option value="">ขนส่ง — ไม่ระบุ</option>
+              {(typeof ISSUE_CARRIERS !== "undefined" ? ISSUE_CARRIERS : []).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <input className="m-input mono" placeholder="เลขพัสดุ (ใส่แล้ว = ส่งแล้ว)" value={ship.tracking}
+              onChange={e => setShip(s => ({ ...s, tracking: e.target.value }))} style={{ marginBottom: 0 }}/>
+          </div>
+        )}
+
+        {shortages.length > 0 && (
+          <div className="m-card" style={{ background: "var(--danger-soft)", color: "var(--danger)", fontSize: 12 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>สต็อกไม่พอ</div>
+            {shortages.map((e, i) => <div key={i}>{e}</div>)}
+          </div>
+        )}
+
+        <div className="m-card" style={{ background: "var(--surface-2)" }}>
+          <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontSize: 12, color: "var(--fg-2)" }}>
+              <div>รวมตัดสต็อก</div>
+              <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{cart.length} รายการ</div>
+            </div>
+            <div className="tnum" style={{ fontSize: 22, fontWeight: 600 }}>
+              {totalPieces} <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>ชิ้น</span>
+            </div>
+          </div>
+          {chSummary.length > 0 && (
+            <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+              {chSummary.map(c => (
+                <span key={c.id} className="ch-chip" style={{ fontSize: 11 }}>
+                  <span className="swatch" style={{ background: c.color }}/>{c.name} <strong className="tnum" style={{ marginLeft: 4 }}>{c.qty}</strong>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="m-card" style={{ background: overStock ? "var(--danger-soft)" : "var(--surface-2)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontSize: 12, color: overStock ? "var(--danger)" : "var(--fg-2)" }}>
-            <div>รวมตัดสต็อก</div>
-            {overStock && <div style={{ fontSize: 10, marginTop: 2 }}>เกินจำนวนที่ขายได้ ({stockCap} {unit})</div>}
-          </div>
-          <div className="tnum" style={{ fontSize: 22, fontWeight: 600, color: overStock ? "var(--danger)" : "var(--fg)" }}>
-            {total} <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>{unit}</span>
-          </div>
-        </div>
-
-        <button className="m-btn-big" onClick={submit} disabled={!canSubmit}>
-          <Icons.Check size={16}/> ยืนยันตัดสต็อก {total} {unit}
+        <button className="m-btn-big" onClick={submit} disabled={!canSubmit || submitting}>
+          <Icons.Check size={16}/> ยืนยันตัดสต็อก {totalPieces} ชิ้น
         </button>
       </div>
+
+      {/* Product / bundle sheet — stays open so several items go in one pass. */}
+      {pickOpen && (
+        <>
+          <div className="m-sheet-backdrop" onClick={() => setPickOpen(false)}/>
+          <div className="m-sheet" style={{ maxHeight: "85%" }}>
+            <div className="m-sheet-grabber"/>
+            <div className="m-sheet-head">
+              <h3>เลือกสินค้า {cart.length > 0 && <span style={{ color: "var(--accent)" }}>({cart.length})</span>}</h3>
+              <button className="m-action" onClick={() => setPickOpen(false)}><Icons.X size={14}/></button>
+            </div>
+            <div style={{ padding: "12px 16px 8px", flexShrink: 0 }}>
+              <div className="seg" style={{ width: "100%", marginBottom: 8 }}>
+                <button className={tab === "product" ? "on" : ""} style={{ flex: 1 }} onClick={() => { setTab("product"); setShowN(40); }}>
+                  <Icons.Box size={13}/> สินค้าเดี่ยว
+                </button>
+                <button className={tab === "bundle" ? "on" : ""} style={{ flex: 1 }} onClick={() => { setTab("bundle"); setShowN(40); }}>
+                  <Icons.Bundle size={13}/> ชุดสินค้า
+                </button>
+              </div>
+              <div className="m-search" style={{ marginBottom: 0 }}>
+                <Icons.Search size={14}/>
+                <input autoFocus value={q} onChange={e => { setQ(e.target.value); setShowN(40); }} placeholder="พิมพ์ SKU, ชื่อ, หรือหมวด"/>
+                {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => { setQ(""); setShowN(40); }}/>}
+              </div>
+            </div>
+            <div className="m-sheet-body" style={{ padding: "0 12px 12px" }}>
+              <div className="m-list" style={{ marginBottom: 8 }}>
+                {tab === "product" && prodMatches.slice(0, showN).map(p => {
+                  const s = stockStatus(p);
+                  const inCart = cart.filter(l => l.type === "product" && l.sku === p.sku).reduce((n, l) => n + l.qty, 0);
+                  return (
+                    <button key={p.sku} className={"m-row" + (inCart ? " selected" : "")} onClick={() => addProduct(p)}>
+                      <ProductImageThumb sku={p.sku} size={40} radius={8}/>
+                      <div className="m-row-main">
+                        <div className="m-row-title" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                        <div className="row" style={{ gap: 6, marginTop: 2 }}>
+                          <span className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>{p.sku}</span>
+                          <span className={"badge " + s.cls} style={{ fontSize: 9, padding: "1px 6px" }}><span className="dot"/>{s.label}</span>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <div className="tnum" style={{ fontSize: 14, fontWeight: 600 }}>{effQty(p.sku)}</div>
+                        <div style={{ fontSize: 10, color: "var(--muted)" }}>คงเหลือ</div>
+                      </div>
+                      {inCart > 0 && <span className="badge badge-info" style={{ fontSize: 10, flexShrink: 0 }}>×{inCart}</span>}
+                      <Icons.Plus size={14} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                    </button>
+                  );
+                })}
+                {tab === "bundle" && bundleMatches.map(b => {
+                  const max = (typeof bundleAvail === "function") ? bundleAvail(b) : 0;
+                  const inCart = cart.filter(l => l.type === "bundle" && l.id === b.id).reduce((n, l) => n + l.qty, 0);
+                  return (
+                    <button key={b.id} className={"m-row" + (inCart ? " selected" : "")} onClick={() => addBundle(b)}>
+                      <span style={{ width: 40, height: 40, borderRadius: 8, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}>
+                        <Icons.Bundle size={18}/>
+                      </span>
+                      <div className="m-row-main">
+                        <div className="m-row-title" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name}</div>
+                        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>{b.items.length} รายการ/ชุด · ฿{(b.price || 0).toLocaleString()}</div>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <div className="tnum" style={{ fontSize: 14, fontWeight: 600, color: max === 0 ? "var(--danger)" : "var(--fg)" }}>{max}</div>
+                        <div style={{ fontSize: 10, color: "var(--muted)" }}>ชุดที่ทำได้</div>
+                      </div>
+                      {inCart > 0 && <span className="badge badge-info" style={{ fontSize: 10, flexShrink: 0 }}>×{inCart}</span>}
+                      <Icons.Plus size={14} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+                    </button>
+                  );
+                })}
+                {((tab === "product" && prodMatches.length === 0) || (tab === "bundle" && bundleMatches.length === 0)) && (
+                  <div style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+                    <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>
+                    <div>{tab === "bundle" && bundles.length === 0 ? "ยังไม่มีชุดสินค้า" : `ไม่พบรายการที่ตรงกับ "${q}"`}</div>
+                  </div>
+                )}
+              </div>
+              {tab === "product" && prodMatches.length > showN && (
+                <button className="m-btn-big" style={{ background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={() => setShowN(n => n + 40)}>
+                  ดูเพิ่ม — แสดง {showN} จาก {prodMatches.length} รายการ
+                </button>
+              )}
+            </div>
+            <div className="m-sheet-foot">
+              <button className="m-btn-big" onClick={() => setPickOpen(false)}>
+                <Icons.Check size={16}/> เสร็จแล้ว{cart.length ? ` (${cart.length})` : ""}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }
 
-/* Mobile twin of StockOutWhenField (screens.jsx) — วันเวลาที่ตัดสต็อก for a
-   backdated stock-out. "" = now. */
+/* Mobile twin of StockOutWhenField (screens.jsx) — วันเวลา for a backdated
+   stock-out. "" = now. */
 function MStockOutWhen({ value, onChange, label, hint }) {
   const maxLocal = (typeof nowBkkLocal === "function") ? nowBkkLocal() : "";
   const stamp = value && typeof stockOutStamp === "function" ? stockOutStamp(value) : null;
@@ -2180,22 +2914,23 @@ function MStockOutWhen({ value, onChange, label, hint }) {
   };
   return (
     <>
-      <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>{label || "วันเวลาที่ตัดสต็อก"}</div>
+      <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>{label || "วันเวลาที่ตัดสต็อก"}</div>
       <input
         type="datetime-local" className="m-input"
         value={value || maxLocal} max={maxLocal}
         onChange={e => onChange(e.target.value && e.target.value < maxLocal ? e.target.value : "")}
+        style={backdated ? { borderColor: "var(--warning)" } : undefined}
       />
       <div className="row" style={{ gap: 6, marginTop: 6 }}>
-        <button type="button" className="btn" style={{ flex: 1 }} onClick={setYesterday}>เมื่อวาน</button>
-        <button type="button" className={"btn" + (!value ? " btn-primary" : "")} style={{ flex: 1 }} onClick={() => onChange("")}>ตอนนี้</button>
+        <button type="button" className="btn" style={{ flex: 1, justifyContent: "center" }} onClick={setYesterday}>เมื่อวาน</button>
+        <button type="button" className={"btn" + (!value ? " btn-primary" : "")} style={{ flex: 1, justifyContent: "center" }} onClick={() => onChange("")}>ตอนนี้</button>
       </div>
       {backdated ? (
         <div style={{ margin: "6px 0 8px", padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", color: "oklch(0.5 0.13 65)", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
           <Icons.Calendar size={13}/> ย้อนหลัง · <strong>{stockOutStampLabel(stamp)}</strong>
         </div>
       ) : (
-        <div style={{ fontSize: 11, color: "var(--muted)", margin: "4px 4px 8px" }}>{hint || "ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง"}</div>
+        <div style={{ fontSize: 11, color: "var(--muted)", margin: "4px 4px 8px" }}>{hint || "ทำย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง"}</div>
       )}
     </>
   );
@@ -2216,6 +2951,9 @@ function MLocPickChips({ sku, value, onChange, need, label }) {
   if (spots.length <= 1) return null;
   const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(sku, value) : 0;
   const short = Number(need) > 0 && here < Number(need);
+  // "-" / deleted-shelf rows read as unplaced and are never tagged หยิบก่อน.
+  const stored = storedLocSet();
+  const first = defaultPickLoc(p);
   return (
     <div style={{ marginTop: 4 }}>
       <div className="row" style={{ gap: 4, flexWrap: "wrap", alignItems: "center" }}>
@@ -2233,7 +2971,7 @@ function MLocPickChips({ sku, value, onChange, need, label }) {
                 borderRadius: 999, padding: "2px 8px", fontSize: 10.5,
                 fontFamily: "inherit", opacity: s.qty <= 0 ? 0.4 : 1
               }}>
-              <span className="mono">{locParts(s.loc).pos}</span> ×{s.qty}{s.loc === p.loc ? " · หยิบก่อน" : ""}
+              {locIsStored(s.loc, stored) ? <span className="mono">{locParts(s.loc).pos}</span> : "ยังไม่ระบุตำแหน่ง"} ×{s.qty}{s.loc === first ? " · หยิบก่อน" : ""}
             </button>
           );
         })}
@@ -2376,6 +3114,7 @@ function MSell({ ctx }) {
   // Scan a barcode/SKU → add the matching product to the cart (same beep feedback as Inbound)
   const [camOpen, setCamOpen] = useStateM(false);
   const [submitting, setSubmitting] = useStateM(false);
+  const submitRef = useRefM(false);
   useEffectM(() => () => setCamOpen(false), []);
   const addByScan = (code) => {
     const sku = String(code || "").trim();
@@ -2401,7 +3140,8 @@ function MSell({ ctx }) {
   const cartReady = cart.length > 0 && cartErrors.length === 0;
 
   const submitOrder = async () => {
-    if (submitting) return;
+    if (submitting || submitRef.current) return;   // ref = same-tick double-tap (see MIssue)
+    submitRef.current = true;
     if (!navigator.onLine) { ctx.pushToast("ไม่มีการเชื่อมต่ออินเทอร์เน็ต — กรุณาตรวจสอบเครือข่าย"); return; }
     setSubmitting(true);
     // Re-validate against live stock at submit time (stock may have changed mid-wizard)
@@ -2409,7 +3149,7 @@ function MSell({ ctx }) {
       const avail = item.type === "product" ? effQty(item.sku) : bMax(item);
       return item.qty > avail ? item.name : null;
     }).filter(Boolean);
-    if (cart.length === 0 || liveErrors.length > 0) { setSubmitting(false); ctx.pushToast("สต็อกไม่พอ — ตรวจสอบรายการอีกครั้ง"); return; }
+    if (cart.length === 0 || liveErrors.length > 0) { setSubmitting(false); submitRef.current = false; ctx.pushToast("สต็อกไม่พอ — ตรวจสอบรายการอีกครั้ง"); return; }
     const allDeductions = [];
     // Shelf per sku, carried beside the deduction (never inside it — the offline
     // queue replays {sku,qty} only).
@@ -2426,7 +3166,7 @@ function MSell({ ctx }) {
         });
       }
     });
-    if (typeof deductManyAndPersist === "function") deductManyAndPersist(allDeductions);
+    if (typeof deductManyAndPersist === "function") deductManyAndPersist(allDeductions, "ขายสินค้า (มือถือ) · " + (ship.name || "ลูกค้าใหม่"));
     // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
     if (typeof applyLocPicks === "function") {
       const locRes = await applyLocPicks(locPicks);
@@ -2494,7 +3234,7 @@ function MSell({ ctx }) {
         tracking: "",
         items: cart.length,
         dateIso: stamp ? stamp.dateIso : ((typeof todayIso === "function") ? todayIso() : new Date().toISOString().slice(0, 10)),
-        createdAt,
+        ...(createdAt ? { createdAt } : {}),
         isSellOrder: true,
         isBundle: hasBundle,
         bundleName: hasBundle ? cart.filter(i => i.type === "bundle").map(i => i.name).join(", ") : "",
@@ -2850,17 +3590,37 @@ function MBundles({ ctx }) {
 
   useEffectM(() => {
     const refresh = () => setStockKey(k => k + 1);
+    /* saveBundles writes the WHOLE list and deletes every bundle missing from it.
+       This screen had no ims-bundles-change listener (desktop Bundles does), so it
+       held whatever list it loaded at mount — and the next edit saved that stale
+       list back, deleting any bundle another device had created in the meantime.
+       Staying in sync is what makes the full-list write safe. */
+    const reloadBundles = () => {
+      if (window._DB_BUNDLES) setBundlesRaw(window._DB_BUNDLES);
+      else if (typeof loadBundles === "function") setBundlesRaw(loadBundles());
+    };
     window.addEventListener("ims-stock-adj-change", refresh);
     window.addEventListener("ims-products-change", refresh);
+    window.addEventListener("ims-bundles-change", reloadBundles);
     return () => {
       window.removeEventListener("ims-stock-adj-change", refresh);
       window.removeEventListener("ims-products-change", refresh);
+      window.removeEventListener("ims-bundles-change", reloadBundles);
     };
   }, []);
 
   const setBundles = (next) => {
     setBundlesRaw(next);
-    if (typeof saveBundles === "function") saveBundles(next);
+    // Surface a rejected/rolled-back save instead of leaving the screen showing
+    // a change the database refused.
+    if (typeof saveBundles === "function") {
+      Promise.resolve(saveBundles(next)).then(res => {
+        if (res && res.ok === false) {
+          ctx.pushToast(res.error || "บันทึกชุดสินค้าไม่สำเร็จ");
+          if (window._DB_BUNDLES) setBundlesRaw(window._DB_BUNDLES);
+        }
+      }).catch(() => {});
+    }
   };
 
   const avail = (b) => (typeof bundleAvail === "function" ? bundleAvail(b) : 0);
@@ -3208,7 +3968,7 @@ function MFinder({ ctx }) {
             {res.hits.map(p => {
               const eq = effQty(p.sku);
               const st = stockStatus({ ...p, qty: eq });
-              const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
+              const parts = ((h) => h ? locParts(h) : null)(productHomeLoc(p));
               const url = typeof resolveProductImage === "function" ? resolveProductImage(p.sku, images) : "";
               return (
                 <button key={p.sku} className="m-card" onClick={() => ctx.push("product", { sku: p.sku })}
@@ -3262,6 +4022,7 @@ function MFinder({ ctx }) {
 
 function MMore({ ctx }) {
   const items = [
+    { id: "pack",      icon: Icons.Box,   label: "แพ็คสินค้า",      sub: "รายการหยิบของตามชั้นวาง ติ๊กทีละชิ้น แล้วปิดเป็นพร้อมส่ง" },
     { id: "finder",    icon: Icons.Search, label: "ค้นหาสินค้า",    sub: "ค้นหา/สแกน ดูรูปสินค้าและตำแหน่งจัดเก็บ" },
     { id: "analytics", icon: Icons.Dash,  label: "วิเคราะห์ยอดขาย", sub: "รายได้ ต้นทุน กำไร และสินค้าขายดี" },
     { id: "stocktake", icon: Icons.Scan,  label: "ตรวจนับสต็อก",    sub: "นับสินค้าจริงเทียบกับระบบ แล้วปรับให้ตรง" },
@@ -3300,7 +4061,8 @@ function MMore({ ctx }) {
 
         <div className="m-list">
           {items.filter(it =>
-            it.id === "catalog" ||
+            // the reference catalog is a product view — not for a pack-only role
+            (it.id === "catalog" && (typeof canOpenPage !== "function" || canOpenPage("inventory", user.role))) ||
             ((typeof canOpenPage !== "function" || canOpenPage(it.id, user.role))
               // ปรับสต็อก is a page id AND a capability — both must hold, or the
               // row would open a screen the Screen guard immediately blocks.
@@ -3505,10 +4267,11 @@ function MLocations({ ctx }) {
   const addBtn = { display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, padding: "5px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--accent)", fontWeight: 600 };
   const delBtn = { display: "grid", placeItems: "center", width: 28, height: 28, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--muted)" };
 
-  const askB = () => { const n = prompt("ชื่ออาคาร / โซน (เช่น สภ.)"); if (n && n.trim()) addBuilding(n.trim()); };
-  const askF = (b) => { const n = prompt(`เพิ่มชั้นใน "${b}" (เช่น ชั้น 3)`); if (n && n.trim()) addFloor(b, n.trim()); };
-  const askP = (b, f) => { const n = prompt(`เพิ่มตำแหน่งใน ${b} · ${f} (เช่น A1)`); if (n && n.trim()) addPosition(b, f, n.trim()); };
-  const editB = (b) => { const n = prompt("เปลี่ยนชื่ออาคาร", b); if (n && n.trim() && n.trim() !== b) renameBuilding(b, n.trim()); };
+  // In-app dialogs (askText, screens.jsx) instead of the browser's prompt() box.
+  const askB = async () => { const n = await askText("เพิ่มอาคาร / โซน", "", { label: "ชื่ออาคาร / โซน", placeholder: "เช่น สภ., ตึกพาณิชย์" }); if (n) addBuilding(n); };
+  const askF = async (b) => { const n = await askText(`เพิ่มชั้นใน "${b}"`, "", { label: "ชื่อชั้น", placeholder: "เช่น ชั้น 3" }); if (n) addFloor(b, n); };
+  const askP = async (b, f) => { const n = await askText(`เพิ่มตำแหน่งใน ${b} · ${f}`, "", { label: "ชื่อตำแหน่ง", placeholder: "เช่น A1, กล่อง 12" }); if (n) addPosition(b, f, n); };
+  const editB = async (b) => { const n = await askText("เปลี่ยนชื่ออาคาร", b, { okLabel: "เปลี่ยนชื่อ" }); if (n && n !== b) renameBuilding(b, n); };
 
   // Assign products to a position straight from the sheet — no trip to the
   // product edit screen. Gated like every other product UPDATE (viewer sees no UI).
@@ -3523,9 +4286,14 @@ function MLocations({ ctx }) {
   const toast = (m) => (ctx && ctx.pushToast ? ctx.pushToast(m) : window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })));
   const openPos = (sel) => { setAddingProd(false); setAddQ(""); setCamPick(false); setShowNPick(8); setShowNItems(40); setSelectedPos(sel); };
   const closeSheet = () => { setAddingProd(false); setAddQ(""); setCamPick(false); setShowNPick(8); setShowNItems(40); setSelectedPos(null); };
+  // "Already here" = pieces filed at this shelf (product_locations), not p.loc —
+  // p.loc is "-" on live data, which listed shelved products as addable.
+  const isHereAt = (p, code) => (p.loc || "") === code
+    || ((typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, code) : 0) > 0;
   const assignToPos = async (p) => {
     const sel = selectedPos; if (!sel) return;
-    const from = p.loc && p.loc !== sel.code && typeof locParts === "function" ? locParts(p.loc) : null;
+    const home = productHomeLoc(p);
+    const from = home && home !== sel.code && typeof locParts === "function" ? locParts(home) : null;
     const rows = (typeof locSplitFor === "function") ? locSplitFor(p.sku, p.loc) : [];
     if (rows.length && typeof moveStockToLocation === "function") {
       /* Recorded split → the rows must move, not just p.loc (a bare p.loc write
@@ -3534,11 +4302,11 @@ function MLocations({ ctx }) {
          primary pile); single-position sku moves whole, no question. */
       let pieces = Number(p.qty) || 0;
       if (rows.length > 1) {
-        const atPrimary = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, p.loc) : 0;
-        const ans = prompt(
-          `${p.name} แยกเก็บ ${rows.length} ตำแหน่ง (รวม ${pieces} ชิ้น)\nย้ายมา ${sel.p} กี่ชิ้น?`,
-          String(atPrimary > 0 ? atPrimary : pieces)
-        );
+        const atPrimary = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, home || p.loc) : 0;
+        const ans = await askText(`ย้ายมา ${sel.p} กี่ชิ้น?`, String(atPrimary > 0 ? atPrimary : pieces), {
+          label: "จำนวนชิ้น", type: "number", okLabel: "ย้าย",
+          message: `${p.name} แยกเก็บ ${rows.length} ตำแหน่ง (รวม ${pieces} ชิ้น)`
+        });
         if (ans === null) return;
         pieces = Math.round(Number(ans));
         if (!pieces || pieces <= 0 || isNaN(pieces)) return;
@@ -3564,7 +4332,7 @@ function MLocations({ ctx }) {
     const p = exact || (res.hits.length === 1 ? res.hits[0] : null);
     if (!p) { if (typeof playScanErrorBeep === "function") playScanErrorBeep(); toast("ไม่พบ SKU: " + q); return; }
     if (typeof playScanBeep === "function") playScanBeep();
-    if ((p.loc || "") === sel.code && !(typeof hasLocSplit === "function" && hasLocSplit(p.sku))) {
+    if (isHereAt(p, sel.code) && !(typeof hasLocSplit === "function" && hasLocSplit(p.sku))) {
       toast(`${p.name} อยู่ใน ${sel.p} อยู่แล้ว`);
       return;
     }
@@ -3626,11 +4394,11 @@ function MLocations({ ctx }) {
                 <div style={{ padding: 14, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>ไม่พบสินค้า "{q}"</div>
               )}
               {res.hits.map((p, i) => {
-                const parts = locIsStored(p.loc) ? locParts(p.loc) : null;
+                const parts = ((h) => h ? locParts(h) : null)(productHomeLoc(p));
                 return (
                   <div key={p.sku} className="row"
                     onClick={() => parts
-                      ? openPos({ b: parts.building, f: parts.floor, p: parts.pos, code: p.loc, highlightSku: p.sku })
+                      ? openPos({ b: parts.building, f: parts.floor, p: parts.pos, code: parts.code, highlightSku: p.sku })
                       : ctx.push("product", { sku: p.sku })}
                     style={{ gap: 10, padding: "8px 2px", borderBottom: i < res.hits.length - 1 ? "1px solid var(--border)" : "none" }}>
                     <ProductImageThumb sku={p.sku} size={40} radius={8}/>
@@ -3764,8 +4532,9 @@ function MLocations({ ctx }) {
                 {addingProd && (() => {
                   // One row of the picker — used by both search results and the browse list.
                   const pickRowM = (p) => {
-                    const here = (p.loc || "") === selectedPos.code;
-                    const from = !here && locIsStored(p.loc) ? locParts(p.loc) : null;
+                    const here = isHereAt(p, selectedPos.code);
+                    const home = here ? "" : productHomeLoc(p);
+                    const from = home && home !== selectedPos.code ? locParts(home) : null;
                     return (
                       <div key={p.sku} className="row" onClick={() => { if (!here) assignToPos(p); }}
                         style={{ gap: 10, padding: "8px 10px", background: here ? "var(--accent-soft)" : "var(--surface-2)", borderRadius: 8, marginBottom: 6 }}>
@@ -3807,8 +4576,8 @@ function MLocations({ ctx }) {
                         // No query → browse the whole catalog right here; unplaced products first
                         // (stale codes count as unplaced, same as the ยังไม่จัดเก็บ badge).
                         const stored = storedLocSet();
-                        const browse = PRODUCTS.filter(p => (p.loc || "") !== selectedPos.code)
-                          .sort((a, b) => ((locIsStored(a.loc, stored) ? 1 : 0) - (locIsStored(b.loc, stored) ? 1 : 0)) || String(a.name || "").localeCompare(String(b.name || ""), "th"));
+                        const browse = PRODUCTS.filter(p => !isHereAt(p, selectedPos.code))
+                          .sort((a, b) => ((productIsStored(a, stored) ? 1 : 0) - (productIsStored(b, stored) ? 1 : 0)) || String(a.name || "").localeCompare(String(b.name || ""), "th"));
                         return (
                           <div style={{ marginTop: 8 }}>
                             {browse.length === 0
@@ -3834,8 +4603,10 @@ function MLocations({ ctx }) {
                     const hl = p.sku === selectedPos.highlightSku;
                     // Pieces AT THIS POSITION, not the product's grand total.
                     const here = (typeof qtyAtLocation === "function") ? qtyAtLocation(p.sku, selectedPos.code) : p.qty;
-                    const isPrimary = (p.loc || "") === selectedPos.code;
-                    const main = !isPrimary && locIsStored(p.loc) ? locParts(p.loc) : null;
+                    // Primary / "หลักอยู่" from the real home shelf — p.loc is "-" on live data.
+                    const home = productHomeLoc(p);
+                    const isPrimary = home === selectedPos.code;
+                    const main = home && home !== selectedPos.code ? locParts(home) : null;
                     const split = typeof hasLocSplit === "function" && hasLocSplit(p.sku);
                     return (
                       <div key={p.sku} className="row" onClick={() => { closeSheet(); ctx.push("product", { sku: p.sku }); }}
@@ -3874,7 +4645,7 @@ function MLocations({ ctx }) {
                     <Icons.Trash size={14}/> ลบ
                   </button>
                 )}
-                <button className="m-btn-big" style={{ flex: 1, background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={() => { const n = prompt("เปลี่ยนชื่อตำแหน่ง", selectedPos.p); if (n && n.trim() && n.trim() !== selectedPos.p) { renamePosition(selectedPos.b, selectedPos.f, selectedPos.p, n.trim()); closeSheet(); } }}>
+                <button className="m-btn-big" style={{ flex: 1, background: "var(--surface-2)", color: "var(--fg)", border: "1px solid var(--border)" }} onClick={async () => { const n = await askText("เปลี่ยนชื่อตำแหน่ง", selectedPos.p, { okLabel: "เปลี่ยนชื่อ" }); if (n && n !== selectedPos.p) { renamePosition(selectedPos.b, selectedPos.f, selectedPos.p, n); closeSheet(); } }}>
                   <Icons.Edit size={14}/> เปลี่ยนชื่อ
                 </button>
                 <button className="m-btn-big accent" style={{ flex: 1 }} onClick={closeSheet}>เสร็จสิ้น</button>
@@ -5029,8 +5800,8 @@ function MCategoryManagerSection({ pushToast }) {
     pushToast(`เพิ่มหมวดหมู่ "${name}" แล้ว`);
   };
 
-  const handleRename = (oldName) => {
-    const n = prompt("เปลี่ยนชื่อหมวดหมู่", oldName);
+  const handleRename = async (oldName) => {
+    const n = await askText("เปลี่ยนชื่อหมวดหมู่", oldName, { okLabel: "เปลี่ยนชื่อ" });
     if (!n || !n.trim() || n.trim() === oldName) return;
     if (typeof renameCategory === "function") {
       if (!renameCategory(oldName, n.trim())) { pushToast("ชื่อนี้มีอยู่แล้ว"); return; }
@@ -5207,7 +5978,7 @@ function MSettings({ ctx }) {
 /* Mobile working-hours config — mirrors the desktop WorkHoursCard. Restricts the
    selected roles to a per-weekday schedule; enforcement lives in app.jsx Root. */
 function MWorkHoursCard({ store, save }) {
-  const fallback = { enabled: false, roles: ["staff", "viewer"], days: {} };
+  const fallback = { enabled: false, roles: ["staff", "packer", "viewer"], days: {} };
   const wh = store.workHours || (typeof defaultWorkHours === "function" ? defaultWorkHours() : fallback);
   const dayLabels = (typeof WORKHOURS_DAY_LABELS !== "undefined") ? WORKHOURS_DAY_LABELS
     : ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
@@ -5364,9 +6135,12 @@ function MAnalytics({ ctx }) {
     const refresh = () => setPv(v => v + 1);
     window.addEventListener("ims-products-change", refresh);
     window.addEventListener("ims-orders-change", refresh);
+    window.addEventListener("ims-sales-change", refresh);
+    if (typeof refreshSaleMoves === "function") refreshSaleMoves();
     return () => {
       window.removeEventListener("ims-products-change", refresh);
       window.removeEventListener("ims-orders-change", refresh);
+      window.removeEventListener("ims-sales-change", refresh);
     };
   }, []);
 
@@ -5380,7 +6154,7 @@ function MAnalytics({ ctx }) {
     const win = (typeof buildAnalyticsWindow === "function")
       ? buildAnalyticsWindow(period, todayIso)
       : { bars: 1, labels: [""], barIndex: () => 0, inPrev: () => false };
-    const orders = (typeof loadOrders === "function" ? loadOrders() : []) || [];
+    const orders = (typeof loadSalesRecords === "function" ? loadSalesRecords() : (typeof loadOrders === "function" ? loadOrders() : [])) || [];
     const pmap = new Map(PRODUCTS.map(p => [p.sku, p]));
     const costOf = (p) => p ? (p.cost ?? Math.round((Number(p.price) || 0) * 0.6)) : 0;
 
@@ -5716,6 +6490,15 @@ function MStockTake({ ctx }) {
     if (!changeList.length) { ctx.pushToast("ไม่มีส่วนต่าง — สต็อกตรงกับระบบ"); return; }
     const net = changeList.reduce((s, c) => s + c.delta, 0);
     if (!confirm(`ยืนยันปรับสต็อก ${changeList.length} SKU?\nสุทธิ ${net >= 0 ? "+" : ""}${net} ชิ้น`)) return;
+    // Same duplicate-commit latch as desktop ตรวจนับสต็อก.
+    const guardKey = (typeof commitFingerprint === "function")
+      ? commitFingerprint("stocktake-apply", changeList) : null;
+    if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
+      if (typeof duplicateCommitToast === "function") duplicateCommitToast();
+      // The identical count DID just apply — clear the sheet (desktop twin).
+      setCounts({}); saveStockTake({});
+      return;
+    }
     const changes = (typeof applyStockCounts === "function") ? applyStockCounts(counts) : [];
     if (typeof recordChange === "function" && changes.length) {
       recordChange({
@@ -5801,6 +6584,826 @@ function MStockTake({ ctx }) {
   );
 }
 
+/* =============== แพ็คสินค้า — PICK & PACK (mobile) ===============
+   The packer's screen. Stock is already deducted by the time an order lands here
+   (see the pack helpers in data.jsx), so nothing here moves stock: it tells staff
+   which shelf to walk to, tracks tick-off, and flips picking → packed at the end.
+   The ONE exception is the shortage flow, which repairs a wrong-shelf pick via
+   repointPackLine — a redistribution, not a stock change.
+
+   Two modes share every helper: one order at a time (MPackOrder) and a wave of
+   several orders merged into one walk (MPackWave). */
+
+// Shelf path rendered compactly: position badge + the building/floor it sits in.
+function MPackLoc({ parts, loc }) {
+  if (!loc) return <span style={{ fontSize: 11, color: "var(--danger)" }}>ยังไม่ระบุตำแหน่ง</span>;
+  const p = parts || (typeof locParts === "function" ? locParts(loc) : null);
+  return (
+    <span className="row" style={{ gap: 6, minWidth: 0 }}>
+      <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)", background: "var(--accent-soft)", padding: "1px 7px", borderRadius: 6, flexShrink: 0 }}>
+        {(p && p.pos) || loc}
+      </span>
+      {p && (p.building || p.floor) && (
+        <span style={{ fontSize: 10.5, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {p.building}{p.floor ? " · " + p.floor : ""}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/* One pick line. `picked` / `short` come from the caller's progress record so the
+   same row serves a single order and a wave without owning any state itself. */
+function MPackLine({ line, picked, short, onSet, onShort, sub }) {
+  const full = picked >= line.qty;
+  const tone = short ? "var(--warning)" : full ? "var(--success)" : "var(--fg)";
+  // The split says this shelf holds fewer than the line needs — surface it BEFORE
+  // the walk, which is the whole point of showing shelfQty.
+  const thin = !short && !full && line.shelfQty < line.qty;
+  return (
+    <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)", background: short ? "var(--warning-soft)" : full ? "var(--success-soft)" : undefined }}>
+      <div className="row" style={{ gap: 10 }}>
+        <button
+          onClick={() => onSet(full ? 0 : line.qty)}
+          title={full ? "ยกเลิกการหยิบ" : "หยิบครบตามจำนวน"}
+          style={{ width: 40, height: 40, flexShrink: 0, borderRadius: 10, border: "1.5px solid " + (full ? "var(--success)" : "var(--border)"), background: full ? "var(--success)" : "transparent", color: full ? "#fff" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", padding: 0 }}>
+          {full ? <Icons.Check size={19}/> : short ? <Icons.Warn size={16}/> : null}
+        </button>
+        <ProductImageThumb sku={line.sku} size={34} radius={7}/>
+        <div className="m-row-main" style={{ minWidth: 0 }}>
+          <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: tone, textDecoration: full ? "line-through" : "none" }}>{line.name}</div>
+          <div className="m-row-sub mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{line.sku}</div>
+        </div>
+        <span className="tnum" style={{ fontSize: 15, fontWeight: 700, flexShrink: 0, color: tone }}>{picked}/{line.qty}</span>
+      </div>
+
+      <div className="row" style={{ gap: 8, marginTop: 8, justifyContent: "space-between" }}>
+        <MPackLoc parts={line.parts} loc={line.loc}/>
+        <div className="qty-stepper" style={{ flexShrink: 0 }}>
+          <button onClick={() => onSet(Math.max(0, picked - 1))} disabled={picked <= 0}>−</button>
+          <input type="number" inputMode="numeric" value={picked || ""} placeholder="0"
+                 onChange={e => onSet(Math.max(0, Math.min(line.qty, parseInt(e.target.value || "0", 10) || 0)))}/>
+          <button onClick={() => onSet(Math.min(line.qty, picked + 1))} disabled={full}>+</button>
+        </div>
+      </div>
+
+      {sub}
+
+      {(thin || short) && (
+        <div className="row" style={{ gap: 8, marginTop: 8, justifyContent: "space-between" }}>
+          <span style={{ fontSize: 11, color: short ? "var(--warning)" : "var(--danger)", flex: 1, minWidth: 0 }}>
+            {short ? "บันทึกว่าของขาด: " + short : `ตำแหน่งนี้มีในระบบ ${line.shelfQty} ชิ้น (ต้องใช้ ${line.qty})`}
+          </span>
+          <button className="btn btn-sm" style={{ flexShrink: 0, fontSize: 11 }} onClick={onShort}>หาที่อื่น</button>
+        </div>
+      )}
+      {/* Secondary escape hatch, but still a real thumb target on a phone. */}
+      {!thin && !short && !full && (
+        <button onClick={onShort} style={{ marginTop: 2, background: "none", border: "none", padding: "9px 2px", color: "var(--muted)", fontSize: 11, textDecoration: "underline", cursor: "pointer", textAlign: "left" }}>
+          หยิบไม่ครบ / ไม่พบของที่ตำแหน่งนี้
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* Shortage resolution. Two honest outcomes:
+   1. The pieces are on another shelf → repointPackLine repairs the recorded
+      split (the sale debited the wrong position) and the line completes.
+   2. They genuinely aren't in the building → record the shortage; the order can
+      still be finished, and the audit trail points at ปรับสต็อก. */
+function MPackShortSheet({ line, picked, onClose, onResolve, pushToast }) {
+  const [busy, setBusy] = useStateM(false);
+  const missing = Math.max(0, line.qty - picked);
+  const alts = useMemoM(() => (typeof packAltPositions === "function") ? packAltPositions(line.sku, line.loc) : [], [line.sku, line.loc]);
+
+  const takeFrom = async (alt) => {
+    if (busy) return;
+    setBusy(true);
+    const want = Math.min(missing, alt.qty);
+    const res = (typeof repointPackLine === "function")
+      ? await repointPackLine(line.sku, line.loc, alt.loc, want)
+      : { ok: false, error: "ไม่พร้อมใช้งาน" };
+    setBusy(false);
+    if (!res.ok) { pushToast(res.error || "ย้ายตำแหน่งไม่สำเร็จ"); return; }
+    onResolve({ picked: picked + want, short: res.shortfall > 0 ? `ขาด ${res.shortfall} ชิ้น` : "", movedFrom: alt.loc, moved: want });
+    pushToast(res.skipped
+      ? `หยิบจาก ${(locParts(alt.loc) || {}).pos || alt.loc} แล้ว`
+      : `ย้าย ${want} ชิ้นไปที่ ${(locParts(alt.loc) || {}).pos || alt.loc} แล้ว${res.shortfall > 0 ? ` — ยังขาด ${res.shortfall}` : ""}`);
+    onClose();
+  };
+
+  const markShort = (reason) => {
+    onResolve({ picked, short: reason });
+    pushToast(`บันทึกว่าของขาด ${missing} ชิ้น — ตรวจนับ ${line.sku} อีกครั้ง`);
+    onClose();
+  };
+
+  return (
+    <>
+      <div className="m-sheet-backdrop" onClick={onClose}/>
+      <div className="m-sheet" style={{ maxHeight: "80%" }}>
+        <div className="m-sheet-grabber"/>
+        <div className="m-sheet-head">
+          <div style={{ minWidth: 0 }}>
+            <h3 style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{line.name}</h3>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+              <span className="mono">{line.sku}</span> · ยังขาด {missing} ชิ้น
+            </div>
+          </div>
+          <button className="m-action" onClick={onClose}><Icons.X size={14}/></button>
+        </div>
+        <div className="m-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ padding: "10px 12px", borderRadius: 10, background: "var(--surface-2)", fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
+            ระบบตัดของออกจาก <strong style={{ color: "var(--fg)" }}>{(line.parts && line.parts.pos) || line.loc || "—"}</strong> ไปแล้ว
+            ถ้าหยิบจากตำแหน่งอื่น ระบบจะแก้จำนวนตามตำแหน่งให้ตรงกับของจริง
+          </div>
+
+          <div>
+            <div className="m-section-label" style={{ padding: "0 2px 6px" }}>ตำแหน่งอื่นที่มีสินค้านี้ ({alts.length})</div>
+            {alts.length === 0 && (
+              <div style={{ padding: "14px 12px", textAlign: "center", color: "var(--muted)", fontSize: 12, background: "var(--surface-2)", borderRadius: 10 }}>
+                ไม่มีตำแหน่งอื่นที่บันทึกว่ามีสินค้านี้
+              </div>
+            )}
+            <div className="m-list">
+              {alts.map(alt => {
+                const ap = (typeof locParts === "function") ? locParts(alt.loc) : null;
+                const can = Math.min(missing, alt.qty);
+                return (
+                  <button key={alt.loc} className="m-row" disabled={busy} onClick={() => takeFrom(alt)}>
+                    <div className="m-row-main">
+                      <div className="m-row-title" style={{ fontSize: 13 }}>{(ap && ap.pos) || alt.loc}</div>
+                      <div className="m-row-sub">{ap ? `${ap.building}${ap.floor ? " · " + ap.floor : ""}` : ""} · มี {alt.qty} ชิ้น</div>
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", flexShrink: 0 }}>หยิบ {can}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+        <div className="m-sheet-foot" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <button className="m-btn-big" style={{ marginBottom: 0, background: "var(--warning-soft)", color: "var(--warning)", border: "1px solid var(--warning)" }} onClick={() => markShort("ไม่พบของที่ตำแหน่ง")}>
+            <Icons.Warn size={16}/> ไม่พบของ — บันทึกว่าขาด {missing} ชิ้น
+          </button>
+          <button className="m-btn-big outline" style={{ marginBottom: 0 }} onClick={onClose}>ยกเลิก</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* Queue of orders waiting to be packed. Doubles as the wave builder: tick several
+   orders and start one merged walk. */
+function MPack({ ctx }) {
+  const [tick, setTick] = useStateM(0);
+  const [selecting, setSelecting] = useStateM(false);
+  const [sel, setSel] = useStateM({});
+
+  useEffectM(() => {
+    const refresh = () => setTick(t => t + 1);
+    window.addEventListener("ims-orders-change", refresh);
+    window.addEventListener("ims-labels-change", refresh);
+    window.addEventListener("ims-pack-change", refresh);
+    window.addEventListener("ims-products-change", refresh);
+    return () => {
+      window.removeEventListener("ims-orders-change", refresh);
+      window.removeEventListener("ims-labels-change", refresh);
+      window.removeEventListener("ims-pack-change", refresh);
+      window.removeEventListener("ims-products-change", refresh);
+    };
+  }, []);
+
+  const orders = useMemoM(() => (typeof packQueue === "function") ? packQueue() : [], [tick]);
+  const progress = useMemoM(() => (typeof loadPackProgress === "function") ? loadPackProgress() : {}, [tick]);
+
+  // Waves still open, so a picker who backgrounded the app can rejoin one.
+  const waves = useMemoM(() => Object.keys(progress)
+    .filter(k => k.indexOf("batch:") === 0)
+    .map(k => ({ id: k, rec: progress[k] })), [progress]);
+
+  const rows = useMemoM(() => orders.map(o => {
+    const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
+    const totals = (typeof packLineTotals === "function") ? packLineTotals(lines, progress[o.id]) : { pct: 0, need: 0, lineCount: 0 };
+    const shelves = new Set(lines.map(l => l.loc).filter(Boolean));
+    return { o, lines, totals, shelves: shelves.size, started: !!progress[o.id] };
+  }), [orders, progress]);
+
+  const selIds = Object.keys(sel).filter(id => sel[id]);
+  const totalPieces = rows.reduce((s, r) => s + r.totals.need, 0);
+  const inProgress = rows.filter(r => r.started).length;
+
+  const clear = () => { setSel({}); setSelecting(false); };
+
+  const startWave = () => {
+    if (selIds.length < 2) { ctx.pushToast("เลือกอย่างน้อย 2 ออร์เดอร์เพื่อหยิบรวม"); return; }
+    const id = (typeof newPackBatchId === "function") ? newPackBatchId() : "batch:" + Date.now();
+    const who = (ctx.user && ctx.user.name) || "";
+    savePackEntry(id, { done: {}, short: {}, by: who, startedAt: new Date().toISOString(), orderIds: selIds, stage: "pick" });
+    clear();
+    ctx.push("pack-wave", { batchId: id });
+  };
+
+  return (
+    <>
+      <div className="m-topbar">
+        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+        <div className="m-title-sub">แพ็คสินค้า</div>
+        <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)} title="หยิบรวมหลายออร์เดอร์">
+          {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
+        </button>
+      </div>
+      <div className="m-content">
+        <div className="m-kpi-row">
+          <div className="m-kpi"><div className="m-kpi-label">รอแพ็ค</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{rows.length}</div></div>
+          <div className="m-kpi"><div className="m-kpi-label">รวมชิ้น</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{totalPieces}</div></div>
+          <div className="m-kpi"><div className="m-kpi-label">กำลังแพ็ค</div><div className="m-kpi-value" style={{ fontSize: 18, color: inProgress ? "var(--info)" : "var(--fg)" }}>{inProgress}</div></div>
+        </div>
+
+        {waves.length > 0 && !selecting && (
+          <>
+            <div className="m-section-label" style={{ padding: "8px 4px" }}>หยิบรวมที่ค้างอยู่</div>
+            <div className="m-list" style={{ marginBottom: 12 }}>
+              {waves.map(w => (
+                <button key={w.id} className="m-row" onClick={() => ctx.push("pack-wave", { batchId: w.id })}>
+                  <div className="m-row-thumb" style={{ background: "var(--info-soft)", color: "var(--info)" }}><Icons.Box size={16}/></div>
+                  <div className="m-row-main">
+                    <div className="m-row-title">หยิบรวม {(w.rec.orderIds || []).length} ออร์เดอร์</div>
+                    <div className="m-row-sub">{w.rec.stage === "sort" ? "ขั้นตอน: แยกลงออร์เดอร์" : "ขั้นตอน: เดินหยิบ"}{w.rec.by ? " · " + w.rec.by : ""}</div>
+                  </div>
+                  <Icons.Chev size={14} className="m-row-chev"/>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {selecting && (
+          <div style={{ padding: "10px 12px", borderRadius: 10, background: "var(--accent-soft)", color: "var(--accent)", fontSize: 12, marginBottom: 10 }}>
+            เลือกออร์เดอร์ที่จะเดินหยิบรวมรอบเดียว แล้วกดปุ่มด้านล่าง
+          </div>
+        )}
+
+        <div className="m-list">
+          {rows.map(r => (
+            <button key={r.o.id} className="m-row" onClick={() => {
+              if (selecting) { setSel(prev => { const n = { ...prev }; if (n[r.o.id]) delete n[r.o.id]; else n[r.o.id] = true; return n; }); return; }
+              ctx.push("pack-order", { id: r.o.id });
+            }}>
+              {selecting && (
+                <div style={{ width: 22, height: 22, flexShrink: 0, borderRadius: 6, border: "1.5px solid " + (sel[r.o.id] ? "var(--accent)" : "var(--border)"), background: sel[r.o.id] ? "var(--accent)" : "transparent", color: "#fff", display: "grid", placeItems: "center" }}>
+                  {sel[r.o.id] ? <Icons.Check size={13}/> : null}
+                </div>
+              )}
+              <div className="m-row-main">
+                <div className="m-row-title mono" style={{ fontSize: 13 }}>{r.o.id}</div>
+                <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {r.o.customer || "—"} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
+                </div>
+                {r.started && (
+                  <div className="row" style={{ gap: 6, marginTop: 5 }}>
+                    <div className="prog" style={{ flex: 1, height: 4 }}><span style={{ width: r.totals.pct + "%" }}/></div>
+                    <span className="tnum" style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>{r.totals.got}/{r.totals.need}</span>
+                  </div>
+                )}
+              </div>
+              {!selecting && <Icons.Chev size={14} className="m-row-chev"/>}
+            </button>
+          ))}
+          {rows.length === 0 && (
+            <div style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+              <Icons.Check size={26} style={{ marginBottom: 8, color: "var(--success)" }}/>
+              <div>ไม่มีออร์เดอร์รอแพ็ค</div>
+              <div style={{ fontSize: 11, marginTop: 4 }}>ออร์เดอร์จะเข้ามาที่นี่หลังตัดสต็อก</div>
+            </div>
+          )}
+        </div>
+
+        {selecting && selIds.length > 0 && (
+          <button className="m-btn-big dark" style={{ marginTop: 14 }} onClick={startWave}>
+            <Icons.Box size={18}/> เริ่มหยิบรวม {selIds.length} ออร์เดอร์
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+/* Per-order pack station. */
+function MPackOrder({ ctx }) {
+  const orderId = (ctx.route.params && ctx.route.params.id) || "";
+  const [tick, setTick] = useStateM(0);
+  const [entry, setEntry] = useStateM(() => (typeof packEntry === "function") ? packEntry(orderId) : { done: {}, short: {} });
+  const [camOpen, setCamOpen] = useStateM(false);
+  const [shortLine, setShortLine] = useStateM(null);
+
+  useEffectM(() => {
+    const refresh = () => { setTick(t => t + 1); setEntry(packEntry(orderId)); };
+    window.addEventListener("ims-pack-change", refresh);
+    window.addEventListener("ims-orders-change", refresh);
+    window.addEventListener("ims-products-change", refresh);
+    return () => {
+      window.removeEventListener("ims-pack-change", refresh);
+      window.removeEventListener("ims-orders-change", refresh);
+      window.removeEventListener("ims-products-change", refresh);
+    };
+  }, [orderId]);
+  useEffectM(() => () => setCamOpen(false), []);
+
+  const order = useMemoM(() => {
+    const all = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+    return (all || []).find(o => o.id === orderId) || null;
+  }, [orderId, tick]);
+  const lines = useMemoM(() => (order && typeof packLinesForOrder === "function") ? packLinesForOrder(order) : [], [order, tick]);
+  const totals = useMemoM(() => packLineTotals(lines, entry), [lines, entry]);
+
+  // Every write goes through here so `by`/`startedAt` are stamped once and the
+  // record we hand to savePackEntry is always complete (shallow cloud merge).
+  const write = (done, short) => {
+    const next = {
+      done: done || entry.done,
+      short: short || entry.short,
+      by: entry.by || (ctx.user && ctx.user.name) || "",
+      startedAt: entry.startedAt || new Date().toISOString(),
+      orderIds: null, stage: ""
+    };
+    setEntry(next);
+    savePackEntry(orderId, next);
+  };
+  const setPicked = (line, v) => {
+    const done = { ...entry.done };
+    const n = Math.max(0, Math.min(line.qty, Math.round(Number(v) || 0)));
+    if (n) done[line.key] = n; else delete done[line.key];
+    // Reaching the full qty resolves any recorded shortage for that line.
+    const short = { ...entry.short };
+    if (n >= line.qty && short[line.key]) delete short[line.key];
+    write(done, short);
+  };
+  const resolveShort = (line, out) => {
+    const done = { ...entry.done };
+    const short = { ...entry.short };
+    const n = Math.max(0, Math.min(line.qty, Math.round(Number(out.picked) || 0)));
+    if (n) done[line.key] = n; else delete done[line.key];
+    if (out.short) short[line.key] = out.short; else delete short[line.key];
+    write(done, short);
+  };
+
+  const onScan = (code) => {
+    const c = String(code || "").trim();
+    if (!c) return;
+    const hits = lines.filter(l => l.sku.toLowerCase() === c.toLowerCase());
+    if (!hits.length) {
+      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      ctx.pushToast("ไม่อยู่ในออร์เดอร์นี้: " + c);
+      return;
+    }
+    // Same sku on two shelves → fill the first line that still needs pieces.
+    const target = hits.find(l => (entry.done[l.key] || 0) < l.qty) || hits[0];
+    const cur = entry.done[target.key] || 0;
+    if (cur >= target.qty) {
+      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      ctx.pushToast(`${target.sku} หยิบครบแล้ว (${target.qty})`);
+      return;
+    }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setPicked(target, cur + 1);
+    ctx.pushToast(`${target.sku} · ${cur + 1}/${target.qty} · ${(target.parts && target.parts.pos) || target.loc || "—"}`);
+  };
+
+  const finish = () => {
+    if (!order) return;
+    const shortList = Object.keys(entry.short || {});
+    const msg = totals.complete
+      ? `ยืนยันแพ็คเสร็จ ${order.id}?`
+      : `ยังหยิบไม่ครบ (${totals.got}/${totals.need} ชิ้น)\nยืนยันแพ็คเสร็จ ${order.id}?`;
+    if (!confirm(msg)) return;
+    const who = (ctx.user && ctx.user.name) || "";
+    if (typeof setOrderField === "function") {
+      setOrderField(order.id, { status: "packed", packedAt: new Date().toISOString(), packedBy: who });
+    }
+    if (typeof recordChange === "function") {
+      recordChange({
+        entity: "order", entityId: order.id, action: "update",
+        summary: `แพ็คสินค้าเสร็จ ${order.id} (${totals.got}/${totals.need} ชิ้น)`,
+        count: totals.lineCount,
+        changes: [{ label: "สถานะ", from: "กำลังจัดเตรียม", to: "พร้อมส่ง" }].concat(
+          shortList.length ? [{ label: "ของขาด", to: shortList.length + " รายการ" }] : []
+        ),
+        note: shortList.length ? "ของขาด: " + shortList.map(k => k.split("|")[0]).join(", ") : ""
+      });
+    }
+    if (typeof clearPackEntry === "function") clearPackEntry(order.id);
+    ctx.pushToast(shortList.length
+      ? `แพ็คเสร็จ ${order.id} — มีของขาด ${shortList.length} รายการ ตรวจนับด้วย`
+      : `แพ็คเสร็จ ${order.id} · พร้อมส่ง`);
+    ctx.back();
+  };
+
+  if (!order) {
+    return (
+      <>
+        <div className="m-topbar">
+          <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+          <div className="m-title-sub">แพ็คสินค้า</div>
+        </div>
+        <div className="m-content" style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่พบออร์เดอร์นี้</div>
+      </>
+    );
+  }
+
+  // Group the (already shelf-sorted) lines so one shelf is one stop on the walk.
+  const groups = [];
+  lines.forEach(l => {
+    const last = groups[groups.length - 1];
+    if (last && last.loc === l.loc) last.lines.push(l);
+    else groups.push({ loc: l.loc, parts: l.parts, lines: [l] });
+  });
+
+  return (
+    <>
+      <div className="m-topbar">
+        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+        <div className="m-title-sub mono">{order.id}</div>
+        <button className={"m-action" + (camOpen ? " accent" : "")} onClick={() => setCamOpen(v => !v)} title="สแกนเพื่อหยิบ"><Icons.Camera size={15}/></button>
+      </div>
+      <div className="m-content">
+        <div className="m-card" style={{ padding: 14 }}>
+          <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{order.customer || "—"}</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                {order.channel || "—"}{order.date ? " · " + order.date : ""}{order.ts ? " " + order.ts : ""}
+              </div>
+            </div>
+            <span className="tnum" style={{ fontSize: 20, fontWeight: 700, flexShrink: 0, color: totals.complete ? "var(--success)" : "var(--accent)" }}>
+              {totals.got}/{totals.need}
+            </span>
+          </div>
+          <div className="prog" style={{ marginTop: 10 }}><span style={{ width: totals.pct + "%" }}/></div>
+          <div className="row" style={{ gap: 10, marginTop: 8, fontSize: 11, color: "var(--muted)" }}>
+            <span>{totals.lineDone}/{totals.lineCount} รายการ</span>
+            <span>·</span>
+            <span>{groups.length} ตำแหน่ง</span>
+            {totals.shortLines > 0 && <><span>·</span><span style={{ color: "var(--warning)" }}>ของขาด {totals.shortLines}</span></>}
+          </div>
+          {order.note && <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 11.5 }}>โน้ต: {order.note}</div>}
+        </div>
+
+        {/* ใบปะหน้า + ที่อยู่ + (owner) ยกเลิก/คืนสต็อก — pack-docs.jsx */}
+        {typeof PackShipDocs === "function" && <PackShipDocs order={order} lines={lines} pushToast={ctx.pushToast} mobile onCancelled={ctx.back}/>}
+
+        {camOpen && <CameraScanner onScan={onScan} onClose={() => setCamOpen(false)}/>}
+
+        {lines.length === 0 && (
+          <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12.5, background: "var(--surface-2)", borderRadius: 10, lineHeight: 1.7 }}>
+            ออร์เดอร์นี้ไม่มีรายการสินค้าที่ระบุ SKU<br/>
+            <span style={{ fontSize: 11 }}>(ออร์เดอร์เก่าหรือฉลากที่พิมพ์ชื่อสินค้าเอง)</span>
+          </div>
+        )}
+
+        {groups.map((g, gi) => (
+          <div key={g.loc + gi} style={{ marginTop: 12 }}>
+            <div className="row" style={{ gap: 8, padding: "0 2px 6px", justifyContent: "space-between" }}>
+              <MPackLoc parts={g.parts} loc={g.loc}/>
+              <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>{g.lines.length} รายการ</span>
+            </div>
+            <div className="m-list">
+              {g.lines.map(l => (
+                <MPackLine key={l.key} line={l}
+                  picked={entry.done[l.key] || 0}
+                  short={entry.short[l.key] || ""}
+                  onSet={v => setPicked(l, v)}
+                  onShort={() => setShortLine(l)}/>
+              ))}
+            </div>
+          </div>
+        ))}
+
+        {lines.length > 0 && (
+          <button className={"m-btn-big " + (totals.complete ? "success" : "outline")} style={{ marginTop: 16 }} onClick={finish}>
+            <Icons.Check size={18}/> {totals.complete ? "แพ็คเสร็จ — พร้อมส่ง" : `แพ็คเสร็จทั้งที่ยังขาด (${totals.remaining} ชิ้น)`}
+          </button>
+        )}
+      </div>
+
+      {shortLine && (
+        <MPackShortSheet line={shortLine} picked={entry.done[shortLine.key] || 0}
+          pushToast={ctx.pushToast}
+          onClose={() => setShortLine(null)}
+          onResolve={out => resolveShort(shortLine, out)}/>
+      )}
+    </>
+  );
+}
+
+/* Wave (batch) picking: several orders merged into ONE shelf-sorted walk, then a
+   sort stage that splits the pile into parcels.
+
+   Stage 1 "pick" ticks the MERGED line (sku, shelf) across the whole wave.
+   Stage 2 "sort" is a per-ORDER checklist — the tick that matters there is "this
+   parcel is complete", not another per-piece count, so it is stored in the same
+   `done` map under a "sort:<orderId>" key. Those keys can never collide with a
+   line key ("sku|loc") and packLineTotals only ever looks up keys it was given,
+   so the extra entries are inert. Finishing marks ONLY the ticked orders packed;
+   anything untouched drops back into the queue rather than being quietly shipped. */
+function MPackWave({ ctx }) {
+  const batchId = (ctx.route.params && ctx.route.params.batchId) || "";
+  const [tick, setTick] = useStateM(0);
+  const [entry, setEntry] = useStateM(() => (typeof packEntry === "function") ? packEntry(batchId) : { done: {}, short: {}, orderIds: [], stage: "pick" });
+  const [camOpen, setCamOpen] = useStateM(false);
+  const [shortLine, setShortLine] = useStateM(null);
+  const [expanded, setExpanded] = useStateM({});
+
+  useEffectM(() => {
+    const refresh = () => { setTick(t => t + 1); setEntry(packEntry(batchId)); };
+    window.addEventListener("ims-pack-change", refresh);
+    window.addEventListener("ims-orders-change", refresh);
+    window.addEventListener("ims-products-change", refresh);
+    return () => {
+      window.removeEventListener("ims-pack-change", refresh);
+      window.removeEventListener("ims-orders-change", refresh);
+      window.removeEventListener("ims-products-change", refresh);
+    };
+  }, [batchId]);
+  useEffectM(() => () => setCamOpen(false), []);
+
+  const stage = entry.stage === "sort" ? "sort" : "pick";
+
+  /* Only orders still waiting to be packed belong in the wave — another device may
+     have finished one while this walk was in progress. `dropped` tells the picker
+     instead of silently shrinking the list under them. */
+  const orders = useMemoM(() => {
+    const all = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+    const ids = entry.orderIds || [];
+    return ids.map(id => (all || []).find(o => o.id === id)).filter(o => o && o.status === "picking");
+  }, [entry.orderIds, tick]);
+  const dropped = (entry.orderIds || []).length - orders.length;
+
+  const lines = useMemoM(() => (typeof packLinesForOrders === "function") ? packLinesForOrders(orders) : [], [orders, tick]);
+  const totals = useMemoM(() => packLineTotals(lines, entry), [lines, entry]);
+
+  const write = (done, short, nextStage) => {
+    const next = {
+      done: done || entry.done,
+      short: short || entry.short,
+      by: entry.by || (ctx.user && ctx.user.name) || "",
+      startedAt: entry.startedAt || new Date().toISOString(),
+      orderIds: entry.orderIds || [],
+      stage: nextStage || stage
+    };
+    setEntry(next);
+    savePackEntry(batchId, next);
+  };
+  const setPicked = (line, v) => {
+    const done = { ...entry.done };
+    const n = Math.max(0, Math.min(line.qty, Math.round(Number(v) || 0)));
+    if (n) done[line.key] = n; else delete done[line.key];
+    const short = { ...entry.short };
+    if (n >= line.qty && short[line.key]) delete short[line.key];
+    write(done, short);
+  };
+  const resolveShort = (line, out) => {
+    const done = { ...entry.done };
+    const short = { ...entry.short };
+    const n = Math.max(0, Math.min(line.qty, Math.round(Number(out.picked) || 0)));
+    if (n) done[line.key] = n; else delete done[line.key];
+    if (out.short) short[line.key] = out.short; else delete short[line.key];
+    write(done, short);
+  };
+  const toggleSorted = (orderId) => {
+    const done = { ...entry.done };
+    const k = "sort:" + orderId;
+    if (done[k]) delete done[k]; else done[k] = 1;
+    write(done, null);
+  };
+
+  const onScan = (code) => {
+    const c = String(code || "").trim();
+    if (!c) return;
+    const hits = lines.filter(l => l.sku.toLowerCase() === c.toLowerCase());
+    if (!hits.length) {
+      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      ctx.pushToast("ไม่อยู่ในรอบหยิบนี้: " + c);
+      return;
+    }
+    const target = hits.find(l => (entry.done[l.key] || 0) < l.qty) || hits[0];
+    const cur = entry.done[target.key] || 0;
+    if (cur >= target.qty) {
+      if (typeof playScanErrorBeep === "function") playScanErrorBeep();
+      ctx.pushToast(`${target.sku} หยิบครบแล้ว (${target.qty})`);
+      return;
+    }
+    if (typeof playScanBeep === "function") playScanBeep();
+    setPicked(target, cur + 1);
+    ctx.pushToast(`${target.sku} · ${cur + 1}/${target.qty} · ${(target.parts && target.parts.pos) || target.loc || "—"}`);
+  };
+
+  const sortedIds = orders.filter(o => entry.done["sort:" + o.id]).map(o => o.id);
+
+  const closeWave = () => {
+    if (!sortedIds.length) { ctx.pushToast("ยังไม่มีออร์เดอร์ที่แยกครบ"); return; }
+    const rest = orders.length - sortedIds.length;
+    if (!confirm(`ปิดงานหยิบรวมนี้?\nพร้อมส่ง ${sortedIds.length} ออร์เดอร์${rest ? `\nอีก ${rest} ออร์เดอร์จะกลับไปรอแพ็ค` : ""}`)) return;
+    const who = (ctx.user && ctx.user.name) || "";
+    const at = new Date().toISOString();
+    sortedIds.forEach(id => {
+      if (typeof setOrderField === "function") setOrderField(id, { status: "packed", packedAt: at, packedBy: who });
+    });
+    if (typeof recordChange === "function") {
+      recordChange({
+        entity: "order", action: "bulk-update",
+        summary: `แพ็คสินค้าแบบหยิบรวม — พร้อมส่ง ${sortedIds.length} ออร์เดอร์ (${totals.got} ชิ้น)`,
+        count: sortedIds.length,
+        changes: [{ label: "สถานะ", from: "กำลังจัดเตรียม", to: "พร้อมส่ง" }],
+        note: "ออร์เดอร์: " + sortedIds.join(", ")
+      });
+    }
+    if (typeof clearPackEntry === "function") clearPackEntry(batchId);
+    ctx.pushToast(`ปิดงานแล้ว — พร้อมส่ง ${sortedIds.length} ออร์เดอร์`);
+    ctx.back();
+  };
+
+  const abandon = () => {
+    if (!confirm("ยกเลิกรอบหยิบรวมนี้?\nออร์เดอร์ทั้งหมดจะกลับไปรอแพ็ค (ที่ติ๊กไว้จะหาย)")) return;
+    if (typeof clearPackEntry === "function") clearPackEntry(batchId);
+    ctx.pushToast("ยกเลิกรอบหยิบรวมแล้ว");
+    ctx.back();
+  };
+
+  if (!entry.orderIds || !entry.orderIds.length) {
+    return (
+      <>
+        <div className="m-topbar">
+          <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+          <div className="m-title-sub">หยิบรวม</div>
+        </div>
+        <div className="m-content" style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่พบรอบหยิบรวมนี้ (อาจถูกปิดไปแล้ว)</div>
+      </>
+    );
+  }
+
+  const groups = [];
+  lines.forEach(l => {
+    const last = groups[groups.length - 1];
+    if (last && last.loc === l.loc) last.lines.push(l);
+    else groups.push({ loc: l.loc, parts: l.parts, lines: [l] });
+  });
+
+  return (
+    <>
+      <div className="m-topbar">
+        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+        <div className="m-title-sub">หยิบรวม {orders.length} ออร์เดอร์</div>
+        {stage === "pick" && <button className={"m-action" + (camOpen ? " accent" : "")} onClick={() => setCamOpen(v => !v)} title="สแกนเพื่อหยิบ"><Icons.Camera size={15}/></button>}
+        <button className="m-action" onClick={abandon} title="ยกเลิกรอบนี้"><Icons.Trash size={14}/></button>
+      </div>
+      <div className="m-content">
+        {/* Stage indicator */}
+        <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+          {[{ id: "pick", label: "1 · เดินหยิบ" }, { id: "sort", label: "2 · แยกลงออร์เดอร์" }].map(s => (
+            <div key={s.id} style={{ flex: 1, padding: "8px 10px", borderRadius: 10, textAlign: "center", fontSize: 11.5, fontWeight: 600,
+              background: stage === s.id ? "var(--accent)" : "var(--surface-2)",
+              color: stage === s.id ? "#fff" : "var(--muted)",
+              border: "1px solid " + (stage === s.id ? "var(--accent)" : "var(--border)") }}>
+              {s.label}
+            </div>
+          ))}
+        </div>
+
+        {dropped > 0 && (
+          <div style={{ padding: "10px 12px", borderRadius: 10, background: "var(--warning-soft)", color: "var(--warning)", fontSize: 11.5, marginBottom: 10 }}>
+            {dropped} ออร์เดอร์ในรอบนี้ถูกแพ็คจากเครื่องอื่นแล้ว — ตัดออกจากรายการให้แล้ว
+          </div>
+        )}
+
+        {stage === "pick" && (
+          <>
+            <div className="m-card" style={{ padding: 14 }}>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>หยิบแล้ว</span>
+                <span className="tnum" style={{ fontSize: 20, fontWeight: 700, color: totals.complete ? "var(--success)" : "var(--accent)" }}>{totals.got}/{totals.need}</span>
+              </div>
+              <div className="prog" style={{ marginTop: 10 }}><span style={{ width: totals.pct + "%" }}/></div>
+              <div className="row" style={{ gap: 10, marginTop: 8, fontSize: 11, color: "var(--muted)" }}>
+                <span>{groups.length} ตำแหน่ง</span><span>·</span><span>{totals.lineCount} รายการ</span>
+                {totals.shortLines > 0 && <><span>·</span><span style={{ color: "var(--warning)" }}>ของขาด {totals.shortLines}</span></>}
+              </div>
+            </div>
+
+            {camOpen && <CameraScanner onScan={onScan} onClose={() => setCamOpen(false)}/>}
+
+            {groups.map((g, gi) => (
+              <div key={g.loc + gi} style={{ marginTop: 12 }}>
+                <div className="row" style={{ gap: 8, padding: "0 2px 6px", justifyContent: "space-between" }}>
+                  <MPackLoc parts={g.parts} loc={g.loc}/>
+                  <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>{g.lines.length} รายการ</span>
+                </div>
+                <div className="m-list">
+                  {g.lines.map(l => (
+                    <MPackLine key={l.key} line={l}
+                      picked={entry.done[l.key] || 0}
+                      short={entry.short[l.key] || ""}
+                      onSet={v => setPicked(l, v)}
+                      onShort={() => setShortLine(l)}
+                      sub={
+                        <div style={{ marginTop: 8 }}>
+                          <button onClick={() => setExpanded(p => { const n = { ...p }; if (n[l.key]) delete n[l.key]; else n[l.key] = true; return n; })}
+                            style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", fontSize: 11, cursor: "pointer" }}>
+                            {expanded[l.key] ? "ซ่อน" : "ดู"} {l.per.length} ออร์เดอร์ที่ใช้ชิ้นนี้
+                          </button>
+                          {expanded[l.key] && (
+                            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                              {l.per.map(pr => {
+                                const o = orders.find(x => x.id === pr.orderId);
+                                return (
+                                  <div key={pr.orderId} className="row" style={{ justifyContent: "space-between", gap: 8, fontSize: 11, color: "var(--muted)" }}>
+                                    <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pr.orderId}{o && o.customer ? " · " + o.customer : ""}</span>
+                                    <span className="tnum" style={{ flexShrink: 0, fontWeight: 600 }}>×{pr.qty}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      }/>
+                  ))}
+                </div>
+              </div>
+            ))}
+
+            <button className={"m-btn-big " + (totals.complete ? "dark" : "outline")} style={{ marginTop: 16 }}
+              onClick={() => {
+                if (!totals.complete && !confirm(`ยังหยิบไม่ครบ (${totals.got}/${totals.need} ชิ้น)\nไปขั้นตอนแยกลงออร์เดอร์เลยไหม?`)) return;
+                write(null, null, "sort");
+              }}>
+              แยกลงออร์เดอร์ <Icons.Chev size={16}/>
+            </button>
+          </>
+        )}
+
+        {stage === "sort" && (
+          <>
+            <div style={{ padding: "10px 12px", borderRadius: 10, background: "var(--surface-2)", fontSize: 12, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
+              แบ่งของที่หยิบมาลงแต่ละออร์เดอร์ แล้วติ๊กออร์เดอร์ที่แยกครบ
+              <br/><span style={{ fontSize: 11 }}>ออร์เดอร์ที่ไม่ติ๊กจะกลับไปรอแพ็ค</span>
+            </div>
+
+            {orders.map(o => {
+              const oLines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
+              const on = !!entry.done["sort:" + o.id];
+              return (
+                <div key={o.id} className="m-card" style={{ padding: 0, overflow: "hidden", marginBottom: 10, border: "1px solid " + (on ? "var(--success)" : "var(--border)") }}>
+                  <button onClick={() => toggleSorted(o.id)}
+                    style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: on ? "var(--success-soft)" : "transparent", border: "none", cursor: "pointer", textAlign: "left", font: "inherit" }}>
+                    <div style={{ width: 24, height: 24, flexShrink: 0, borderRadius: 7, border: "1.5px solid " + (on ? "var(--success)" : "var(--border)"), background: on ? "var(--success)" : "transparent", color: "#fff", display: "grid", placeItems: "center" }}>
+                      {on ? <Icons.Check size={14}/> : null}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{o.id}</div>
+                      <div style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {o.customer || "—"} · {oLines.reduce((s, l) => s + l.qty, 0)} ชิ้น
+                      </div>
+                    </div>
+                  </button>
+                  <div style={{ borderTop: "1px solid var(--border)" }}>
+                    {oLines.map(l => (
+                      <div key={l.key} className="row" style={{ gap: 10, padding: "8px 14px", borderBottom: "1px solid var(--border)" }}>
+                        <ProductImageThumb sku={l.sku} size={28} radius={6}/>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name}</div>
+                          <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{l.sku}</div>
+                        </div>
+                        <span className="tnum" style={{ fontSize: 13, fontWeight: 700, flexShrink: 0 }}>×{l.qty}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+
+            <div className="row" style={{ gap: 8, marginTop: 14 }}>
+              <button className="m-btn-big outline" style={{ flex: 1, marginBottom: 0 }} onClick={() => write(null, null, "pick")}>
+                <Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/> กลับไปหยิบ
+              </button>
+              <button className="m-btn-big success" style={{ flex: 1, marginBottom: 0 }} onClick={closeWave} disabled={!sortedIds.length}>
+                <Icons.Check size={16}/> ปิดงาน ({sortedIds.length})
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {shortLine && (
+        <MPackShortSheet line={shortLine} picked={entry.done[shortLine.key] || 0}
+          pushToast={ctx.pushToast}
+          onClose={() => setShortLine(null)}
+          onResolve={out => resolveShort(shortLine, out)}/>
+      )}
+    </>
+  );
+}
+
 /* =============== EDIT HISTORY / AUDIT LOG (mobile) =============== */
 
 function mFormatTime(iso) {
@@ -5817,16 +7420,46 @@ function MHistory({ ctx }) {
   const [logKey, setLogKey] = useStateM(0);
   const [filter, setFilter] = useStateM("all");
   const [q, setQ] = useStateM("");
+  const [day, setDay] = useStateM(null);          // null = ล่าสุด (ทุกวัน)
+  const [dayRows, setDayRows] = useStateM(null);
+  const [busy, setBusy] = useStateM(false);
 
+  const today = todayIso();
   const log = useMemoM(() => (typeof loadAuditLog === "function" ? loadAuditLog() : []), [logKey]);
   useEffectM(() => {
     const refresh = () => setLogKey(k => k + 1);
     window.addEventListener("ims-audit-change", refresh);
     return () => window.removeEventListener("ims-audit-change", refresh);
   }, []);
+  useEffectM(() => { if (typeof refreshAuditTotal === "function") refreshAuditTotal(); }, []);
 
-  const entts = ["all", "product", "bundle", "order", "user"];
-  const entLabel = { all: "ทั้งหมด", product: "สินค้า", bundle: "ชุดสินค้า", order: "ออร์เดอร์", user: "ผู้ใช้" };
+  // A picked day is one DB query — no paging back through the days between.
+  useEffectM(() => {
+    if (!day) { setDayRows(null); return; }
+    let alive = true;
+    setBusy(true);
+    Promise.resolve(loadAuditDay(day))
+      .then(rows => { if (alive) setDayRows(rows || []); })
+      .catch(() => { if (alive) setDayRows([]); })
+      .then(() => { if (alive) setBusy(false); });
+    return () => { alive = false; };
+  }, [day]);
+
+  const jumpDay = (delta) => {
+    const next = shiftDayKey(day || today, delta);
+    if (next > today) return;
+    setDay(next);
+  };
+
+  const loadMore = async () => {
+    setBusy(true);
+    const got = await loadMoreAuditLog();
+    setBusy(false);
+    if (!got) ctx.pushToast("โหลดครบทุกรายการแล้ว");
+  };
+
+  const entts = ["all", "inbound", "product", "bundle", "order", "user"];
+  const entLabel = { all: "ทั้งหมด", inbound: "รับเข้า", product: "สินค้า", bundle: "ชุดสินค้า", order: "ออร์เดอร์", user: "ผู้ใช้" };
 
   /* Return a handler that opens the record an entry changed, or null when there
      is nothing to open (no entityId, bulk entry, deleted record, or an entity
@@ -5846,15 +7479,19 @@ function MHistory({ ctx }) {
     return null;
   };
 
-  const filtered = log.filter(e => {
-    if (filter !== "all" && e.entity !== filter) return false;
+  const source = day ? (dayRows || []) : log;
+  const filtered = source.filter(e => {
+    // "รับเข้า" = the batch close AND the per-product receive entries.
+    if (filter === "inbound") { if (e.entity !== "inbound" && e.action !== "receive") return false; }
+    else if (filter !== "all" && e.entity !== filter) return false;
     if (q) {
       const ql = q.toLowerCase();
-      const hay = ((e.summary || "") + " " + (e.entityId || "") + " " + (e.user?.name || "")).toLowerCase();
+      const hay = ((e.summary || "") + " " + (e.entityId || "") + " " + (e.user?.name || "") + " " + (e.note || "")).toLowerCase();
       if (!hay.includes(ql)) return false;
     }
     return true;
   });
+  const dayGroups = groupAuditByDay(filtered);
 
   const clearAll = async () => {
     if (!confirm("ล้างประวัติทั้งหมด?")) return;
@@ -5868,6 +7505,9 @@ function MHistory({ ctx }) {
     }
     try { localStorage.removeItem("ims_audit_log"); } catch (e) {}
     window._DB_AUDIT_LOG = [];
+    window._AUDIT_END = true;
+    window._AUDIT_TOTAL = 0;
+    setDay(null); setDayRows(null);
     window.dispatchEvent(new CustomEvent("ims-audit-change"));
     setLogKey(k => k + 1);
     ctx.pushToast("ล้างประวัติแล้ว");
@@ -5886,43 +7526,84 @@ function MHistory({ ctx }) {
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหาในประวัติ..."/>
           {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
         </div>
-        <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
+        <div className="m-chips-scroll" style={{ marginBottom: 10 }}>
           {entts.map(e => (
             <button key={e} className={"m-chip" + (filter === e ? " on" : "")} onClick={() => setFilter(e)}>{entLabel[e]}</button>
           ))}
         </div>
 
-        <div className="m-list">
-          {filtered.map((e, i) => {
-            // Entries that name a record they changed become tappable and open it.
-            const open = openTarget(e);
-            const Row = open ? "button" : "div";
-            return (
-              <Row key={e.id || i} className="m-row"
-                onClick={open || undefined}
-                style={open
-                  ? { alignItems: "flex-start", cursor: "pointer", width: "100%", textAlign: "left", font: "inherit", fontFamily: "inherit" }
-                  : { cursor: "default", alignItems: "flex-start" }}>
-                <div className="m-row-thumb" style={{ background: "var(--surface-2)", color: "var(--fg-2)" }}><Icons.History size={15}/></div>
-                <div className="m-row-main">
-                  <div className="m-row-title" style={{ fontSize: 13, whiteSpace: "normal" }}>{e.summary || (e.entityId ? "แก้ไข " + e.entityId : "เปลี่ยนแปลง")}</div>
-                  {e.changes && e.changes.length > 0 && (
-                    <div className="m-row-sub" style={{ whiteSpace: "normal" }}>{e.changes.map(c => c.label + (c.to ? `: ${c.to}` : "")).join(" · ")}</div>
-                  )}
-                  {e.note && <div className="m-row-sub" style={{ whiteSpace: "normal", fontStyle: "italic" }}>{e.note}</div>}
-                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{mFormatTime(e.ts)} · {e.user?.name || "ระบบ"}</div>
-                </div>
-                {open && <Icons.Chev size={14} style={{ color: "var(--muted)", flexShrink: 0, alignSelf: "center" }}/>}
-              </Row>
-            );
-          })}
-          {filtered.length === 0 && (
-            <div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-              <Icons.History size={22} style={{ opacity: 0.4, marginBottom: 6 }}/>
-              <div>ยังไม่มีประวัติการแก้ไข</div>
-            </div>
-          )}
+        {/* Day picker — ◀ ▶ step one day, the date box jumps to any past day
+            (fetched from the DB, so it isn't limited to what's cached). */}
+        <div className="row" style={{ gap: 6, marginBottom: 10, alignItems: "center" }}>
+          <button className="m-chip" onClick={() => jumpDay(-1)} style={{ padding: "0 10px" }}>
+            <Icons.Chev size={12} style={{ transform: "rotate(180deg)" }}/>
+          </button>
+          <input className="m-input" type="date" value={day || ""} max={today}
+            onChange={e => setDay(e.target.value || null)}
+            style={{ flex: 1, minWidth: 0, height: 34, fontSize: 13 }}/>
+          <button className="m-chip" onClick={() => jumpDay(1)} disabled={!day || day >= today} style={{ padding: "0 10px", opacity: (!day || day >= today) ? 0.4 : 1 }}>
+            <Icons.Chev size={12}/>
+          </button>
+          {day && <button className="m-chip on" onClick={() => setDay(null)}>ล่าสุด</button>}
         </div>
+        <div style={{ fontSize: 11, color: "var(--muted)", padding: "0 2px 8px" }}>
+          {busy ? "กำลังโหลด…"
+            : day ? `${thaiDayLabel(day)} · ${filtered.length} รายการ`
+            : `แสดง ${filtered.length} รายการ${auditTotal(log.length) != null ? " จากทั้งหมด " + auditTotal(log.length) : ""}`}
+        </div>
+
+        {dayGroups.map(([dayKey, entries]) => (
+          <div key={dayKey}>
+            <div className="row" style={{ gap: 8, alignItems: "center", padding: "8px 2px 6px" }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "var(--fg-2)" }}>{thaiDayLabel(dayKey)}</span>
+              <span style={{ flex: 1, height: 1, background: "var(--border)" }}/>
+              <span style={{ fontSize: 10, color: "var(--muted)" }}>{entries.length} รายการ</span>
+            </div>
+            <div className="m-list">
+              {entries.map((e, i) => {
+                // Entries that name a record they changed become tappable and open it.
+                const open = openTarget(e);
+                const Row = open ? "button" : "div";
+                return (
+                  <Row key={e.id || (dayKey + i)} className="m-row"
+                    onClick={open || undefined}
+                    style={open
+                      ? { alignItems: "flex-start", cursor: "pointer", width: "100%", textAlign: "left", font: "inherit", fontFamily: "inherit" }
+                      : { cursor: "default", alignItems: "flex-start" }}>
+                    <div className="m-row-thumb" style={{ background: "var(--surface-2)", color: "var(--fg-2)" }}><Icons.History size={15}/></div>
+                    <div className="m-row-main">
+                      <div className="m-row-title" style={{ fontSize: 13, whiteSpace: "normal" }}>{e.summary || (e.entityId ? "แก้ไข " + e.entityId : "เปลี่ยนแปลง")}</div>
+                      {e.changes && e.changes.length > 0 && (
+                        <div className="m-row-sub" style={{ whiteSpace: "normal" }}>{e.changes.map(c => c.label + (c.to ? `: ${c.to}` : "")).join(" · ")}</div>
+                      )}
+                      {e.note && <div className="m-row-sub" style={{ whiteSpace: "normal", fontStyle: "italic" }}>{e.note}</div>}
+                      {/* The day header above carries the date, so today's rows
+                          show the friendlier relative time and older ones the clock. */}
+                      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                        {dayKey === today ? mFormatTime(e.ts) : bangkokTimeOf(e.ts)} · {e.user?.name || "ระบบ"}
+                      </div>
+                    </div>
+                    {open && <Icons.Chev size={14} style={{ color: "var(--muted)", flexShrink: 0, alignSelf: "center" }}/>}
+                  </Row>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+
+        {filtered.length === 0 && (
+          <div style={{ padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+            <Icons.History size={22} style={{ opacity: 0.4, marginBottom: 6 }}/>
+            <div>{busy ? "กำลังโหลด…" : day ? `ไม่มีกิจกรรมใน${thaiDayLabel(day)}` : "ยังไม่มีประวัติการแก้ไข"}</div>
+          </div>
+        )}
+
+        {/* Older rows stay in the DB until asked for. */}
+        {!day && auditHasMore() && (
+          <button className="m-btn-big outline" style={{ marginTop: 12 }} onClick={loadMore} disabled={busy}>
+            {busy ? "กำลังโหลด…" : "โหลดประวัติเก่ากว่านี้"}
+          </button>
+        )}
       </div>
     </>
   );

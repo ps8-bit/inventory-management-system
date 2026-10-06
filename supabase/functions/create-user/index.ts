@@ -50,7 +50,7 @@ Deno.serve(async (req) => {
 
   // Server-side validation — never trust the client. The browser form can be
   // bypassed, so re-check everything here before touching the auth admin API.
-  const ALLOWED_ROLES = ["admin", "manager", "staff", "viewer"];
+  const ALLOWED_ROLES = ["admin", "manager", "staff", "packer", "viewer"];
   if (!name || !email || !password || !role) return fail("Missing fields");
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return fail("อีเมลไม่ถูกต้อง");
   if (typeof password !== "string" || password.length < 8) return fail("รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร");

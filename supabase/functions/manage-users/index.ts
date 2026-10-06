@@ -22,7 +22,7 @@ function corsFor(req: Request) {
   };
 }
 
-const ALLOWED_ROLES = ["admin", "manager", "staff", "viewer"];
+const ALLOWED_ROLES = ["admin", "manager", "staff", "packer", "viewer"];
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 // Shape an auth.users row into what the UI table expects.
