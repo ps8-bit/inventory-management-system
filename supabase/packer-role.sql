@@ -58,10 +58,12 @@ drop policy if exists "insert" on public.order_files;
 drop policy if exists "update" on public.order_files;
 drop policy if exists "delete" on public.order_files;
 create policy "read"   on public.order_files for select using (auth.role() = 'authenticated');
-create policy "insert" on public.order_files for insert with check (public.auth_role() in ('admin','manager','staff'));
+-- 2026-10-07: the packer may attach / replace a label photo or file too
+-- (owner's request); deleting one stays admin/manager/staff.
+create policy "insert" on public.order_files for insert with check (public.auth_role() in ('admin','manager','staff','packer'));
 create policy "update" on public.order_files for update
-  using (public.auth_role() in ('admin','manager','staff'))
-  with check (public.auth_role() in ('admin','manager','staff'));
+  using (public.auth_role() in ('admin','manager','staff','packer'))
+  with check (public.auth_role() in ('admin','manager','staff','packer'));
 create policy "delete" on public.order_files for delete using (public.auth_role() in ('admin','manager','staff'));
 
 -- ── retire the separate งานแพ็คสินค้า tables (option B, never used — empty) ──

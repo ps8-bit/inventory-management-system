@@ -6749,6 +6749,7 @@ function ProductFinder({ pushToast, goTo, focus }) {
    pack helpers, so the two views can never disagree.
    ═══════════════════════════════════════════════════════════════════ */
 function PackQueue({ pushToast, goTo, user }) {
+  const [newOpen, setNewOpen] = useState(false);   // สั่งแพ็คใหม่ — one-page form (pack-docs.jsx)
   const [tick, setTick] = useState(0);
   const [open, setOpen] = useState(null);      // expanded order id
   const [sel, setSel] = useState({});
@@ -6832,6 +6833,7 @@ function PackQueue({ pushToast, goTo, user }) {
           </div>
         </div>
         <div className="row">
+          {canDo("sell") && <button className="btn btn-primary" onClick={() => setNewOpen(true)}><Icons.Plus size={14}/> สั่งแพ็คใหม่</button>}
           {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
           <span className="badge badge-neutral" title="การหยิบ ติ๊ก และสแกน ทำบนมือถือ"><Icons.Phone size={12}/> หยิบของบนมือถือ: เพิ่มเติม → แพ็คสินค้า</span>
         </div>
@@ -6888,7 +6890,10 @@ function PackQueue({ pushToast, goTo, user }) {
                       {r.o.id}
                       {w && <div style={{ fontSize: 10, color: "var(--info)" }}>หยิบรวม · {w.rec.stage === "sort" ? "แยกลงออร์เดอร์" : "เดินหยิบ"}</div>}
                     </td>
-                    <td style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>{r.o.customer || "—"}</td>
+                    <td style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
+                      {r.o.customer || "—"}
+                      {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
+                    </td>
                     <td style={{ fontSize: 12, color: "var(--muted)" }}>{r.o.channel || "—"}</td>
                     <td className="t-num tnum">{r.totals.lineCount}</td>
                     <td className="t-num tnum" style={{ fontWeight: 500 }}>{r.totals.need}</td>
@@ -6978,12 +6983,15 @@ function PackQueue({ pushToast, goTo, user }) {
               <tr><td colSpan="10" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
                 <Icons.Check size={22} style={{ opacity: 0.5, marginBottom: 8, color: "var(--success)" }}/>
                 <div>ไม่มีออร์เดอร์รอแพ็ค</div>
-                <div style={{ fontSize: 11.5, marginTop: 4 }}>ออร์เดอร์จะเข้าคิวนี้อัตโนมัติหลังตัดสต็อก</div>
+                <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
+                  กดปุ่ม <b>สั่งแพ็คใหม่</b> ด้านบน → เลือกสินค้า + แนบใบปะหน้าหรือวางที่อยู่ → ส่งให้คนแพ็ค
+                </div>
               </td></tr>
             )}
           </tbody>
         </table>
       </div>
+      {newOpen && typeof PackNewOrder === "function" && <PackNewOrder pushToast={pushToast} onClose={() => setNewOpen(false)}/>}
     </div>
   );
 }

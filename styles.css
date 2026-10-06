@@ -2127,3 +2127,28 @@ html[data-mobile="1"] .m-row .m-row-sub { font-size: 12.5px; }
 .inv-cat-select { width: auto; min-width: 180px; max-width: 260px; }
 .th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
 .th-sort:hover { color: var(--fg); }
+
+
+/* ══════════════════════════════════════════════════════════════
+   ANDROID SCROLL PERFORMANCE (2026-10-06)
+   Owner report: on the installed Android app every list "sticks" — moves a
+   little then stops, can't reach the bottom, a swipe lands as a tap.
+   Measured causes, all paint/decode cost on the scrolling thread:
+   1. .m-topbar / .m-tabbar used backdrop-filter blur(20–24px) over the
+      scrolling list → every scroll frame re-blurs both bars. Over an opaque
+      white bar the blur was invisible anyway — drop it, go solid.
+   2. Product thumbnails are 1920–2000px photos drawn at ~38px, all decoded
+      up front (~16 MB each). Fixed in JSX with loading="lazy" +
+      decoding="async"; content-visibility below skips off-screen rows.
+   ══════════════════════════════════════════════════════════════ */
+html[data-mobile="1"] .m-topbar,
+html[data-mobile="1"] .m-tabbar {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html[data-mobile="1"] .m-topbar { background: #ffffff; }
+html[data-mobile="1"] .m-tabbar { background: #ffffff; }
+html[data-mobile="1"] .m-content .m-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
+}
