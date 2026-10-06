@@ -300,7 +300,7 @@ function packRecipientFor(order) {
 function _escPD(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-function _printPDHtml(innerHtml, size) {
+function _printPDHtml(innerHtml, size, beforePrint) {
   const w = (size && size.w) || 100, h = (size && size.h) || 150;
   ["__pdPrintRoot", "__pdPrintStyle"].forEach(id => { const el = document.getElementById(id); if (el) el.remove(); });
   const root = document.createElement("div");
@@ -325,6 +325,7 @@ function _printPDHtml(innerHtml, size) {
   // Wait for the web font too — printing before it lands falls back to a thin system face.
   const fontsReady = (document.fonts && document.fonts.ready) ? document.fonts.ready.catch(() => {}) : Promise.resolve();
   Promise.all([fontsReady, ...imgs.map(i => i.complete ? 0 : new Promise(r => { i.onload = i.onerror = r; }))])
+    .then(() => { if (beforePrint) { try { beforePrint(root); } catch (e) {} } })
     .then(() => setTimeout(() => { try { window.focus(); window.print(); } catch (e) {} }, 60));
   setTimeout(cleanup, 60000);
 }
@@ -341,6 +342,46 @@ function packLabelSize() {
 }
 function setPackLabelSize(id) {
   try { localStorage.setItem("ims_pack_label_size", id); } catch (e) {}
+}
+
+/* What the printed ใบปะหน้า shows — set by the owner, stored in the shared
+   store settings (store_settings.main.packLabel) so every device prints alike.
+   The recipient block is always printed. */
+const PACK_LABEL_FIELDS = [
+  { group: "หัวใบ",  items: [["header", "หมายเลข Label / เลขออร์เดอร์"]] },
+  { group: "ผู้ส่ง",  items: [["sender", "แสดงผู้ส่ง"], ["senderName", "ชื่อ"], ["senderAddr", "ที่อยู่"], ["senderPhone", "เบอร์โทร"]] },
+  { group: "ผู้รับ",  items: [["recvPhone", "เบอร์โทร"], ["cod", "เก็บเงินปลายทาง (COD)"], ["carrier", "ขนส่ง"]] },
+  { group: "สินค้า", items: [["items", "แสดงรายการสินค้า"], ["itemSku", "รหัส (SKU)"], ["itemName", "ชื่อสินค้า"], ["itemQty", "จำนวน"]] }
+];
+const PACK_LABEL_DEFAULT = { header: true, sender: true, senderName: true, senderAddr: true, senderPhone: true,
+  recvPhone: true, cod: true, carrier: true, items: true, itemSku: true, itemName: true, itemQty: true };
+function packLabelConfig() {
+  let st = window._DB_STORE;
+  if (!st) { try { st = JSON.parse(localStorage.getItem("ims_store") || "null"); } catch (e) {} }
+  return { ...PACK_LABEL_DEFAULT, ...((st && st.packLabel) || {}) };
+}
+function canEditPackLabel() {
+  const u = window.__currentUser;
+  return !!u && (u.role === "admin" || u.role === "manager");
+}
+/* Merge into the FULL store blob (never write packLabel alone — the row holds
+   sender/shop info too), then announce it so the shells' store state follows. */
+async function savePackLabelConfig(next) {
+  let base = window._DB_STORE;
+  if (!base) { try { base = JSON.parse(localStorage.getItem("ims_store") || "null"); } catch (e) {} }
+  const prevStore = window._DB_STORE;
+  const store = { ...(typeof DEFAULT_STORE !== "undefined" ? DEFAULT_STORE : {}), ...(base || {}), packLabel: next };
+  window._DB_STORE = store;
+  try { localStorage.setItem("ims_store", JSON.stringify(store)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-store-change"));
+  const res = window.dbSaveStoreSettings ? await dbSaveStoreSettings(store).catch(e => ({ error: e.message })) : { ok: true };
+  if (res && res.error) {
+    window._DB_STORE = prevStore;
+    try { if (prevStore) localStorage.setItem("ims_store", JSON.stringify(prevStore)); } catch (e) {}
+    window.dispatchEvent(new CustomEvent("ims-store-change"));
+    return { error: res.error };
+  }
+  return { ok: true };
 }
 
 /* Layout: หมายเลข Label + order no. │ ผู้ส่ง │ ผู้รับ (big) │ สินค้าที่ต้องแพ็ค.
@@ -367,36 +408,61 @@ function printOrderAddress(order, lines, sizeId) {
     if (m && m.index > 0) addrLines = [addrLines[0].slice(0, m.index), addrLines[0].slice(m.index + 1)];
   }
   const one = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+  const c = packLabelConfig();
+  // Recipient text scales by --fit; a long address shrinks until the label fits.
+  const fit = (n) => `calc(${pt(n)} * var(--fit,1))`;
+  const showSender = c.sender && ((c.senderName && s.name) || (c.senderAddr && (s.addr1 || s.addr2)) || (c.senderPhone && s.phone));
+  const showItems = c.items && (c.itemSku || c.itemName || c.itemQty) && all.length > 0;
+  // The last visible text column takes the free width; qty stays pinned right.
+  const flexCol = c.itemName ? "name" : "sku";
   _printPDHtml(
-    `<div style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;display:flex;flex-direction:column;overflow:hidden;line-height:1.3;font-weight:500">` +
+    `<div class="__pdLbl" style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;display:flex;flex-direction:column;overflow:hidden;line-height:1.3;font-weight:500">` +
       // header
-      `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
+      (c.header ? `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
         `<span style="font-size:${pt(9)};font-weight:700;white-space:nowrap">หมายเลข Label</span>` +
         `<span style="font-size:${pt(14)};font-weight:700;${one}">${_escPD(ref)}</span></div>` +
-      `<div style="${rule}"></div>` +
+      `<div style="${rule}"></div>` : "") +
       // sender
-      `<div style="${cap}">ผู้ส่ง</div>` +
-      `<div style="font-size:${pt(12)};font-weight:700">${_escPD(s.name)}</div>` +
-      [s.addr1, s.addr2].filter(Boolean).map(a => `<div style="font-size:${pt(10)}">${_escPD(a)}</div>`).join("") +
-      (s.phone ? `<div style="font-size:${pt(10)}">โทร. ${_escPD(s.phone)}</div>` : "") +
-      `<div style="${rule}"></div>` +
+      (showSender ? `<div style="${cap}">ผู้ส่ง</div>` +
+      (c.senderName && s.name ? `<div style="font-size:${pt(12)};font-weight:700">${_escPD(s.name)}</div>` : "") +
+      (c.senderAddr ? [s.addr1, s.addr2].filter(Boolean).map(a => `<div style="font-size:${pt(10)}">${_escPD(a)}</div>`).join("") : "") +
+      (c.senderPhone && s.phone ? `<div style="font-size:${pt(10)}">โทร. ${_escPD(s.phone)}</div>` : "") +
+      `<div style="${rule}"></div>` : "") +
       // recipient
       `<div style="${cap}">ผู้รับ</div>` +
-      `<div style="font-size:${pt(19)};font-weight:700;line-height:1.25">${_escPD(r.name)}</div>` +
-      addrLines.map(a => `<div style="font-size:${pt(13)};line-height:1.4;margin-top:0.6mm">${_escPD(a)}</div>`).join("") +
-      (r.phone ? `<div style="font-size:${pt(14)};font-weight:700;margin-top:${small ? 0.8 : 1.4}mm">โทร. ${_escPD(r.phone)}</div>` : "") +
-      (r.cod > 0 ? `<div style="border:0.6mm solid #000;padding:1.2mm;margin-top:2mm;font-size:${pt(15)};font-weight:700;text-align:center">เก็บเงินปลายทาง ฿${_escPD(r.cod.toLocaleString())}</div>` : "") +
-      (r.carrier ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:1mm">ขนส่ง: ${_escPD(r.carrier)}</div>` : "") +
-      `<div style="${rule}"></div>` +
+      `<div style="font-size:${fit(19)};font-weight:700;line-height:1.25">${_escPD(r.name)}</div>` +
+      addrLines.map(a => `<div style="font-size:${fit(13)};line-height:1.4;margin-top:0.6mm">${_escPD(a)}</div>`).join("") +
+      (c.recvPhone && r.phone ? `<div style="font-size:${fit(14)};font-weight:700;margin-top:${small ? 0.8 : 1.4}mm">โทร. ${_escPD(r.phone)}</div>` : "") +
+      (c.cod && r.cod > 0 ? `<div style="border:0.6mm solid #000;padding:1.2mm;margin-top:2mm;font-size:${pt(15)};font-weight:700;text-align:center">เก็บเงินปลายทาง ฿${_escPD(r.cod.toLocaleString())}</div>` : "") +
+      (c.carrier && r.carrier ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:1mm">ขนส่ง: ${_escPD(r.carrier)}</div>` : "") +
       // items
-      `<div style="${cap}">สินค้าที่ต้องแพ็ค (${all.length}${pcs !== all.length ? ` · ${pcs} ชิ้น` : ""})</div>` +
+      (showItems ? `<div style="${rule}"></div>` +
+      `<div style="${cap};display:flex;justify-content:space-between;gap:2mm"><span>สินค้าที่ต้องแพ็ค</span>` +
+        `<span style="white-space:nowrap">${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
       shown.map(l =>
         `<div style="display:flex;gap:1.5mm;align-items:baseline;font-size:${pt(10.5)};margin-top:0.5mm">` +
-          (l.sku ? `<span style="font-weight:700;white-space:nowrap">${_escPD(l.sku)}</span>` : "") +
-          `<span style="flex:1;min-width:0;${one}">${_escPD(l.name || "")}</span>` +
-          `<span style="font-weight:700;white-space:nowrap">× ${_escPD(l.qty)}</span></div>`).join("") +
-      (shown.length < all.length ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:0.5mm">… และอีก ${all.length - shown.length} รายการ</div>` : "") +
-    `</div>`, size);
+          (c.itemSku ? `<span style="font-weight:700;${flexCol === "sku" ? "flex:1;min-width:0;" + one : "white-space:nowrap"}">${_escPD(l.sku || (c.itemName ? "" : l.name || ""))}</span>` : "") +
+          (c.itemName ? `<span style="flex:1;min-width:0;${one}">${_escPD(l.name || "")}</span>` : "") +
+          (!c.itemSku && !c.itemName ? `<span style="flex:1"></span>` : "") +
+          (c.itemQty ? `<span style="font-weight:700;white-space:nowrap">× ${_escPD(l.qty)}</span>` : "") + `</div>`).join("") +
+      (shown.length < all.length ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:0.5mm">… และอีก ${all.length - shown.length} รายการ</div>` : "") : "") +
+    `</div>`, size, fitPackLabel);
+}
+/* Shrink the recipient block step by step until nothing spills off the paper
+   (floor 55% — still bigger than the sender/item text at that point). The
+   root is display:none on screen, so measure it off-screen at real size. */
+function fitPackLabel(root) {
+  const lbl = root.querySelector(".__pdLbl");
+  if (!lbl) return;
+  const prev = root.getAttribute("style") || "";
+  root.setAttribute("style", "display:block;position:fixed;left:-10000px;top:0");
+  let f = 1;
+  lbl.style.setProperty("--fit", "1");
+  while (lbl.scrollHeight > lbl.clientHeight + 1 && f > 0.55) {
+    f = Math.round((f - 0.05) * 100) / 100;
+    lbl.style.setProperty("--fit", String(f));
+  }
+  root.setAttribute("style", prev);
 }
 function printOrderFile(file) {
   const f = safeOrderFile(file);
@@ -418,6 +484,19 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   const r = packRecipientFor(order) || {};
   const [edit, setEdit] = useStatePD(null);   // null | { name, phone, addr, paste }
   const [paper, setPaper] = useStatePD(() => packLabelSize().id);
+  const [cfgOpen, setCfgOpen] = useStatePD(false);
+  const [cfg, setCfg] = useStatePD(() => packLabelConfig());
+  useEffectPD(() => {
+    const h = () => setCfg(packLabelConfig());
+    window.addEventListener("ims-store-change", h);
+    return () => window.removeEventListener("ims-store-change", h);
+  }, []);
+  const toggleCfg = async (k) => {
+    const prev = cfg, next = { ...cfg, [k]: !cfg[k] };
+    setCfg(next);
+    const res = await savePackLabelConfig(next);
+    if (res.error) { setCfg(prev); pushToast({ msg: "บันทึกการตั้งค่าใบปะหน้าไม่สำเร็จ — ตรวจสอบสิทธิ์", type: "error" }); }
+  };
   const startEdit = () => setEdit({ name: r.name || "", phone: r.phone || "", addr: r.addr || "", paste: "" });
   const splitPaste = () => {
     const p = (typeof parseRecipientBlob === "function") ? parseRecipientBlob(edit.paste) : null;
@@ -514,6 +593,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
               {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
             </select>
             <button className={btn} disabled={!r.addr} onClick={() => printOrderAddress(order, lines, paper)}><Icons.Print size={13}/> พิมพ์ใบปะหน้า</button>
+            {canEditPackLabel() && <button className={btn + (cfgOpen ? " btn-primary" : "")} title="เลือกข้อมูลที่จะแสดงบนใบปะหน้า" onClick={() => setCfgOpen(o => !o)}>⚙ ตั้งค่าใบปะหน้า</button>}
           </div>
         </div>
         {edit ? (
@@ -536,6 +616,27 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
             {r.phone && <div className="mono" style={{ fontSize: 13 }}>{r.phone}</div>}
             <div style={{ fontSize: 12.5, marginTop: 4, color: r.addr ? "var(--fg)" : "var(--muted)" }}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</div>
           </>
+        )}
+        {cfgOpen && canEditPackLabel() && (
+          <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 2 }}>ข้อมูลที่แสดงบนใบปะหน้า</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8 }}>ใช้กับทุกเครื่อง · ชื่อและที่อยู่ผู้รับแสดงเสมอ</div>
+            {PACK_LABEL_FIELDS.map(g => (
+              <div key={g.group} style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>{g.group}</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+                  {g.items.map(([k, label]) => {
+                    const off = (g.group === "ผู้ส่ง" && k !== "sender" && !cfg.sender) || (g.group === "สินค้า" && k !== "items" && !cfg.items);
+                    return (
+                      <label key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: mobile ? 14 : 13, cursor: off ? "default" : "pointer", opacity: off ? 0.45 : 1, minHeight: mobile ? 32 : 0 }}>
+                        <input type="checkbox" checked={!!cfg[k]} disabled={off} onChange={() => toggleCfg(k)} style={{ width: 16, height: 16 }}/> {label}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
         {(r.cod > 0 || r.carrier) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
       </div>
@@ -854,6 +955,6 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
+  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments
 });
