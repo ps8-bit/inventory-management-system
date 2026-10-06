@@ -19,6 +19,7 @@ const Icons = {
   X:    (p) => <Ico {...p}><path d="M6 6l12 12M18 6 6 18"/></Ico>,
   Chev: (p) => <Ico {...p}><path d="m9 6 6 6-6 6"/></Ico>,
   Down: (p) => <Ico {...p}><path d="m6 9 6 6 6-6"/></Ico>,
+  Download: (p) => <Ico {...p}><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></Ico>,
   Up:   (p) => <Ico {...p}><path d="m6 15 6-6 6 6"/></Ico>,
   Filter:(p)=> <Ico {...p}><path d="M3 5h18M6 12h12M10 19h4"/></Ico>,
   Bell: (p) => <Ico {...p}><path d="M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 21a2 2 0 0 0 4 0"/></Ico>,

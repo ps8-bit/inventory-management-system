@@ -6869,6 +6869,14 @@ function MPack({ ctx }) {
           </div>
         )}
 
+        {rows.length > 1 && typeof PACK_SORTS !== "undefined" && (
+          <div className="m-chips-scroll" style={{ marginBottom: 10 }}>
+            {PACK_SORTS.map(x => (
+              <button key={x.id} className={"m-chip" + (packSortMode() === x.id ? " on" : "")} onClick={() => setPackSortMode(x.id)}>{x.label}</button>
+            ))}
+          </div>
+        )}
+
         <div className="m-list">
           {rows.map(r => (
             <button key={r.o.id} className="m-row" style={selecting && waveOf[r.o.id] ? { opacity: 0.45 } : undefined} onClick={() => {
@@ -6886,7 +6894,10 @@ function MPack({ ctx }) {
                 </div>
               )}
               <div className="m-row-main">
-                <div className="m-row-title mono" style={{ fontSize: 13 }}>{r.o.id}</div>
+                <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+                  <div className="m-row-title mono" style={{ fontSize: 13 }}>{r.o.id}</div>
+                  {typeof packOrderTime === "function" && <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>{packOrderTime(r.o)}</span>}
+                </div>
                 <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {r.o.customer || "—"} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
                 </div>
