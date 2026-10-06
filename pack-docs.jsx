@@ -108,6 +108,45 @@ function openOrderFile(file) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
+/* Which orders already have a label file — ids only (no payload), so every
+   queue row can show "มีใบปะหน้า" / "แนบใบปะหน้า" without loading files. */
+let _orderFileIds = null;
+async function refreshOrderFileIds() {
+  if (!_pdDb()) return;
+  const { data, error } = await sb.from("order_files").select("id");
+  if (error) return;
+  _orderFileIds = new Set((data || []).map(r => r.id));
+  window.dispatchEvent(new CustomEvent("ims-order-files-change"));
+}
+function useOrderFileIds() {
+  const [, bump] = useStatePD(0);
+  useEffectPD(() => {
+    const h = () => bump(x => x + 1);
+    window.addEventListener("ims-order-files-change", h);
+    if (!_orderFileIds) refreshOrderFileIds().catch(() => {});
+    return () => window.removeEventListener("ims-order-files-change", h);
+  }, []);
+  return _orderFileIds || new Set();
+}
+/* Inline status for a queue row: label file + address at a glance, and for the
+   people who attach, an obvious "แนบใบปะหน้า" call to action. */
+function PackDocChip({ order, onOpen }) {
+  const ids = useOrderFileIds();
+  const has = ids.has(order.id);
+  const r = packRecipientFor(order) || {};
+  const canAttach = typeof canDo !== "function" || canDo("sell");
+  const chip = (bg, fg, text) => <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", borderRadius: 999, background: bg, color: fg, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}>{text}</span>;
+  return (
+    <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", marginTop: 4 }} onClick={onOpen ? (e) => { e.stopPropagation(); onOpen(); } : undefined}>
+      {has ? chip("var(--success-soft)", "var(--success)", "📎 มีใบปะหน้า")
+        : canAttach ? chip("var(--accent-soft)", "var(--accent)", "📎 แนบใบปะหน้า")
+        : null}
+      {r.addr ? chip("var(--info-soft)", "var(--info)", "📍 มีที่อยู่")
+        : (!has && canAttach) ? chip("var(--surface-2)", "var(--muted)", "＋ ที่อยู่") : null}
+    </span>
+  );
+}
+
 /* ── recipient ── the label made by ขาย + จัดส่ง carries the address; an order
    cut via ตัดสต็อก only has a name/phone. */
 function packRecipientFor(order) {
@@ -220,7 +259,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
       const data = await readOrderFile(f);
       const res = await saveOrderFile(order.id, data);
       if (res.error) pushToast("แนบไฟล์ไม่สำเร็จ: " + res.error);
-      else { pushToast("แนบใบปะหน้าแล้ว"); setRev(x => x + 1); }
+      else { pushToast("แนบใบปะหน้าแล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); }
     } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
     setBusy(false);
   };
@@ -229,7 +268,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
     setBusy(true);
     const res = await saveOrderFile(order.id, null);
     setBusy(false);
-    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); }
+    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); }
   };
   const cancel = async () => {
     const pcs = (lines || []).reduce((n, l) => n + (Number(l.qty) || 0), 0);
@@ -318,7 +357,113 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   );
 }
 
+/* ── "ส่งให้คนแพ็ค" — shown right after a sale creates an order ──
+   The owner asked for the simplest possible path: no hunting for a button on
+   another page. The moment a sale is confirmed (any fork, any sell screen —
+   they all go through appendOrder), this asks once: attach the label or paste
+   the address for the packer, or skip. Mounted in both shells (app.jsx /
+   MobileApp). Never shown to a role that can't sell (the packer). */
+function PackSendPrompt({ pushToast, mobile }) {
+  const [order, setOrder] = useStatePD(null);        // { id }
+  const [file, setFile] = useStatePD(null);          // saved file meta { name, type, dataUrl }
+  const [addrMode, setAddrMode] = useStatePD(false);
+  const [paste, setPaste] = useStatePD("");
+  const [savedAddr, setSavedAddr] = useStatePD(null);
+  const [busy, setBusy] = useStatePD(false);
+  const inputRef = useRefPD(null);
+
+  useEffectPD(() => {
+    const h = (e) => {
+      const d = (e && e.detail) || {};
+      if (!d.id || (d.status && d.status !== "picking")) return;     // already shipped → not for the packer
+      if (typeof canDo === "function" && !canDo("sell")) return;
+      setTimeout(() => {                                               // let the sale screen close first
+        setOrder({ id: d.id }); setFile(null); setAddrMode(false); setPaste(""); setSavedAddr(null);
+      }, 400);
+    };
+    window.addEventListener("ims-order-created", h);
+    return () => window.removeEventListener("ims-order-created", h);
+  }, []);
+  if (!order) return null;
+
+  const pick = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    setBusy(true);
+    try {
+      const data = await readOrderFile(f);
+      const res = await saveOrderFile(order.id, data);
+      if (res.error) pushToast("แนบไฟล์ไม่สำเร็จ: " + res.error);
+      else { setFile(data); refreshOrderFileIds().catch(() => {}); }
+    } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
+    setBusy(false);
+  };
+  const saveAddress = () => {
+    const text = paste.trim();
+    if (!text) return;
+    const p = (typeof parseRecipientBlob === "function") ? parseRecipientBlob(text) : null;
+    const shipTo = p
+      ? { name: p.name || "", phone: p.phone || "", addr: [p.addr1, p.addr2].filter(Boolean).join(" ") || text }
+      : { name: "", phone: "", addr: text };
+    if (typeof setOrderField === "function") setOrderField(order.id, { shipTo });
+    setSavedAddr(shipTo); setAddrMode(false); setPaste("");
+  };
+  const close = () => {
+    if (file || savedAddr) pushToast("ส่งให้คนแพ็คแล้ว — ดูได้ที่หน้าแพ็คสินค้า");
+    setOrder(null);
+  };
+
+  const big = (bg, fg) => ({ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "16px 16px", borderRadius: 14, border: "none", background: bg, color: fg, fontSize: 16, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textAlign: "left" });
+  const done = { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: "var(--success-soft)", color: "var(--success)", fontSize: 14, fontWeight: 600 };
+
+  return (
+    <>
+      <div onClick={close} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 300 }}/>
+      <div style={{
+        position: "fixed", zIndex: 301, background: "var(--surface)", boxShadow: "var(--shadow-lg)",
+        ...(mobile
+          ? { left: 0, right: 0, bottom: 0, borderRadius: "20px 20px 0 0", padding: "18px 16px calc(18px + env(safe-area-inset-bottom))", maxHeight: "88vh", overflowY: "auto" }
+          : { left: "50%", top: "50%", transform: "translate(-50%,-50%)", width: 440, maxWidth: "calc(100vw - 32px)", borderRadius: 18, padding: 22, maxHeight: "90vh", overflowY: "auto" })
+      }}>
+        <div style={{ fontSize: 19, fontWeight: 800 }}>ส่งให้คนแพ็ค</div>
+        <div style={{ fontSize: 13, color: "var(--muted)", margin: "2px 0 16px" }}>ออร์เดอร์ <span className="mono">{order.id}</span> — แนบใบปะหน้าหรือที่อยู่ให้คนแพ็คพิมพ์</div>
+        <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {file ? (
+            <div style={done}>✓ แนบใบปะหน้าแล้ว <span style={{ fontWeight: 400, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.name}</span></div>
+          ) : (
+            <button style={big("var(--accent)", "#fff")} disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}>
+              <span style={{ fontSize: 24 }}>📎</span>
+              <span>{busy ? "กำลังอัปโหลด…" : "แนบใบปะหน้า"}<div style={{ fontSize: 12, fontWeight: 400, opacity: 0.9 }}>ถ่ายรูป / เลือกรูป / ไฟล์ PDF</div></span>
+            </button>
+          )}
+
+          {savedAddr ? (
+            <div style={done}>✓ บันทึกที่อยู่แล้ว <span style={{ fontWeight: 400, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{savedAddr.name || savedAddr.addr}</span></div>
+          ) : addrMode ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <textarea className="input" autoFocus rows={4} value={paste} onChange={e => setPaste(e.target.value)} placeholder="วางที่อยู่ทั้งก้อน (ชื่อ เบอร์ ที่อยู่) จากแชท/Shopee" style={{ fontSize: 15 }}/>
+              <button style={{ ...big("var(--fg)", "var(--surface)"), justifyContent: "center", padding: 14 }} disabled={!paste.trim()} onClick={saveAddress}>บันทึกที่อยู่</button>
+            </div>
+          ) : (
+            <button style={big("var(--surface-2)", "var(--fg)")} onClick={() => setAddrMode(true)}>
+              <span style={{ fontSize: 24 }}>📍</span>
+              <span>วางที่อยู่ผู้รับ<div style={{ fontSize: 12, fontWeight: 400, color: "var(--muted)" }}>คัดลอกจากแชทแล้ววาง ระบบแยกชื่อ/เบอร์ให้</div></span>
+            </button>
+          )}
+        </div>
+
+        <button onClick={close} style={{ marginTop: 16, width: "100%", padding: 14, borderRadius: 12, border: "1px solid var(--border)", background: "transparent", color: (file || savedAddr) ? "var(--fg)" : "var(--muted)", fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+          {(file || savedAddr) ? "เสร็จ" : "ข้าม (แนบทีหลังได้ที่หน้าแพ็คสินค้า)"}
+        </button>
+      </div>
+    </>
+  );
+}
+
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs
+  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, PackSendPrompt
 });

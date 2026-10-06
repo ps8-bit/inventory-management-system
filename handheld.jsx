@@ -118,6 +118,7 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
         <Screen ctx={ctx}/>
       </ErrorBoundary>
       <TabBar tab={route.tab} onSwitch={switchTab} role={user && user.role}/>
+      {typeof PackSendPrompt === "function" && <PackSendPrompt pushToast={pushToast} mobile/>}
     </div>
   );
 }
@@ -3251,7 +3252,10 @@ function MSell({ ctx }) {
     }
 
     ctx.pushToast(`ขายสำเร็จ ${orderId} · สร้างฉลากแล้ว${backLabel ? ` (ย้อนหลัง ${backLabel})` : ""}`);
-    if (createdLabel) ctx.push("label-view", createdLabel);
+    // Opened from แพ็คสินค้า's "สั่งแพ็คใหม่" → go straight back to the pack queue
+    // (the "ส่งให้คนแพ็ค" popup then offers the label file).
+    if (ctx.route.params && ctx.route.params.from === "pack") ctx.back();
+    else if (createdLabel) ctx.push("label-view", createdLabel);
     else ctx.switchTab("outbound");
   };
 
@@ -6815,6 +6819,11 @@ function MPack({ ctx }) {
         </button>
       </div>
       <div className="m-content">
+        {canDo("sell") && !selecting && (
+          <button className="m-btn-big" style={{ marginBottom: 12 }} onClick={() => ctx.push("sell", { from: "pack" })}>
+            <Icons.Plus size={18}/> สั่งแพ็คใหม่ — เลือกสินค้า + ที่อยู่
+          </button>
+        )}
         <div className="m-kpi-row">
           <div className="m-kpi"><div className="m-kpi-label">รอแพ็ค</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{rows.length}</div></div>
           <div className="m-kpi"><div className="m-kpi-label">รวมชิ้น</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{totalPieces}</div></div>
@@ -6861,6 +6870,7 @@ function MPack({ ctx }) {
                 <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {r.o.customer || "—"} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
                 </div>
+                {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}
                 {r.started && (
                   <div className="row" style={{ gap: 6, marginTop: 5 }}>
                     <div className="prog" style={{ flex: 1, height: 4 }}><span style={{ width: r.totals.pct + "%" }}/></div>
@@ -6875,7 +6885,11 @@ function MPack({ ctx }) {
             <div style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
               <Icons.Check size={26} style={{ marginBottom: 8, color: "var(--success)" }}/>
               <div>ไม่มีออร์เดอร์รอแพ็ค</div>
-              <div style={{ fontSize: 11, marginTop: 4 }}>ออร์เดอร์จะเข้ามาที่นี่หลังตัดสต็อก</div>
+              <div style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.7, textAlign: "left", display: "inline-block" }}>
+                1. สร้างออร์เดอร์ด้วย ขายออก / ขาย + จัดส่ง / ตัดสต็อก<br/>
+                2. ออร์เดอร์จะมาอยู่ที่หน้านี้อัตโนมัติ<br/>
+                3. แตะออร์เดอร์ → กด <b>แนบไฟล์</b> (รูป/PDF ใบปะหน้า) หรือ <b>เพิ่มที่อยู่</b>
+              </div>
             </div>
           )}
         </div>
