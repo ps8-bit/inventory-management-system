@@ -342,6 +342,7 @@ function packLabelSize() {
 }
 function setPackLabelSize(id) {
   try { localStorage.setItem("ims_pack_label_size", id); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-pack-label-size"));
 }
 
 /* What the printed ใบปะหน้า shows — set by the owner, stored in the shared
@@ -387,15 +388,14 @@ async function savePackLabelConfig(next) {
 /* Layout: หมายเลข Label + order no. │ ผู้ส่ง │ ผู้รับ (big) │ สินค้าที่ต้องแพ็ค.
    Sizes are in pt and scaled for the 75×100 roll, with a floor so nothing
    drops below what a 203-dpi thermal head prints legibly. */
-function printOrderAddress(order, lines, sizeId) {
-  const size = PACK_LABEL_SIZES.find(x => x.id === sizeId) || packLabelSize();
+function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
   const small = size.w < 100;
   const pt = (n) => Math.max(small ? 8 : 9, Math.round(n * (small ? 0.8 : 1) * 2) / 2) + "pt";
   const pad = small ? 4 : 5.5;
   const rule = `border-top:${small ? 0.35 : 0.45}mm solid #000;margin:${small ? 2 : 2.8}mm 0`;
   const cap = `font-size:${pt(9)};font-weight:700;margin-bottom:${small ? 0.6 : 1}mm`;
   const s = (typeof storeSenderTemplate === "function") ? storeSenderTemplate() : {};
-  const r = packRecipientFor(order) || {};
+  const r = recipOverride || packRecipientFor(order) || {};
   const ref = (typeof orderShortId === "function") ? orderShortId(order) : order.id;
   const all = (lines || []).filter(l => l && (Number(l.qty) || 0) > 0);
   const maxRows = small ? 4 : 9;
@@ -408,14 +408,14 @@ function printOrderAddress(order, lines, sizeId) {
     if (m && m.index > 0) addrLines = [addrLines[0].slice(0, m.index), addrLines[0].slice(m.index + 1)];
   }
   const one = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
-  const c = packLabelConfig();
+  const c = cfgOverride || packLabelConfig();
   // Recipient text scales by --fit; a long address shrinks until the label fits.
   const fit = (n) => `calc(${pt(n)} * var(--fit,1))`;
   const showSender = c.sender && ((c.senderName && s.name) || (c.senderAddr && (s.addr1 || s.addr2)) || (c.senderPhone && s.phone));
   const showItems = c.items && (c.itemSku || c.itemName || c.itemQty) && all.length > 0;
   // The last visible text column takes the free width; qty stays pinned right.
   const flexCol = c.itemName ? "name" : "sku";
-  _printPDHtml(
+  return (
     `<div class="__pdLbl" style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;display:flex;flex-direction:column;overflow:hidden;line-height:1.3;font-weight:500">` +
       // header
       (c.header ? `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
@@ -446,7 +446,11 @@ function printOrderAddress(order, lines, sizeId) {
           (!c.itemSku && !c.itemName ? `<span style="flex:1"></span>` : "") +
           (c.itemQty ? `<span style="font-weight:700;white-space:nowrap">× ${_escPD(l.qty)}</span>` : "") + `</div>`).join("") +
       (shown.length < all.length ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:0.5mm">… และอีก ${all.length - shown.length} รายการ</div>` : "") : "") +
-    `</div>`, size, fitPackLabel);
+    `</div>`);
+}
+function printOrderAddress(order, lines, sizeId) {
+  const size = PACK_LABEL_SIZES.find(x => x.id === sizeId) || packLabelSize();
+  _printPDHtml(buildPackLabelHtml(order, lines, size), size, fitPackLabel);
 }
 /* Shrink the recipient block step by step until nothing spills off the paper
    (floor 55% — still bigger than the sender/item text at that point). The
@@ -471,6 +475,82 @@ function printOrderFile(file) {
   _printPDHtml(`<img src="${_escPD(f.dataUrl)}" style="width:100mm;height:150mm;object-fit:contain;display:block">`);
 }
 
+
+/* ONE shop-wide setting for every printed ใบปะหน้า — opened from the แพ็คสินค้า
+   page header (desktop PackQueue + mobile MPack), never per order. Shows a live
+   preview with sample data so the owner sees the effect before printing. */
+const PACK_LABEL_SAMPLE = {
+  order: { id: "SO-20261007-001" },
+  lines: [{ sku: "PST-001", name: "กระเป๋าอเนกประสงค์", qty: 1 }, { sku: "AFG-OT33-BK", name: "เสื้อยืดแทคติคอล สีดำ L", qty: 2 }],
+  recip: { name: "คุณสมชาย ใจดี", phone: "080-000-0000", addrLines: ["99/12 หมู่ 3 ซอยสุขใจ ถนนประชาอุทิศ", "แขวงทุ่งครุ เขตทุ่งครุ กรุงเทพมหานคร 10140"], cod: 0, carrier: "Flash Express" }
+};
+function PackLabelSettings({ pushToast, mobile, onClose }) {
+  const [cfg, setCfg] = useStatePD(() => packLabelConfig());
+  const [paper, setPaper] = useStatePD(() => packLabelSize().id);
+  const [saving, setSaving] = useStatePD(false);
+  const canEdit = canEditPackLabel();
+  useEffectPD(() => {
+    const h = () => setCfg(packLabelConfig());
+    window.addEventListener("ims-store-change", h);
+    return () => window.removeEventListener("ims-store-change", h);
+  }, []);
+  const toggle = async (k) => {
+    if (!canEdit || saving) return;
+    const prev = cfg, next = { ...cfg, [k]: !cfg[k] };
+    setCfg(next); setSaving(true);
+    const res = await savePackLabelConfig(next);
+    setSaving(false);
+    if (res.error) { setCfg(prev); if (pushToast) pushToast({ msg: "บันทึกการตั้งค่าใบปะหน้าไม่สำเร็จ — ตรวจสอบสิทธิ์", type: "error" }); }
+  };
+  const size = PACK_LABEL_SIZES.find(z => z.id === paper) || PACK_LABEL_SIZES[0];
+  const html = buildPackLabelHtml(PACK_LABEL_SAMPLE.order, PACK_LABEL_SAMPLE.lines, size, cfg, PACK_LABEL_SAMPLE.recip);
+  const pxPerMm = 3.78, scale = Math.min(1, (mobile ? 200 : 230) / (size.w * pxPerMm));
+  return (
+    <div className={mobile ? "m-card" : "card"} style={{ padding: 16, marginBottom: mobile ? 12 : 0 }}>
+      <div className="row" style={{ justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+        <strong style={{ fontSize: 15 }}>⚙ ตั้งค่าใบปะหน้า</strong>
+        {onClose && <button className="btn btn-sm btn-ghost" onClick={onClose}><Icons.X size={14}/></button>}
+      </div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+        ตั้งครั้งเดียว ใช้กับใบปะหน้าทุกใบ ทุกเครื่อง · ชื่อและที่อยู่ผู้รับแสดงเสมอ
+        {!canEdit && " · เฉพาะผู้ดูแล/ผู้จัดการแก้ไขได้"}
+      </div>
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ flex: "1 1 240px", minWidth: 220 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>ขนาดกระดาษ <span style={{ fontWeight: 400, color: "var(--muted)" }}>(ของเครื่องนี้)</span></div>
+          <div className="row" style={{ gap: 6, marginBottom: 12 }}>
+            {PACK_LABEL_SIZES.map(z => (
+              <button key={z.id} className={"btn btn-sm" + (paper === z.id ? " btn-primary" : "")} onClick={() => { setPaper(z.id); setPackLabelSize(z.id); }}>{z.label}</button>
+            ))}
+          </div>
+          {PACK_LABEL_FIELDS.map(g => (
+            <div key={g.group} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>{g.group}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+                {g.items.map(([k, label]) => {
+                  const off = !canEdit || (g.group === "ผู้ส่ง" && k !== "sender" && !cfg.sender) || (g.group === "สินค้า" && k !== "items" && !cfg.items);
+                  return (
+                    <label key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: mobile ? 14 : 13, cursor: off ? "default" : "pointer", opacity: off && canEdit ? 0.45 : 1, minHeight: mobile ? 34 : 0 }}>
+                      <input type="checkbox" checked={!!cfg[k]} disabled={off} onChange={() => toggle(k)} style={{ width: 17, height: 17 }}/> {label}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ flex: "0 0 auto", margin: mobile ? "0 auto" : 0 }}>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>ตัวอย่าง (ข้อมูลสมมติ)</div>
+          <div style={{ width: size.w * pxPerMm * scale, height: size.h * pxPerMm * scale, overflow: "hidden", boxShadow: "var(--elev-2, 0 2px 10px rgba(0,0,0,.15))", background: "#fff" }}>
+            <div style={{ transform: `scale(${scale})`, transformOrigin: "0 0", color: "#000", background: "#fff", fontFamily: "'IBM Plex Sans Thai','Sarabun',Tahoma,sans-serif", letterSpacing: "normal" }}
+              dangerouslySetInnerHTML={{ __html: html }}/>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── UI ── */
 function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   const [file, setFile] = useStatePD(null);
@@ -484,19 +564,11 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   const r = packRecipientFor(order) || {};
   const [edit, setEdit] = useStatePD(null);   // null | { name, phone, addr, paste }
   const [paper, setPaper] = useStatePD(() => packLabelSize().id);
-  const [cfgOpen, setCfgOpen] = useStatePD(false);
-  const [cfg, setCfg] = useStatePD(() => packLabelConfig());
   useEffectPD(() => {
-    const h = () => setCfg(packLabelConfig());
-    window.addEventListener("ims-store-change", h);
-    return () => window.removeEventListener("ims-store-change", h);
+    const h = () => setPaper(packLabelSize().id);
+    window.addEventListener("ims-pack-label-size", h);
+    return () => window.removeEventListener("ims-pack-label-size", h);
   }, []);
-  const toggleCfg = async (k) => {
-    const prev = cfg, next = { ...cfg, [k]: !cfg[k] };
-    setCfg(next);
-    const res = await savePackLabelConfig(next);
-    if (res.error) { setCfg(prev); pushToast({ msg: "บันทึกการตั้งค่าใบปะหน้าไม่สำเร็จ — ตรวจสอบสิทธิ์", type: "error" }); }
-  };
   const startEdit = () => setEdit({ name: r.name || "", phone: r.phone || "", addr: r.addr || "", paste: "" });
   const splitPaste = () => {
     const p = (typeof parseRecipientBlob === "function") ? parseRecipientBlob(edit.paste) : null;
@@ -593,7 +665,6 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
               {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
             </select>
             <button className={btn} disabled={!r.addr} onClick={() => printOrderAddress(order, lines, paper)}><Icons.Print size={13}/> พิมพ์ใบปะหน้า</button>
-            {canEditPackLabel() && <button className={btn + (cfgOpen ? " btn-primary" : "")} title="เลือกข้อมูลที่จะแสดงบนใบปะหน้า" onClick={() => setCfgOpen(o => !o)}>⚙ ตั้งค่าใบปะหน้า</button>}
           </div>
         </div>
         {edit ? (
@@ -616,27 +687,6 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
             {r.phone && <div className="mono" style={{ fontSize: 13 }}>{r.phone}</div>}
             <div style={{ fontSize: 12.5, marginTop: 4, color: r.addr ? "var(--fg)" : "var(--muted)" }}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</div>
           </>
-        )}
-        {cfgOpen && canEditPackLabel() && (
-          <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
-            <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 2 }}>ข้อมูลที่แสดงบนใบปะหน้า</div>
-            <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8 }}>ใช้กับทุกเครื่อง · ชื่อและที่อยู่ผู้รับแสดงเสมอ</div>
-            {PACK_LABEL_FIELDS.map(g => (
-              <div key={g.group} style={{ marginBottom: 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>{g.group}</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
-                  {g.items.map(([k, label]) => {
-                    const off = (g.group === "ผู้ส่ง" && k !== "sender" && !cfg.sender) || (g.group === "สินค้า" && k !== "items" && !cfg.items);
-                    return (
-                      <label key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: mobile ? 14 : 13, cursor: off ? "default" : "pointer", opacity: off ? 0.45 : 1, minHeight: mobile ? 32 : 0 }}>
-                        <input type="checkbox" checked={!!cfg[k]} disabled={off} onChange={() => toggleCfg(k)} style={{ width: 16, height: 16 }}/> {label}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
-          </div>
         )}
         {(r.cod > 0 || r.carrier) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
       </div>
@@ -955,6 +1005,6 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
+  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments
 });
