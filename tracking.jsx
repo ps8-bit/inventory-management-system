@@ -4,13 +4,79 @@ const { useState: useStateTrk, useEffect: useEffectTrk, useRef: useRefTrk, useMe
 
 const ORDERS_KEY = "ims_orders_overrides";
 
+/* Override writes the server hasn't confirmed yet ({ id: entry }, localStorage).
+   A status edit (แพ็คเสร็จ, ส่งแล้ว, an address…) used to be fire-and-forget: on
+   weak Wi-Fi the merge failed silently, the next cloud reload replaced the local
+   map, and a packed order dropped back into รอแพ็ค on every device. Now each
+   write stays here until the merge succeeds, is laid over the server map on
+   read, and is retried on reconnect / foreground. */
+const ORDERS_PENDING_KEY = "ims_order_overrides_pending";
+function _loadOverridePending() {
+  try { const o = JSON.parse(localStorage.getItem(ORDERS_PENDING_KEY) || "{}"); return (o && typeof o === "object") ? o : {}; }
+  catch { return {}; }
+}
+function _saveOverridePending(p) {
+  try { Object.keys(p).length ? localStorage.setItem(ORDERS_PENDING_KEY, JSON.stringify(p)) : localStorage.removeItem(ORDERS_PENDING_KEY); } catch (e) {}
+}
+
 function loadOrderOverrides() {
   // Cloud-synced map (app_state key 'order_overrides') is source of truth once
   // dbInit has hydrated it; localStorage is only an offline fallback / seed.
-  if (window._DB_ORDER_OVERRIDES && typeof window._DB_ORDER_OVERRIDES === "object") return window._DB_ORDER_OVERRIDES;
-  try { return JSON.parse(localStorage.getItem(ORDERS_KEY) || "{}"); }
-  catch { return {}; }
+  let base;
+  if (window._DB_ORDER_OVERRIDES && typeof window._DB_ORDER_OVERRIDES === "object") base = window._DB_ORDER_OVERRIDES;
+  else { try { base = JSON.parse(localStorage.getItem(ORDERS_KEY) || "{}"); } catch { base = {}; } }
+  const pending = _loadOverridePending();
+  const ids = Object.keys(pending);
+  if (!ids.length) return base;
+  // Unconfirmed local writes win over a (possibly older) server copy.
+  const m = { ...base };
+  ids.forEach(id => { m[id] = { ...(base[id] || {}), ...pending[id] }; });
+  return m;
 }
+
+let _overrideFailToasted = false;
+async function _pushOverride(id, entry, fullMap) {
+  if (typeof dbMergeState !== "function") return false;
+  let res;
+  try { res = await dbMergeState("order_overrides", { [id]: entry }); } catch (e) { res = { error: String(e) }; }
+  if (res === null && typeof dbSaveState === "function") {
+    try { const r = await dbSaveState("order_overrides", fullMap || loadOrderOverrides()); res = (r && r.error) ? r : { ok: true }; }
+    catch (e) { res = { error: String(e) }; }
+  }
+  if (res && res.ok) {
+    const p = _loadOverridePending();
+    // Only clear if nothing newer was written for this order meanwhile.
+    if (p[id] && JSON.stringify(p[id]) === JSON.stringify(entry)) { delete p[id]; _saveOverridePending(p); }
+    return true;
+  }
+  if (res && res.error && /row-level security|permission/i.test(res.error)) {
+    // A refusal won't fix itself by retrying — drop it and say so.
+    const p = _loadOverridePending(); delete p[id]; _saveOverridePending(p);
+    window.dispatchEvent(new CustomEvent("ims-toast", { detail: "ไม่มีสิทธิ์บันทึกสถานะออร์เดอร์ " + id }));
+    return true;
+  }
+  if (!_overrideFailToasted) {
+    _overrideFailToasted = true;
+    window.dispatchEvent(new CustomEvent("ims-toast", { detail: "⚠️ สถานะออร์เดอร์ยังไม่ถึงเซิร์ฟเวอร์ — จะส่งซ้ำอัตโนมัติเมื่อเน็ตกลับมา" }));
+  }
+  return false;
+}
+let _overrideFlushing = false;
+async function flushOrderOverridePending() {
+  if (_overrideFlushing || (typeof navigator !== "undefined" && navigator.onLine === false)) return;
+  const p = _loadOverridePending();
+  const ids = Object.keys(p);
+  if (!ids.length) return;
+  _overrideFlushing = true;
+  let ok = 0;
+  try { for (const id of ids) { if (await _pushOverride(id, p[id])) ok++; } }
+  finally { _overrideFlushing = false; }
+  if (ok && !Object.keys(_loadOverridePending()).length) _overrideFailToasted = false;
+}
+window.addEventListener("online", () => { flushOrderOverridePending(); });
+window.addEventListener("focus", () => { flushOrderOverridePending(); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") flushOrderOverridePending(); });
+setTimeout(() => { flushOrderOverridePending(); }, 8000);   // after dbInit, for a relaunch with leftovers
 
 function setOrderField(id, changes) {
   const prev = loadOrderOverrides();
@@ -19,17 +85,12 @@ function setOrderField(id, changes) {
   const m = { ...prev, [id]: entry };
   window._DB_ORDER_OVERRIDES = m;
   try { localStorage.setItem(ORDERS_KEY, JSON.stringify(m)); } catch (e) {}
+  const p = _loadOverridePending(); p[id] = entry; _saveOverridePending(p);
   // Sync only THIS order's entry via a server-side merge, so a concurrent edit to
   // a different order on another device isn't clobbered (the old whole-map upsert
   // was last-write-wins). Falls back to the whole-map save if the merge RPC isn't
   // deployed yet (see supabase/merge-app-state.sql).
-  if (typeof dbMergeState === "function") {
-    dbMergeState("order_overrides", { [id]: entry }).then(res => {
-      if (res === null && typeof dbSaveState === "function") dbSaveState("order_overrides", m).catch(() => {});
-    }).catch(() => {});
-  } else if (typeof dbSaveState === "function") {
-    dbSaveState("order_overrides", m).catch(() => {});
-  }
+  _pushOverride(id, entry, m);
   window.dispatchEvent(new CustomEvent("ims-orders-change"));
 }
 
@@ -42,6 +103,8 @@ function clearOrderOverride(id) {
   if (!id) return;
   const prev = loadOrderOverrides();
   if (!prev[id] || !Object.keys(prev[id]).length) return; // nothing stale to clear
+  const pend = _loadOverridePending();
+  if (pend[id]) { delete pend[id]; _saveOverridePending(pend); }
   const m = { ...prev, [id]: {} };
   window._DB_ORDER_OVERRIDES = m;
   try { localStorage.setItem(ORDERS_KEY, JSON.stringify(m)); } catch (e) {}

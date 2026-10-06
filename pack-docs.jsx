@@ -148,6 +148,16 @@ async function deleteOrderAttachment(id) {
   return (data && data.length) ? { ok: true } : { error: "ไม่มีสิทธิ์ลบไฟล์" };
 }
 
+/* Files of cancelled/deleted orders (called from cancelOrdersAndRestock). */
+async function deleteOrderDocs(ids) {
+  const list = (ids || []).filter(Boolean);
+  if (!_pdDb() || !list.length) return;
+  list.forEach(id => { delete _orderFileCache[id]; });
+  await sb.from("order_files").delete().in("id", list);
+  await sb.from("order_attachments").delete().in("order_id", list);
+  refreshOrderFileIds().catch(() => {});
+}
+
 function PackAttachments({ orderId, pushToast, card }) {
   const [list, setList] = useStatePD([]);
   const [state, setState] = useStatePD("loading");   // loading | ok | error
@@ -227,9 +237,13 @@ function PackAttachments({ orderId, pushToast, card }) {
 /* Which orders already have a label file — ids only (no payload), so every
    queue row can show "มีใบปะหน้า" / "แนบใบปะหน้า" without loading files. */
 let _orderFileIds = null;
+let _orderFileWatchers = 0, _orderFileTimer = null, _orderFileVis = null;   // one poller for every chip on screen
 async function refreshOrderFileIds() {
   if (!_pdDb()) return;
-  const { data, error } = await sb.from("order_files").select("id");
+  // Recent files only: a queue order is days old, and an unbounded select would
+  // silently stop at PostgREST's 1000-row cap as the table grows.
+  const since = new Date(Date.now() - 90 * 86400000).toISOString();
+  const { data, error } = await sb.from("order_files").select("id").gte("updated_at", since);
   if (error) return;
   _orderFileIds = new Set((data || []).map(r => r.id));
   window.dispatchEvent(new CustomEvent("ims-order-files-change"));
@@ -239,8 +253,24 @@ function useOrderFileIds() {
   useEffectPD(() => {
     const h = () => bump(x => x + 1);
     window.addEventListener("ims-order-files-change", h);
-    if (!_orderFileIds) refreshOrderFileIds().catch(() => {});
-    return () => window.removeEventListener("ims-order-files-change", h);
+    // order_files has no realtime feed: re-read when a queue mounts, when the app
+    // comes back to the foreground, and once a minute while it's on screen, so a
+    // label attached on another device shows up without restarting the app.
+    const refresh = () => { if (document.visibilityState !== "hidden") refreshOrderFileIds().catch(() => {}); };
+    _orderFileWatchers++;
+    if (_orderFileWatchers === 1) {
+      refresh();
+      _orderFileTimer = setInterval(refresh, 60000);
+      document.addEventListener("visibilitychange", refresh);
+      _orderFileVis = refresh;
+    }
+    return () => {
+      window.removeEventListener("ims-order-files-change", h);
+      if (--_orderFileWatchers === 0) {
+        clearInterval(_orderFileTimer);
+        document.removeEventListener("visibilitychange", _orderFileVis);
+      }
+    };
   }, []);
   return _orderFileIds || new Set();
 }
@@ -603,6 +633,23 @@ function PackLabelSettings({ pushToast, mobile, onClose }) {
   );
 }
 
+/* One tap → print this order's label: the attached file if there is one, else
+   the 100×150 address label. Used per parcel in the หยิบรวม sort step. */
+function PackLabelButton({ order, lines, pushToast }) {
+  const [busy, setBusy] = useStatePD(false);
+  const go = async () => {
+    setBusy(true);
+    let file = null;
+    try { file = await loadOrderFile(order.id); } catch (e) { pushToast("โหลดใบปะหน้าไม่ได้ — ลองใหม่"); setBusy(false); return; }
+    setBusy(false);
+    if (file) { printOrderFile(file); return; }
+    const r = packRecipientFor(order) || {};
+    if (r.addr) { printOrderAddress(order, lines); return; }
+    pushToast("ออร์เดอร์นี้ยังไม่มีใบปะหน้าหรือที่อยู่");
+  };
+  return <button className="btn btn-sm" disabled={busy} onClick={go}><Icons.Print size={13}/> {busy ? "กำลังโหลด…" : "พิมพ์ใบปะหน้า"}</button>;
+}
+
 /* ── UI ── */
 function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   const [file, setFile] = useStatePD(null);
@@ -769,6 +816,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
   const [paste, setPaste] = useStatePD("");
   const [ch, setCh] = useStatePD(() => (typeof lastIssueChannel === "function" && lastIssueChannel()) || "other");
   const [busy, setBusy] = useStatePD(false);
+  const sendingRef = useRefPD(false);   // sync latch: this commit moves stock
   const inputRef = useRefPD(null);
 
   const lq = q.trim().toLowerCase();
@@ -814,7 +862,8 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
   };
 
   const send = async () => {
-    if (!canSend || typeof commitIssueOrder !== "function") return;
+    if (!canSend || typeof commitIssueOrder !== "function" || sendingRef.current) return;
+    sendingRef.current = true;
     setBusy(true);
     window.__packPromptSkip = true;                      // this page already covers the popup
     const lines = cart.map(x => x.type === "bundle"
@@ -822,10 +871,13 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
       : { type: "sku", sku: x.sku, name: x.name, qty: x.qty, ch, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === x.sku)) : "" });
     let id = null;
     try {
-      id = await commitIssueOrder({ lines, customer: (shipTo && shipTo.name) || (file ? "ดูใบปะหน้า" : "ลูกค้า"), ship: { phone: shipTo ? shipTo.phone : "" } }, () => {});
+      // Only the warnings get through (shelf update failed / order waiting to sync);
+      // the routine "ตัดสต็อก …" success line is replaced by our own toast below.
+      const warn = (m) => { if (/ไม่สำเร็จ|ออนไลน์|ยังไม่ได้/.test(String(m))) pushToast(m); };
+      id = await commitIssueOrder({ lines, customer: (shipTo && shipTo.name) || (file ? "ดูใบปะหน้า" : "ลูกค้า"), ship: { phone: shipTo ? shipTo.phone : "" } }, warn);
     } catch (e) { pushToast("สร้างออร์เดอร์ไม่สำเร็จ: " + (e.message || e)); }
     setTimeout(() => { window.__packPromptSkip = false; }, 1500);
-    if (!id) { setBusy(false); return; }
+    if (!id) { sendingRef.current = false; setBusy(false); return; }
     try { if (typeof rememberIssueChannel === "function") rememberIssueChannel(ch); } catch (e) {}
     if (shipTo && typeof setOrderField === "function") setOrderField(id, { shipTo });
     if (file) {
@@ -970,6 +1022,10 @@ function PackSendPrompt({ pushToast, mobile }) {
       if (window.__packPromptSkip) return;                             // sent from สั่งแพ็คใหม่ — already attached
       if (typeof canDo === "function" && !canDo("sell")) return;
       setTimeout(() => {                                               // let the sale screen close first
+        // ขาย + จัดส่ง already typed the full address (its label exists by now) —
+        // asking for it again is noise.
+        const known = packRecipientFor({ id: d.id }) || {};
+        if (known.addr) return;
         setOrder({ id: d.id }); setFile(null); setAddrMode(false); setPaste(""); setSavedAddr(null);
       }, 400);
     };
@@ -1058,5 +1114,6 @@ function PackSendPrompt({ pushToast, mobile }) {
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
   packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
-  loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments
+  loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
+  deleteOrderDocs, PackLabelButton
 });
