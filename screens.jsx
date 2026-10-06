@@ -6966,6 +6966,8 @@ function PackQueue({ pushToast, goTo, user }) {
                             </table>
                           </>
                         )}
+                        {/* ใบปะหน้า + ที่อยู่ + (owner) ยกเลิก/คืนสต็อก — pack-docs.jsx */}
+                        {typeof PackShipDocs === "function" && <PackShipDocs order={r.o} lines={r.lines} pushToast={pushToast} onCancelled={() => setOpen(null)}/>}
                       </td>
                     </tr>
                   )}

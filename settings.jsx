@@ -405,7 +405,7 @@ const DEFAULT_STORE = {
     phone: ""
   },
   // Working-hours access window (off by default; configured on this page).
-  workHours: (typeof defaultWorkHours === "function") ? defaultWorkHours() : { enabled: false, roles: ["staff", "viewer"], days: {} }
+  workHours: (typeof defaultWorkHours === "function") ? defaultWorkHours() : { enabled: false, roles: ["staff", "packer", "viewer"], days: {} }
 };
 
 /* ── Category Manager ── */

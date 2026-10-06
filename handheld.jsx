@@ -72,7 +72,7 @@ function PhoneFrame({ children }) {
 /* =============== MAIN MOBILE APP =============== */
 
 function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
-  const [route, setRouteRaw] = useStateM({ tab: "home", view: null, params: null, history: [] });
+  const [route, setRouteRaw] = useStateM(() => mStartRoute(user && user.role));
   const setRoute = (r) => setRouteRaw(r);
   /* switchTab("inventory") — plain tab switch (every existing caller).
      switchTab("inventory", { status: "low" }) — switch AND hand the tab screen a
@@ -97,12 +97,17 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
 
   /* Role permissions changed (edited here, or pushed from another device via
      realtime) → re-render so the menu and every canDo() gate re-resolve. */
-  const [, setPermTick] = useStateM(0);
+  const [permTick, setPermTick] = useStateM(0);
   useEffectM(() => {
     const h = () => setPermTick(t => t + 1);
     window.addEventListener("ims-perms-change", h);
     return () => window.removeEventListener("ims-perms-change", h);
   }, []);
+  // A tab revoked by an admin (or a role switch) → move to the role's start route.
+  useEffectM(() => {
+    const role = user && user.role;
+    if (!route.view && !mTabAllowed(route.tab, role)) setRouteRaw(mStartRoute(role));
+  }, [permTick, user && user.role]);
 
   const ctx = { route, switchTab, push, back, pushToast, user, onLogout, onSwitchUser, fullscreen, pendingSync };
 
@@ -112,7 +117,7 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
       <ErrorBoundary key={(route.view || "") + ":" + (route.tab || "")} mobile>
         <Screen ctx={ctx}/>
       </ErrorBoundary>
-      <TabBar tab={route.tab} onSwitch={switchTab}/>
+      <TabBar tab={route.tab} onSwitch={switchTab} role={user && user.role}/>
     </div>
   );
 }
@@ -132,25 +137,36 @@ function StatusBar() {
   );
 }
 
-/* Bottom tabs → the nav id each one maps to. "home"/"more" are always available
-   (dashboard is the landing screen and "more" is how you reach everything else);
-   the other three are real nav ids and must honour the role's page list, or the
-   permission editor's chips would be a no-op on the phone. */
-const M_TAB_NAV_ID = { inbound: "inbound", outbound: "outbound", inventory: "inventory" };
-function mTabAllowed(tabId) {
+/* Bottom tabs → the nav id each one maps to. "more" is always available (it's
+   how you reach everything else and holds logout); the others are real nav ids
+   and must honour the role's page list, or the permission editor's chips would
+   be a no-op on the phone. "home" is the dashboard — a role without it (the
+   pack-only พนักงานแพ็ค) gets no home screen at all.
+   `role` is passed explicitly where known: window.__currentUser is set by a
+   parent effect, which runs AFTER this subtree's first render. */
+const M_TAB_NAV_ID = { home: "dashboard", inbound: "inbound", outbound: "outbound", inventory: "inventory" };
+function mTabAllowed(tabId, role) {
   const navId = M_TAB_NAV_ID[tabId];
   if (!navId) return true;
-  return typeof canOpenPage !== "function" || canOpenPage(navId);
+  return typeof canOpenPage !== "function" || canOpenPage(navId, role);
+}
+/* Where the phone app opens: the first allowed tab, else straight into
+   แพ็คสินค้า when that's the role's page, else the More menu. */
+function mStartRoute(role) {
+  const tab = ["home", "inbound", "outbound", "inventory"].find(t => mTabAllowed(t, role));
+  if (tab) return { tab, view: null, params: null, history: [] };
+  if (typeof canOpenPage === "function" && canOpenPage("pack", role)) return { tab: "more", view: "pack", params: null, history: [] };
+  return { tab: "more", view: null, params: null, history: [] };
 }
 
-function TabBar({ tab, onSwitch }) {
+function TabBar({ tab, onSwitch, role }) {
   const tabs = [
     { id: "home",      label: "หน้าหลัก", icon: Icons.Dash },
     { id: "inbound",   label: "รับเข้า",  icon: Icons.In },
     { id: "outbound",  label: "จัดส่ง",   icon: Icons.Out },
     { id: "inventory", label: "สินค้า",   icon: Icons.Box },
     { id: "more",      label: "เพิ่มเติม", icon: Icons.Menu }
-  ].filter(t => mTabAllowed(t.id));
+  ].filter(t => mTabAllowed(t.id, role));
   return (
     <div className="m-tabbar">
       {tabs.map(t => {
@@ -176,14 +192,15 @@ const M_GATED_VIEWS = ["locations", "labels", "tracking", "import", "bundles", "
 /* Screen dispatcher */
 function Screen({ ctx }) {
   const { route } = ctx;
+  const role = ctx.user && ctx.user.role;
   if (route.view && M_GATED_VIEWS.indexOf(route.view) !== -1
-      && typeof canOpenPage === "function" && !canOpenPage(route.view)) {
+      && typeof canOpenPage === "function" && !canOpenPage(route.view, role)) {
     return <MNoAccess ctx={ctx}/>;
   }
   // Tab screens are dispatched from route.tab, so they need their own check —
   // the tab bar hides a revoked tab, but a route saved before the change can
   // still land here.
-  if (!route.view && !mTabAllowed(route.tab)) return <MNoAccess ctx={ctx}/>;
+  if (!route.view && !mTabAllowed(route.tab, role)) return <MNoAccess ctx={ctx}/>;
   // Selling / issuing stock is a capability, not a page — MSell and MIssue have
   // several entry points, so the guard lives here rather than on each button.
   if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell") && typeof canDo === "function" && !canDo("sell")) {
@@ -195,7 +212,7 @@ function Screen({ ctx }) {
   // The pack sub-views (one order / one wave) are not nav ids of their own, so the
   // M_GATED_VIEWS loop above can't see them — gate them on the แพ็คสินค้า page.
   if ((route.view === "pack-order" || route.view === "pack-wave")
-      && typeof canOpenPage === "function" && !canOpenPage("pack")) {
+      && typeof canOpenPage === "function" && !canOpenPage("pack", role)) {
     return <MNoAccess ctx={ctx}/>;
   }
   // sub-views
@@ -4044,7 +4061,8 @@ function MMore({ ctx }) {
 
         <div className="m-list">
           {items.filter(it =>
-            it.id === "catalog" ||
+            // the reference catalog is a product view — not for a pack-only role
+            (it.id === "catalog" && (typeof canOpenPage !== "function" || canOpenPage("inventory", user.role))) ||
             ((typeof canOpenPage !== "function" || canOpenPage(it.id, user.role))
               // ปรับสต็อก is a page id AND a capability — both must hold, or the
               // row would open a screen the Screen guard immediately blocks.
@@ -5960,7 +5978,7 @@ function MSettings({ ctx }) {
 /* Mobile working-hours config — mirrors the desktop WorkHoursCard. Restricts the
    selected roles to a per-weekday schedule; enforcement lives in app.jsx Root. */
 function MWorkHoursCard({ store, save }) {
-  const fallback = { enabled: false, roles: ["staff", "viewer"], days: {} };
+  const fallback = { enabled: false, roles: ["staff", "packer", "viewer"], days: {} };
   const wh = store.workHours || (typeof defaultWorkHours === "function" ? defaultWorkHours() : fallback);
   const dayLabels = (typeof WORKHOURS_DAY_LABELS !== "undefined") ? WORKHOURS_DAY_LABELS
     : ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
@@ -7031,6 +7049,9 @@ function MPackOrder({ ctx }) {
           </div>
           {order.note && <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 11.5 }}>โน้ต: {order.note}</div>}
         </div>
+
+        {/* ใบปะหน้า + ที่อยู่ + (owner) ยกเลิก/คืนสต็อก — pack-docs.jsx */}
+        {typeof PackShipDocs === "function" && <PackShipDocs order={order} lines={lines} pushToast={ctx.pushToast} mobile onCancelled={ctx.back}/>}
 
         {camOpen && <CameraScanner onScan={onScan} onClose={() => setCamOpen(false)}/>}
 

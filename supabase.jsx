@@ -1346,12 +1346,23 @@ async function resolveWebImages(urls) {
 /* ── Full-data backup ── a raw snapshot of every table, for manual export and
    (server-side) the nightly Google Drive backup. RLS-scoped to the caller. */
 const BACKUP_TABLES = ['products', 'orders', 'bundles', 'bundle_items', 'labels', 'store_settings', 'app_state', 'audit_log'];
+// Stable sort key per table so paging past PostgREST's 1000-row cap is exact
+// (an un-paged select('*') silently returned only the first 1000 rows).
+const BACKUP_ORDER = { products: 'sku', orders: 'id', bundles: 'id', bundle_items: 'bundle_id,sku', labels: 'id', store_settings: 'key', app_state: 'key', audit_log: 'id' };
 async function buildBackupSnapshot() {
   const tables = {};
   for (const t of BACKUP_TABLES) {
     try {
-      const { data, error } = await sb.from(t).select('*');
-      tables[t] = (error || !data) ? [] : data;
+      const rows = [];
+      for (let from = 0; ; from += 1000) {
+        let q = sb.from(t).select('*');
+        (BACKUP_ORDER[t] || '').split(',').filter(Boolean).forEach(c => { q = q.order(c); });
+        const { data, error } = await q.range(from, from + 999);
+        if (error || !data) break;
+        rows.push(...data);
+        if (data.length < 1000) break;
+      }
+      tables[t] = rows;
     } catch (e) { tables[t] = []; }
   }
   return {

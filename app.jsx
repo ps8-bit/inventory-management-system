@@ -914,6 +914,9 @@ function App({ user, onLogout, onSwitchUser }) {
      roleNav() honours the admin's per-role override (app_state "role_perms")
      and falls back to the built-in ROLE_NAV defaults. */
   const allowed = new Set(typeof roleNav === "function" ? roleNav(user.role) : (ROLE_NAV[user.role] || []));
+  // Global search + notifications surface products and orders — hide them from a
+  // role that can't open any of those pages (the pack-only พนักงานแพ็ค).
+  const canLookup = ["inventory", "finder", "outbound", "tracking", "dashboard"].some(id => allowed.has(id));
   const visibleNav = navItems
     .filter(i => i.visible)
     .map(i => ALL_NAV.find(n => n.id === i.id))
@@ -988,11 +991,13 @@ function App({ user, onLogout, onSwitchUser }) {
             <span>WMS</span> <span style={{ margin: "0 8px", color: "var(--faint)" }}>/</span> <strong>{CRUMB_MAP[page]}</strong>
           </div>
           <div className="topbar-right">
+            {canLookup && (
             <div className="search" onClick={() => { setSearchQ(""); setSearchOpen(true); }} style={{ cursor:"pointer", userSelect:"none" }}>
               <Icons.Search size={14}/>
               <span style={{ fontSize:13, color:"var(--muted)", flex:1 }}>ค้นหา SKU, ออร์เดอร์, ลูกค้า...</span>
               <span className="kbd">{/Mac|iPhone|iPad/.test(navigator.platform || "") ? "⌘K" : "Ctrl K"}</span>
             </div>
+            )}
             {/* ขายออก = the everyday sale (scan → qty → channel). ขาย + จัดส่ง keeps the
                 full flow with a shipping address for orders that need a label. */}
             {canDo("sell") && (
@@ -1011,13 +1016,13 @@ function App({ user, onLogout, onSwitchUser }) {
                 <span>{pendingSync} รอซิงค์</span>
               </div>
             )}
-            <div ref={notifRef} style={{ position:"relative" }}>
+            {canLookup && <div ref={notifRef} style={{ position:"relative" }}>
               <button className="btn btn-ghost btn-icon" style={{ position:"relative" }} onClick={() => setNotifOpen(o => !o)}>
                 <Icons.Bell size={16}/>
                 {notifCount > 0 && <span style={{ position:"absolute", top:5, right:5, width:7, height:7, borderRadius:999, background:"var(--danger)" }}/>}
               </button>
               {notifOpen && <NotifPopover onClose={() => setNotifOpen(false)} goTo={goTo} goToProduct={goToProduct} goToOrder={goToOrder}/>}
-            </div>
+            </div>}
           </div>
         </header>
 
@@ -1065,7 +1070,7 @@ function App({ user, onLogout, onSwitchUser }) {
 
       {quickSellOpen && typeof QuickSellModal === "function" && <QuickSellModal onClose={() => setQuickSellOpen(false)} pushToast={pushToast}/>}
 
-      {searchOpen && <SearchOverlay q={searchQ} setQ={setSearchQ} onClose={() => setSearchOpen(false)} goToProduct={goToProduct} goToOrder={goToOrder}/>}
+      {searchOpen && canLookup && <SearchOverlay q={searchQ} setQ={setSearchQ} onClose={() => setSearchOpen(false)} goToProduct={goToProduct} goToOrder={goToOrder}/>}
 
       <TweaksPanel title="ปรับแต่งหน้าจอ">
         <TweakSection label="การแสดงผล">

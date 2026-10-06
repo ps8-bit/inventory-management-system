@@ -1973,6 +1973,7 @@ const ROLES = [
   { id: "admin",   label: "ผู้ดูแลระบบ", desc: "เข้าถึงและจัดการทุกฟีเจอร์ รวมถึงผู้ใช้งานและสิทธิ์", color: "oklch(0.55 0.2 25)",  badge: "badge-danger" },
   { id: "manager", label: "ผู้จัดการ",   desc: "ดูและจัดการสต็อก ออร์เดอร์ ฉลาก แต่จัดการผู้ใช้ไม่ได้", color: "oklch(0.5 0.18 252)", badge: "badge-info" },
   { id: "staff",   label: "พนักงานคลัง", desc: "รับเข้า ตัดสต็อก พิมพ์ฉลาก เท่านั้น",          color: "oklch(0.55 0.15 150)", badge: "badge-success" },
+  { id: "packer",  label: "พนักงานแพ็ค", desc: "เห็นเฉพาะหน้าแพ็คสินค้า: หยิบ ติ๊ก แพ็คเสร็จ และพิมพ์ใบปะหน้า", color: "oklch(0.62 0.17 55)", badge: "badge-warning" },
   { id: "viewer",  label: "ดูเท่านั้น",   desc: "ดูข้อมูลและรายงานได้ ไม่สามารถแก้ไข",         color: "oklch(0.55 0.01 80)",  badge: "badge-neutral" }
 ];
 
@@ -1982,6 +1983,8 @@ const ROLE_NAV = {
   admin:   ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
   manager: ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
   staff:   ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","bundles","labels","tracking","handheld"],
+  // พนักงานแพ็ค — the แพ็คสินค้า page only (desktop sidebar AND mobile: no home/tabs).
+  packer:  ["pack"],
   viewer:  ["dashboard","finder","inventory","locations","bundles","labels","tracking","analytics"]
 };
 
@@ -2016,6 +2019,7 @@ const DEFAULT_ROLE_CAPS = {
   manager: { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: true,  deleteData: true,  exportData: true },
   // Warehouse staff work the floor: they move stock but never see money.
   staff:   { viewCost: false, viewSales: false, sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: false, deleteData: false, exportData: true },
+  packer:  { viewCost: false, viewSales: false, sell: false, adjustStock: false, addProduct: false, editProduct: false, renameSku: false, deleteData: false, exportData: false },
   viewer:  { viewCost: true,  viewSales: true,  sell: false, adjustStock: false, addProduct: false, editProduct: false, renameSku: false, deleteData: false, exportData: true }
 };
 
@@ -2115,7 +2119,7 @@ function defaultWorkHours() {
   for (let d = 0; d < 7; d++) days[d] = { on: d >= 1 && d <= 6, open: "08:00", close: "18:00" };
   // exceptions: { <userId>: "YYYY-MM-DD" } — a per-user "allow outside hours"
   // pass that is valid only for that Bangkok date, then auto-expires at midnight.
-  return { enabled: false, roles: ["staff", "viewer"], days, exceptions: {} };
+  return { enabled: false, roles: ["staff", "packer", "viewer"], days, exceptions: {} };
 }
 
 // "YYYY-MM-DD" for an epoch-ms timestamp, in Asia/Bangkok (used for today-only

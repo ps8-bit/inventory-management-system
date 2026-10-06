@@ -11,6 +11,12 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import * as XLSX from "./xlsx.mjs";
 
 const TABLES = ["products", "orders", "bundles", "bundle_items", "labels", "store_settings", "app_state", "audit_log"];
+// Stable sort key per table so paging past PostgREST's 1000-row cap is exact
+// (an un-paged select("*") silently returned only the first 1000 rows).
+const ORDER: Record<string, string[]> = {
+  products: ["sku"], orders: ["id"], bundles: ["id"], bundle_items: ["bundle_id", "sku"], labels: ["id"],
+  store_settings: ["key"], app_state: ["key"], audit_log: ["id"],
+};
 
 // Same columns/labels as the in-app report (data.jsx buildStockReportWorkbook) —
 // keep the two in sync so the nightly Excel and the manual download match.
@@ -240,9 +246,18 @@ Deno.serve(async (req) => {
   const counts: Record<string, number> = {};
   const errors: Record<string, string> = {};
   for (const t of TABLES) {
-    const { data, error } = await admin.from(t).select("*");
-    if (error) { tables[t] = []; errors[t] = error.message; }
-    else tables[t] = data || [];
+    const rows: unknown[] = [];
+    let err: string | null = null;
+    for (let from = 0; ; from += 1000) {
+      let q = admin.from(t).select("*");
+      for (const c of ORDER[t] || []) q = q.order(c);
+      const { data, error } = await q.range(from, from + 999);
+      if (error) { err = error.message; break; }
+      rows.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+    if (err) { tables[t] = []; errors[t] = err; }
+    else tables[t] = rows;
     counts[t] = Array.isArray(tables[t]) ? (tables[t] as unknown[]).length : 0;
   }
   const partial = Object.keys(errors).length > 0;
