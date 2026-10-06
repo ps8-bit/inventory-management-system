@@ -374,16 +374,21 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
 
   const lq = q.trim().toLowerCase();
   const avail = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : ((PRODUCTS.find(p => p.sku === sku) || {}).qty || 0));
-  const hits = !lq ? [] : [
+  // Always a full, scrollable list — typing only narrows it. Every word must
+  // match (any order), so "ชุดเกราะ m" finds "ชุดเกราะ 55GEAR FCSK 3.0 [M]".
+  // In-stock first; capped at 1000 rows (thumbnails are lazy).
+  const words = lq.split(/\s+/).filter(Boolean);
+  const match = (text) => { const t = String(text || "").toLowerCase(); return words.every(w => t.includes(w)); };
+  const allHits = [
     ...((typeof loadBundles === "function" ? loadBundles() : []) || [])
-      .filter(b => (b.name || "").toLowerCase().includes(lq)).slice(0, 3)
+      .filter(b => match(b.name))
       .map(b => ({ key: "b:" + b.id, type: "bundle", id: b.id, name: b.name, items: b.items, stock: typeof bundleAvail === "function" ? bundleAvail(b) : 0 })),
-    ...PRODUCTS.filter(p => ((p.name || "") + " " + p.sku).toLowerCase().includes(lq)).slice(0, 8)
+    ...PRODUCTS.filter(p => match((p.name || "") + " " + p.sku + " " + (p.cat || "")))
       .map(p => ({ key: "s:" + p.sku, type: "sku", sku: p.sku, name: p.name, stock: avail(p.sku) }))
-  ];
+  ].sort((a, b) => (b.stock > 0) - (a.stock > 0));
+  const hits = allHits.slice(0, 1000);
   const add = (h) => {
     setCart(c => c.some(x => x.key === h.key) ? c.map(x => x.key === h.key ? { ...x, qty: x.qty + 1 } : x) : [...c, { ...h, qty: 1 }]);
-    setQ("");
   };
   const setQty = (key, n) => setCart(c => n <= 0 ? c.filter(x => x.key !== key) : c.map(x => x.key === key ? { ...x, qty: n } : x));
 
@@ -440,8 +445,11 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
       <div>
         <div style={sec}>1. สินค้าที่ต้องแพ็ค</div>
         <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 พิมพ์ชื่อสินค้า หรือ SKU" style={{ width: "100%", fontSize: 15, padding: "12px 14px" }}/>
+        <div style={{ fontSize: 11, color: "var(--muted)", margin: "6px 2px 4px" }}>
+          {lq ? `พบ ${allHits.length} รายการ` : `สินค้าทั้งหมด ${allHits.length} รายการ — เลื่อนเลือก หรือพิมพ์ค้นหา`}{allHits.length > hits.length ? ` (แสดง ${hits.length} — พิมพ์เพิ่มเพื่อกรอง)` : ""}
+        </div>
         {hits.length > 0 && (
-          <div style={{ border: "1px solid var(--border)", borderRadius: 12, marginTop: 6, overflow: "hidden" }}>
+          <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflowY: "auto", maxHeight: mobile ? 300 : 260, overscrollBehavior: "contain" }}>
             {hits.map(h => (
               <button key={h.key} onClick={() => add(h)} disabled={h.stock <= 0}
                 style={{ display: "flex", width: "100%", gap: 10, alignItems: "center", padding: "10px 12px", border: "none", borderBottom: "1px solid var(--border)", background: "var(--surface)", color: "var(--fg)", textAlign: "left", fontFamily: "inherit", cursor: h.stock > 0 ? "pointer" : "not-allowed", opacity: h.stock > 0 ? 1 : 0.5 }}>
@@ -450,7 +458,9 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
                   <span style={{ display: "block", fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.type === "bundle" ? "ชุด: " : ""}{h.name}</span>
                   <span style={{ fontSize: 11, color: "var(--muted)" }}>{h.sku || "ชุดสินค้า"} · เหลือ {h.stock}</span>
                 </span>
-                <span style={{ fontSize: 20, color: "var(--accent)", fontWeight: 700 }}>＋</span>
+                {(() => { const inCart = cart.find(c => c.key === h.key); return inCart
+                  ? <span style={{ fontSize: 13, color: "#fff", background: "var(--accent)", borderRadius: 999, padding: "2px 9px", fontWeight: 700 }}>{inCart.qty}</span>
+                  : <span style={{ fontSize: 20, color: "var(--accent)", fontWeight: 700 }}>＋</span>; })()}
               </button>
             ))}
           </div>
