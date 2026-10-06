@@ -139,12 +139,21 @@ function PackDocChip({ order, onOpen }) {
   return (
     <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", marginTop: 4 }} onClick={onOpen ? (e) => { e.stopPropagation(); onOpen(); } : undefined}>
       {has ? chip("var(--success-soft)", "var(--success)", "📎 มีใบปะหน้า")
-        : canAttach ? chip("var(--accent-soft)", "var(--accent)", "📎 แนบใบปะหน้า")
+        : canUploadOrderFile() ? chip("var(--accent-soft)", "var(--accent)", "📎 แนบใบปะหน้า")
         : null}
       {r.addr ? chip("var(--info-soft)", "var(--info)", "📍 มีที่อยู่")
         : (!has && canAttach) ? chip("var(--surface-2)", "var(--muted)", "＋ ที่อยู่") : null}
     </span>
   );
+}
+
+/* Who may attach/replace a label file: everyone who can sell, plus the packer —
+   the owner wants the packer to be able to photograph / upload the slip too.
+   Deleting a file stays with sell roles (RLS: order_files delete excludes packer). */
+function canUploadOrderFile() {
+  if (typeof canDo !== "function") return true;
+  if (canDo("sell")) return true;
+  return typeof canOpenPage === "function" && canOpenPage("pack");
 }
 
 /* ── recipient ── the label made by ขาย + จัดส่ง carries the address; an order
@@ -225,6 +234,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   const [rev, setRev] = useStatePD(0);
   const inputRef = useRefPD(null);
   const canAttach = typeof canDo !== "function" || canDo("sell");
+  const canUpload = canUploadOrderFile();
   const canCancel = typeof canDeleteData === "function" && canDeleteData();
   const r = packRecipientFor(order) || {};
   const [edit, setEdit] = useStatePD(null);   // null | { name, phone, addr, paste }
@@ -300,14 +310,14 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
           <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
             {file && <button className={btn} onClick={() => openOrderFile(file)}><Icons.Eye size={13}/> เปิด</button>}
             {file && <button className={btn} onClick={() => printOrderFile(file)}><Icons.Print size={13}/> พิมพ์</button>}
-            {canAttach && <button className={btn} disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={13}/> {file ? "เปลี่ยน" : "แนบไฟล์"}</button>}
+            {canUpload && <button className={btn} disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={13}/> {file ? "เปลี่ยน" : "แนบไฟล์"}</button>}
             {canAttach && file && <button className="btn btn-sm btn-ghost" disabled={busy} onClick={remove}><Icons.Trash size={13}/></button>}
           </div>
         </div>
         <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
         {state === "loading" ? <div style={{ fontSize: 12, color: "var(--muted)" }}>กำลังโหลด…</div>
           : state === "error" ? <div style={{ fontSize: 12, color: "var(--danger)" }}>โหลดไฟล์ไม่ได้ <button className="btn btn-ghost btn-sm" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
-          : !file ? <div style={{ fontSize: 12, color: "var(--muted)" }}>{busy ? "กำลังอัปโหลด…" : canAttach ? "ยังไม่มีไฟล์ — แนบรูปหรือ PDF ใบปะหน้าจาก Shopee / Lazada / ขนส่ง" : "ไม่มีไฟล์แนบ — ใช้ที่อยู่ด้านล่าง"}</div>
+          : !file ? <div style={{ fontSize: 12, color: "var(--muted)" }}>{busy ? "กำลังอัปโหลด…" : canUpload ? "ยังไม่มีไฟล์ — แนบรูปหรือ PDF ใบปะหน้าจาก Shopee / Lazada / ขนส่ง" : "ไม่มีไฟล์แนบ — ใช้ที่อยู่ด้านล่าง"}</div>
           : file.type === "application/pdf" ? <div style={{ fontSize: 13 }}>📄 {file.name}</div>
           : <img src={file.dataUrl} alt="ใบปะหน้า" style={{ width: "100%", maxHeight: mobile ? 320 : 260, objectFit: "contain", borderRadius: 8, background: "#fff" }}/>}
       </div>
@@ -658,5 +668,5 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, PackSendPrompt, PackNewOrder, MPackNew
+  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew
 });
