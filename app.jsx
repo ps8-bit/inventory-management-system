@@ -666,6 +666,7 @@ function Root() {
   if (authFlow) return (
     <ResetPasswordScreen
       mode={authFlow}
+      email={user ? user.email : ""}
       onDone={() => {
         // Clean the token out of the URL, then continue into the app
         // (the new password's session is already active).

@@ -19,6 +19,45 @@ function authErrorToThai(message) {
   return "เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง";
 }
 
+/* Thai message for a failed updateUser({ password }) on the set-password screen.
+   These used to fall through authErrorToThai to "เข้าสู่ระบบไม่สำเร็จ" — a LOGIN
+   message that names no cause — so a user whose new password was simply rejected
+   (same as the old one, too weak, too long) retried the same input forever.
+   Classify on GoTrue's error code first, message second; an unrecognised error
+   keeps the server text so the next report says what actually went wrong. */
+function passwordUpdateErrorToThai(err) {
+  const code = String((err && err.code) || "");
+  const m    = String((err && err.message) || "");
+  const has  = (re) => re.test(code) || re.test(m);
+  if (has(/same_password|different from the old/i))
+    return "รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านเดิม — กรุณาตั้งรหัสผ่านอื่น";
+  if (has(/longer than 72|too long/i))
+    return "รหัสผ่านยาวเกินไป — ใช้ไม่เกิน 72 ตัวอักษรภาษาอังกฤษ (ตัวอักษรไทย 1 ตัวนับเป็น 3)";
+  if (has(/weak_password|at least one character|should contain|should be at least|pwned|leaked|known to be weak/i)) {
+    const req = [];
+    // GoTrue lists the required character sets literally:
+    // "…at least one character of each: abcdef…xyz, ABCDEF…XYZ, 0123456789, !@#$…"
+    if (/lower|abcdef/.test(m))            req.push("ตัวพิมพ์เล็ก (a-z)");
+    if (/upper|ABCDEF/.test(m))            req.push("ตัวพิมพ์ใหญ่ (A-Z)");
+    if (/digit|number|0123/i.test(m))      req.push("ตัวเลข (0-9)");
+    if (/symbol|special|!@#/i.test(m))     req.push("สัญลักษณ์ (เช่น ! @ #)");
+    if (/pwned|leaked|known to be weak/i.test(m)) return "รหัสผ่านนี้เคยรั่วไหลหรือเดาง่ายเกินไป — กรุณาตั้งรหัสผ่านอื่น";
+    const min = (m.match(/at least (\d+) char/i) || [])[1];
+    if (req.length) return "รหัสผ่านต้องมี " + req.join(", ") + " อย่างน้อยอย่างละ 1 ตัว";
+    if (min)        return "รหัสผ่านต้องมีอย่างน้อย " + min + " ตัวอักษร";
+    return "รหัสผ่านไม่ผ่านเงื่อนไขความปลอดภัย — ลองใช้ตัวพิมพ์เล็ก ตัวพิมพ์ใหญ่ ตัวเลข และสัญลักษณ์ผสมกัน";
+  }
+  if (has(/reauthentication/i))
+    return "ลิงก์นี้เปิดค้างไว้นานเกินไป — กรุณากด “ลืมรหัสผ่าน?” เพื่อขอลิงก์ใหม่แล้วตั้งรหัสทันที";
+  if (has(/session.*missing|auth session|not authenticated|jwt|expired|invalid.*token|session_not_found|user_not_found/i) || (err && (err.status === 401 || err.status === 403)))
+    return "ลิงก์ตั้งรหัสผ่านหมดอายุหรือถูกใช้ไปแล้ว — กรุณากด “ลืมรหัสผ่าน?” เพื่อขอลิงก์ใหม่ (ลิงก์ใช้ได้ครั้งเดียว)";
+  if (has(/rate|too many|429/i))
+    return "พยายามบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่";
+  if (has(/network|fetch|failed to fetch|timeout/i) || (err && err.name === "AuthRetryableFetchError"))
+    return "เชื่อมต่อไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่";
+  return "บันทึกรหัสผ่านไม่สำเร็จ" + (m ? " (" + m + ")" : "") + " — กรุณาลองใหม่ หรือขอลิงก์ใหม่";
+}
+
 /* Friendly Thai message for an auth email-link failure carried back in the URL.
    When a recovery / invite link is expired, already-used, or rejected, Supabase
    redirects with ?error=… / #error=… (error_code + description) and NO session —
@@ -50,7 +89,12 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
     setError("");
     const { error: err } = await authSignIn(email, password);
     if (err) {
-      setError(authErrorToThai(err.message));
+      // Gmail ignores dots but Supabase matches the address exactly, so
+      // "pstactical8@" vs the registered "ps.tactical8@" fails as a wrong
+      // password — even right after a successful reset.
+      const gmailHint = err.message === "Invalid login credentials" && /@(gmail|googlemail)\.com$/i.test(email.trim())
+        ? " — อีเมล Gmail ต้องพิมพ์ให้ตรงกับที่ลงทะเบียนทุกตัว รวมจุด (.) ด้วย" : "";
+      setError(authErrorToThai(err.message) + gmailHint);
       setLoading(false);
     }
     // On success authOnChange in Root fires → user state updates automatically
@@ -178,7 +222,7 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
    parses the recovery token from the URL, establishes a temporary session,
    and fires a PASSWORD_RECOVERY event — Root catches it and renders this so
    the user can actually set a new password (authUpdatePassword). */
-function ResetPasswordScreen({ onDone, onCancel, mode = "recovery" }) {
+function ResetPasswordScreen({ onDone, onCancel, mode = "recovery", email = "" }) {
   const isInvite = mode === "invite";
   const ui = isInvite
     ? { title: "ตั้งรหัสผ่านเพื่อเริ่มใช้งาน", sub: "ยินดีต้อนรับ! ตั้งรหัสผ่านสำหรับบัญชีของคุณเพื่อเข้าใช้งาน",
@@ -196,16 +240,38 @@ function ResetPasswordScreen({ onDone, onCancel, mode = "recovery" }) {
   const mismatch = confirm.length > 0 && confirm !== password;
   const valid    = password.length >= 8 && confirm === password;
 
+  // Synchronous latch: a double-tap on a slow phone lands before the disabled
+  // button re-renders, and a second updateUser after a successful first one
+  // comes back "same_password" — showing an error for a password that DID save.
+  const inFlightRef = useRefAuth(false);
+
   const submit = async (e) => {
     e?.preventDefault();
-    if (loading) return;
+    if (loading || inFlightRef.current) return;
     if (password.length < 8) { setError("รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร"); return; }
     if (password !== confirm) { setError("รหัสผ่านทั้งสองช่องไม่ตรงกัน"); return; }
+    inFlightRef.current = true;
     setLoading(true);
     setError("");
-    const { error: err } = await authUpdatePassword(password);
+    // updateUser can stall behind supabase-js's auth lock on a flaky connection,
+    // which left the button spinning on "กำลังบันทึก…" forever. Stop waiting after
+    // 20 s, but keep listening: if the request lands late, it still counts.
+    const req = Promise.resolve(authUpdatePassword(password))
+      .catch(err => ({ error: err || { message: "network" } }));
+    const timer = new Promise(resolve => setTimeout(() => resolve(null), 20000));
+    const res = await Promise.race([req, timer]);
+    inFlightRef.current = false;
     setLoading(false);
-    if (err) { setError(authErrorToThai(err.message)); return; }
+    if (!res) {
+      setError("ระบบไม่ตอบกลับ ตรวจสอบอินเทอร์เน็ตแล้วลองกดบันทึกอีกครั้ง");
+      req.then(late => { if (late && !late.error) { setError(""); setDone(true); } });
+      return;
+    }
+    if (res.error) {
+      console.warn("[auth] password update failed:", res.error.code || "", res.error.status || "", res.error.message);
+      setError(passwordUpdateErrorToThai(res.error));
+      return;
+    }
     setDone(true);
   };
 
@@ -216,6 +282,9 @@ function ResetPasswordScreen({ onDone, onCancel, mode = "recovery" }) {
         <div style={{ textAlign: "center", marginBottom: 28 }}>
           <h1 style={{ margin: 0, fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }}>{ui.title}</h1>
           <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>{ui.sub}</div>
+          {email && (
+            <div style={{ fontSize: 13, marginTop: 8, wordBreak: "break-all" }}>บัญชี: <strong>{email}</strong></div>
+          )}
         </div>
 
         {done ? (
@@ -223,6 +292,11 @@ function ResetPasswordScreen({ onDone, onCancel, mode = "recovery" }) {
             <div style={{ padding: "14px 16px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 10, fontSize: 13, textAlign: "center", lineHeight: 1.6 }}>
               {ui.doneMsg}<br/>
               <span style={{ fontSize: 11, opacity: 0.8 }}>{ui.doneSub}</span>
+              {email && (
+                <><br/><span style={{ fontSize: 11, opacity: 0.8, wordBreak: "break-all" }}>
+                  เข้าสู่ระบบด้วยอีเมล <strong>{email}</strong> (พิมพ์ให้ตรงทุกตัว รวมจุด .)
+                </span></>
+              )}
             </div>
             <button type="button" className="btn btn-accent" style={{ justifyContent: "center" }}
               onClick={() => onDone && onDone()}>
@@ -1271,4 +1345,4 @@ const NAV_GROUP_LABELS = {
   system: "ระบบ"
 };
 
-Object.assign(window, { LoginScreen, ResetPasswordScreen, ForgotPasswordScreen, UserManagement, LayoutCustomize, RolePermissions, MOBILE_ONLY_NAV, NAV_GROUP_LABELS, recoveryLinkErrorMsg });
+Object.assign(window, { LoginScreen, ResetPasswordScreen, passwordUpdateErrorToThai, ForgotPasswordScreen, UserManagement, LayoutCustomize, RolePermissions, MOBILE_ONLY_NAV, NAV_GROUP_LABELS, recoveryLinkErrorMsg });
