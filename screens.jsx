@@ -6749,6 +6749,7 @@ function ProductFinder({ pushToast, goTo, focus }) {
    pack helpers, so the two views can never disagree.
    ═══════════════════════════════════════════════════════════════════ */
 function PackQueue({ pushToast, goTo, user }) {
+  const [newOpen, setNewOpen] = useState(false);   // สั่งแพ็คใหม่ — one-page form (pack-docs.jsx)
   const [tick, setTick] = useState(0);
   const [open, setOpen] = useState(null);      // expanded order id
   const [sel, setSel] = useState({});
@@ -6832,7 +6833,7 @@ function PackQueue({ pushToast, goTo, user }) {
           </div>
         </div>
         <div className="row">
-          {canDo("sell") && <button className="btn btn-primary" onClick={() => window.dispatchEvent(new CustomEvent("ims-open-pack-sell"))}><Icons.Plus size={14}/> สั่งแพ็คใหม่ — เลือกสินค้า</button>}
+          {canDo("sell") && <button className="btn btn-primary" onClick={() => setNewOpen(true)}><Icons.Plus size={14}/> สั่งแพ็คใหม่</button>}
           {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
           <span className="badge badge-neutral" title="การหยิบ ติ๊ก และสแกน ทำบนมือถือ"><Icons.Phone size={12}/> หยิบของบนมือถือ: เพิ่มเติม → แพ็คสินค้า</span>
         </div>
@@ -6983,14 +6984,14 @@ function PackQueue({ pushToast, goTo, user }) {
                 <Icons.Check size={22} style={{ opacity: 0.5, marginBottom: 8, color: "var(--success)" }}/>
                 <div>ไม่มีออร์เดอร์รอแพ็ค</div>
                 <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
-                  สร้างออร์เดอร์ด้วย ขายออก / ขาย + จัดส่ง / ตัดสต็อก → ออร์เดอร์จะมาอยู่ที่นี่ →
-                  คลิกออร์เดอร์เพื่อ <b>แนบไฟล์ใบปะหน้า</b> (รูป/PDF) หรือ <b>เพิ่มที่อยู่</b>
+                  กดปุ่ม <b>สั่งแพ็คใหม่</b> ด้านบน → เลือกสินค้า + แนบใบปะหน้าหรือวางที่อยู่ → ส่งให้คนแพ็ค
                 </div>
               </td></tr>
             )}
           </tbody>
         </table>
       </div>
+      {newOpen && typeof PackNewOrder === "function" && <PackNewOrder pushToast={pushToast} onClose={() => setNewOpen(false)}/>}
     </div>
   );
 }

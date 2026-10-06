@@ -204,7 +204,7 @@ function Screen({ ctx }) {
   if (!route.view && !mTabAllowed(route.tab, role)) return <MNoAccess ctx={ctx}/>;
   // Selling / issuing stock is a capability, not a page — MSell and MIssue have
   // several entry points, so the guard lives here rather than on each button.
-  if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell") && typeof canDo === "function" && !canDo("sell")) {
+  if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell" || route.view === "pack-new") && typeof canDo === "function" && !canDo("sell")) {
     return <MNoAccess ctx={ctx}/>;
   }
   if (route.view === "adjust" && typeof canAdjustStock === "function" && !canAdjustStock()) {
@@ -225,6 +225,7 @@ function Screen({ ctx }) {
   if (route.view === "pack-wave") return <MPackWave ctx={ctx}/>;
   if (route.view === "sell")      return <MSell ctx={ctx}/>;
   if (route.view === "quicksell") return <MQuickSell ctx={ctx}/>;
+  if (route.view === "pack-new" && typeof MPackNew === "function") return <MPackNew ctx={ctx}/>;
   if (route.view === "locations") return <MLocations ctx={ctx}/>;
   if (route.view === "labels")    return <MLabels ctx={ctx}/>;
   if (route.view === "label-view")return <MLabelView ctx={ctx}/>;
@@ -6820,8 +6821,8 @@ function MPack({ ctx }) {
       </div>
       <div className="m-content">
         {canDo("sell") && !selecting && (
-          <button className="m-btn-big" style={{ marginBottom: 12 }} onClick={() => ctx.push("sell", { from: "pack" })}>
-            <Icons.Plus size={18}/> สั่งแพ็คใหม่ — เลือกสินค้า + ที่อยู่
+          <button className="m-btn-big" style={{ marginBottom: 12 }} onClick={() => ctx.push("pack-new")}>
+            <Icons.Plus size={18}/> สั่งแพ็คใหม่
           </button>
         )}
         <div className="m-kpi-row">
@@ -6886,9 +6887,9 @@ function MPack({ ctx }) {
               <Icons.Check size={26} style={{ marginBottom: 8, color: "var(--success)" }}/>
               <div>ไม่มีออร์เดอร์รอแพ็ค</div>
               <div style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.7, textAlign: "left", display: "inline-block" }}>
-                1. สร้างออร์เดอร์ด้วย ขายออก / ขาย + จัดส่ง / ตัดสต็อก<br/>
-                2. ออร์เดอร์จะมาอยู่ที่หน้านี้อัตโนมัติ<br/>
-                3. แตะออร์เดอร์ → กด <b>แนบไฟล์</b> (รูป/PDF ใบปะหน้า) หรือ <b>เพิ่มที่อยู่</b>
+                กดปุ่ม <b>สั่งแพ็คใหม่</b> ด้านบน<br/>
+                → เลือกสินค้า + แนบใบปะหน้าหรือวางที่อยู่<br/>
+                → ส่งให้คนแพ็ค
               </div>
             </div>
           )}

@@ -357,6 +357,188 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   );
 }
 
+/* ── สั่งแพ็คใหม่ — ONE page: products + label/address + send ──
+   The owner's ask: "จบที่หน้าเดียว ง่ายและเร็ว". Everything the packer needs is
+   chosen here and committed through the existing sale choke point
+   (commitIssueOrder → stock, shelves, history, order in the pack queue), then
+   the label file / pasted address are attached to that order. Used by the
+   desktop แพ็คสินค้า page (modal) and mobile (view "pack-new"). */
+function PackNewOrder({ onClose, pushToast, mobile }) {
+  const [q, setQ] = useStatePD("");
+  const [cart, setCart] = useStatePD([]);            // [{ key, type, sku?, id?, name, qty, items? }]
+  const [file, setFile] = useStatePD(null);
+  const [paste, setPaste] = useStatePD("");
+  const [ch, setCh] = useStatePD(() => (typeof lastIssueChannel === "function" && lastIssueChannel()) || "other");
+  const [busy, setBusy] = useStatePD(false);
+  const inputRef = useRefPD(null);
+
+  const lq = q.trim().toLowerCase();
+  const avail = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : ((PRODUCTS.find(p => p.sku === sku) || {}).qty || 0));
+  const hits = !lq ? [] : [
+    ...((typeof loadBundles === "function" ? loadBundles() : []) || [])
+      .filter(b => (b.name || "").toLowerCase().includes(lq)).slice(0, 3)
+      .map(b => ({ key: "b:" + b.id, type: "bundle", id: b.id, name: b.name, items: b.items, stock: typeof bundleAvail === "function" ? bundleAvail(b) : 0 })),
+    ...PRODUCTS.filter(p => ((p.name || "") + " " + p.sku).toLowerCase().includes(lq)).slice(0, 8)
+      .map(p => ({ key: "s:" + p.sku, type: "sku", sku: p.sku, name: p.name, stock: avail(p.sku) }))
+  ];
+  const add = (h) => {
+    setCart(c => c.some(x => x.key === h.key) ? c.map(x => x.key === h.key ? { ...x, qty: x.qty + 1 } : x) : [...c, { ...h, qty: 1 }]);
+    setQ("");
+  };
+  const setQty = (key, n) => setCart(c => n <= 0 ? c.filter(x => x.key !== key) : c.map(x => x.key === key ? { ...x, qty: n } : x));
+
+  // Stock check per sku (bundles expanded) — never let a send drive stock negative.
+  const need = {};
+  cart.forEach(x => {
+    if (x.type === "bundle") (x.items || []).forEach(ci => { need[ci.sku] = (need[ci.sku] || 0) + (Number(ci.qty) || 0) * x.qty; });
+    else need[x.sku] = (need[x.sku] || 0) + x.qty;
+  });
+  const short = Object.keys(need).filter(sku => need[sku] > avail(sku));
+
+  const parsed = paste.trim() && typeof parseRecipientBlob === "function" ? parseRecipientBlob(paste) : null;
+  const shipTo = paste.trim()
+    ? (parsed ? { name: parsed.name || "", phone: parsed.phone || "", addr: [parsed.addr1, parsed.addr2].filter(Boolean).join(" ") || paste.trim() }
+              : { name: "", phone: "", addr: paste.trim() })
+    : null;
+  const canSend = cart.length > 0 && !short.length && !!(file || shipTo) && !busy;
+
+  const pick = async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    try { setFile(await readOrderFile(f)); } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
+  };
+
+  const send = async () => {
+    if (!canSend || typeof commitIssueOrder !== "function") return;
+    setBusy(true);
+    window.__packPromptSkip = true;                      // this page already covers the popup
+    const lines = cart.map(x => x.type === "bundle"
+      ? { type: "bundle", id: x.id, name: x.name, items: x.items, qty: x.qty, ch }
+      : { type: "sku", sku: x.sku, name: x.name, qty: x.qty, ch, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === x.sku)) : "" });
+    let id = null;
+    try {
+      id = await commitIssueOrder({ lines, customer: (shipTo && shipTo.name) || (file ? "ดูใบปะหน้า" : "ลูกค้า"), ship: { phone: shipTo ? shipTo.phone : "" } }, () => {});
+    } catch (e) { pushToast("สร้างออร์เดอร์ไม่สำเร็จ: " + (e.message || e)); }
+    setTimeout(() => { window.__packPromptSkip = false; }, 1500);
+    if (!id) { setBusy(false); return; }
+    try { if (typeof rememberIssueChannel === "function") rememberIssueChannel(ch); } catch (e) {}
+    if (shipTo && typeof setOrderField === "function") setOrderField(id, { shipTo });
+    if (file) {
+      const res = await saveOrderFile(id, file);
+      if (res.error) pushToast("สร้างออร์เดอร์แล้ว แต่แนบไฟล์ไม่สำเร็จ: " + res.error + " — แนบใหม่ได้ที่หน้าแพ็คสินค้า");
+      refreshOrderFileIds().catch(() => {});
+    }
+    setBusy(false);
+    pushToast(`ส่งให้คนแพ็คแล้ว — ${id}`);
+    onClose();
+  };
+
+  const sec = { fontSize: 13, fontWeight: 700, margin: "4px 0 8px" };
+  const body = (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <div style={sec}>1. สินค้าที่ต้องแพ็ค</div>
+        <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 พิมพ์ชื่อสินค้า หรือ SKU" style={{ width: "100%", fontSize: 15, padding: "12px 14px" }}/>
+        {hits.length > 0 && (
+          <div style={{ border: "1px solid var(--border)", borderRadius: 12, marginTop: 6, overflow: "hidden" }}>
+            {hits.map(h => (
+              <button key={h.key} onClick={() => add(h)} disabled={h.stock <= 0}
+                style={{ display: "flex", width: "100%", gap: 10, alignItems: "center", padding: "10px 12px", border: "none", borderBottom: "1px solid var(--border)", background: "var(--surface)", color: "var(--fg)", textAlign: "left", fontFamily: "inherit", cursor: h.stock > 0 ? "pointer" : "not-allowed", opacity: h.stock > 0 ? 1 : 0.5 }}>
+                {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={34}/> : <span style={{ width: 34, textAlign: "center" }}>📦</span>}
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.type === "bundle" ? "ชุด: " : ""}{h.name}</span>
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>{h.sku || "ชุดสินค้า"} · เหลือ {h.stock}</span>
+                </span>
+                <span style={{ fontSize: 20, color: "var(--accent)", fontWeight: 700 }}>＋</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {cart.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+            {cart.map(x => (
+              <div key={x.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 12, background: "var(--surface-2)" }}>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
+                <button className="btn btn-sm" style={{ width: 34, height: 34, justifyContent: "center", fontSize: 18 }} onClick={() => setQty(x.key, x.qty - 1)}>−</button>
+                <span className="tnum" style={{ width: 26, textAlign: "center", fontSize: 17, fontWeight: 700 }}>{x.qty}</span>
+                <button className="btn btn-sm" style={{ width: 34, height: 34, justifyContent: "center", fontSize: 18 }} onClick={() => setQty(x.key, x.qty + 1)}>＋</button>
+              </div>
+            ))}
+            {short.length > 0 && <div style={{ fontSize: 12, color: "var(--danger)" }}>สต็อกไม่พอ: {short.join(", ")}</div>}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div style={sec}>2. ใบปะหน้า หรือ ที่อยู่ <span style={{ fontWeight: 400, color: "var(--muted)" }}>(อย่างใดอย่างหนึ่ง)</span></div>
+        <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+        {file ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: "var(--success-soft)", color: "var(--success)", fontWeight: 600, fontSize: 14 }}>
+            ✓ {file.name}
+            <button className="btn btn-sm btn-ghost" style={{ marginLeft: "auto" }} onClick={() => setFile(null)}>เปลี่ยน</button>
+          </div>
+        ) : (
+          <button onClick={() => inputRef.current && inputRef.current.click()}
+            style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: 14, borderRadius: 12, border: "2px dashed var(--accent)", background: "var(--accent-soft)", color: "var(--accent)", fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            📎 แนบใบปะหน้า <span style={{ fontWeight: 400, fontSize: 12 }}>(ถ่ายรูป / รูป / PDF)</span>
+          </button>
+        )}
+        <textarea className="input" rows={3} value={paste} onChange={e => setPaste(e.target.value)}
+          placeholder="📋 หรือวางที่อยู่ทั้งก้อนตรงนี้ (ชื่อ เบอร์ ที่อยู่) — ระบบแยกให้เอง"
+          style={{ width: "100%", marginTop: 8, fontSize: 14, resize: "vertical" }}/>
+        {shipTo && (shipTo.name || shipTo.phone) && (
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>✓ ผู้รับ: <b style={{ color: "var(--fg)" }}>{shipTo.name || "—"}</b> {shipTo.phone}</div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>ช่องทาง:</span>
+        {(typeof CHANNEL_LIST !== "undefined" ? CHANNEL_LIST : []).map(c => (
+          <button key={c.id} onClick={() => setCh(c.id)}
+            style={{ padding: "4px 10px", borderRadius: 999, fontSize: 12, cursor: "pointer", fontFamily: "inherit", border: "1px solid " + (ch === c.id ? "var(--fg)" : "var(--border)"), background: ch === c.id ? "var(--fg)" : "transparent", color: ch === c.id ? "var(--surface)" : "var(--fg-2)" }}>{c.name}</button>
+        ))}
+      </div>
+    </div>
+  );
+  const sendBtn = (
+    <button onClick={send} disabled={!canSend}
+      style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: canSend ? "var(--accent)" : "var(--surface-2)", color: canSend ? "#fff" : "var(--muted)", fontSize: 17, fontWeight: 800, cursor: canSend ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
+      {busy ? "กำลังส่ง…" : cart.length === 0 ? "เลือกสินค้าก่อน" : !(file || shipTo) ? "แนบใบปะหน้าหรือวางที่อยู่" : "ส่งให้คนแพ็ค ✓"}
+    </button>
+  );
+
+  if (mobile) {
+    return (
+      <>
+        <div className="m-topbar">
+          <button className="m-back" onClick={onClose}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+          <div className="m-title-sub">สั่งแพ็คใหม่</div>
+          <span style={{ width: 30 }}/>
+        </div>
+        <div className="m-content" style={{ paddingTop: 10 }}>
+          {body}
+          <div style={{ marginTop: 18 }}>{sendBtn}</div>
+        </div>
+      </>
+    );
+  }
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 90 }}/>
+      <div className="modal" style={{ zIndex: 91, width: 560, maxHeight: "92vh" }}>
+        <div className="modal-head">
+          <h3>สั่งแพ็คใหม่</h3>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}><Icons.X size={14}/></button>
+        </div>
+        <div className="modal-body">{body}</div>
+        <div className="modal-foot" style={{ display: "block" }}>{sendBtn}</div>
+      </div>
+    </>
+  );
+}
+function MPackNew({ ctx }) { return <PackNewOrder mobile pushToast={ctx.pushToast} onClose={ctx.back}/>; }
+
 /* ── "ส่งให้คนแพ็ค" — shown right after a sale creates an order ──
    The owner asked for the simplest possible path: no hunting for a button on
    another page. The moment a sale is confirmed (any fork, any sell screen —
@@ -376,6 +558,7 @@ function PackSendPrompt({ pushToast, mobile }) {
     const h = (e) => {
       const d = (e && e.detail) || {};
       if (!d.id || (d.status && d.status !== "picking")) return;     // already shipped → not for the packer
+      if (window.__packPromptSkip) return;                             // sent from สั่งแพ็คใหม่ — already attached
       if (typeof canDo === "function" && !canDo("sell")) return;
       setTimeout(() => {                                               // let the sale screen close first
         setOrder({ id: d.id }); setFile(null); setAddrMode(false); setPaste(""); setSavedAddr(null);
@@ -465,5 +648,5 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, PackSendPrompt
+  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, PackSendPrompt, PackNewOrder, MPackNew
 });
