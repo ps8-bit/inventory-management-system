@@ -6834,6 +6834,11 @@ function PackQueue({ pushToast, goTo, user }) {
           </div>
         </div>
         <div className="row">
+          {typeof PACK_SORTS !== "undefined" && (
+            <select className="input" value={packSortMode()} onChange={e => setPackSortMode(e.target.value)} title="เรียงออร์เดอร์" style={{ width: "auto", height: 34 }}>
+              {PACK_SORTS.map(x => <option key={x.id} value={x.id}>เรียง: {x.label}</option>)}
+            </select>
+          )}
           {canDo("sell") && <button className="btn btn-primary" onClick={() => setNewOpen(true)}><Icons.Plus size={14}/> สั่งแพ็คใหม่</button>}
           {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
           {typeof PackLabelSettings === "function" && canEditPackLabel() && <button className={"btn" + (labelCfg ? " btn-primary" : "")} onClick={() => setLabelCfg(o => !o)}>⚙ ตั้งค่าใบปะหน้า</button>}
@@ -6891,6 +6896,7 @@ function PackQueue({ pushToast, goTo, user }) {
                     <td><span className={"check" + (sel[r.o.id] ? " on" : "")} onClick={() => setSel(p => ({ ...p, [r.o.id]: !p[r.o.id] }))}/></td>
                     <td className="mono" style={{ fontSize: 12, cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
                       {r.o.id}
+                      {typeof packOrderTime === "function" && packOrderTime(r.o) && <div style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "inherit" }}>{packOrderTime(r.o)}</div>}
                       {w && <div style={{ fontSize: 10, color: "var(--info)" }}>หยิบรวม · {w.rec.stage === "sort" ? "แยกลงออร์เดอร์" : "เดินหยิบ"}</div>}
                     </td>
                     <td style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
