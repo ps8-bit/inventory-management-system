@@ -6765,6 +6765,7 @@ function MPack({ ctx }) {
   const [tick, setTick] = useStateM(0);
   const [selecting, setSelecting] = useStateM(false);
   const [sel, setSel] = useStateM({});
+  const [labelCfg, setLabelCfg] = useStateM(false);   // ⚙ ตั้งค่าใบปะหน้า — shop-wide
 
   useEffectM(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6825,6 +6826,9 @@ function MPack({ ctx }) {
             <Icons.Plus size={18}/> สั่งแพ็คใหม่
           </button>
         )}
+        {!selecting && typeof PackLabelSettings === "function" && canEditPackLabel() && (labelCfg
+          ? <PackLabelSettings mobile pushToast={ctx.pushToast} onClose={() => setLabelCfg(false)}/>
+          : <button className="btn" style={{ width: "100%", justifyContent: "center", marginBottom: 12 }} onClick={() => setLabelCfg(true)}>⚙ ตั้งค่าใบปะหน้า (ทุกใบ)</button>)}
         <div className="m-kpi-row">
           <div className="m-kpi"><div className="m-kpi-label">รอแพ็ค</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{rows.length}</div></div>
           <div className="m-kpi"><div className="m-kpi-label">รวมชิ้น</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{totalPieces}</div></div>

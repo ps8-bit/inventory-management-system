@@ -6750,6 +6750,7 @@ function ProductFinder({ pushToast, goTo, focus }) {
    ═══════════════════════════════════════════════════════════════════ */
 function PackQueue({ pushToast, goTo, user }) {
   const [newOpen, setNewOpen] = useState(false);   // สั่งแพ็คใหม่ — one-page form (pack-docs.jsx)
+  const [labelCfg, setLabelCfg] = useState(false);  // ⚙ ตั้งค่าใบปะหน้า — shop-wide, all labels
   const [tick, setTick] = useState(0);
   const [open, setOpen] = useState(null);      // expanded order id
   const [sel, setSel] = useState({});
@@ -6835,9 +6836,11 @@ function PackQueue({ pushToast, goTo, user }) {
         <div className="row">
           {canDo("sell") && <button className="btn btn-primary" onClick={() => setNewOpen(true)}><Icons.Plus size={14}/> สั่งแพ็คใหม่</button>}
           {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
+          {typeof PackLabelSettings === "function" && canEditPackLabel() && <button className={"btn" + (labelCfg ? " btn-primary" : "")} onClick={() => setLabelCfg(o => !o)}>⚙ ตั้งค่าใบปะหน้า</button>}
           <span className="badge badge-neutral" title="การหยิบ ติ๊ก และสแกน ทำบนมือถือ"><Icons.Phone size={12}/> หยิบของบนมือถือ: เพิ่มเติม → แพ็คสินค้า</span>
         </div>
       </div>
+      {labelCfg && typeof PackLabelSettings === "function" && <PackLabelSettings pushToast={pushToast} onClose={() => setLabelCfg(false)}/>}
 
       <div className="grid-3">
         <SmallStat label="รอแพ็ค"    value={rows.length}  tone="warning" hint="ออร์เดอร์ที่ตัดสต็อกแล้วรอหยิบ"/>
