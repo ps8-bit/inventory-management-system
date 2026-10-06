@@ -2553,6 +2553,9 @@ async function cancelOrdersAndRestock(orders, reasonNote) {
     const r = await applyReceiveLocs(lines);
     if (r && r.errors && r.errors.length) out.locError = r.errors[0].error;
   }
+  // The order is gone — drop its label file + attachments too (pack-docs.jsx),
+  // or they stay in the DB forever with nothing pointing at them.
+  if (typeof deleteOrderDocs === "function") deleteOrderDocs(out.restocked).catch(() => {});
   if (typeof recordChange === "function") {
     recordChange({
       entity: "order", action: "cancel-restock",

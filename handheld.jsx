@@ -6679,16 +6679,19 @@ function MPackLine({ line, picked, short, onSet, onShort, sub }) {
       still be finished, and the audit trail points at ปรับสต็อก. */
 function MPackShortSheet({ line, picked, onClose, onResolve, pushToast }) {
   const [busy, setBusy] = useStateM(false);
+  const busyRef = useRefM(false);   // sync latch — a state flag alone can let a double-tap through
   const missing = Math.max(0, line.qty - picked);
   const alts = useMemoM(() => (typeof packAltPositions === "function") ? packAltPositions(line.sku, line.loc) : [], [line.sku, line.loc]);
 
   const takeFrom = async (alt) => {
-    if (busy) return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     const want = Math.min(missing, alt.qty);
     const res = (typeof repointPackLine === "function")
       ? await repointPackLine(line.sku, line.loc, alt.loc, want)
       : { ok: false, error: "ไม่พร้อมใช้งาน" };
+    busyRef.current = false;
     setBusy(false);
     if (!res.ok) { pushToast(res.error || "ย้ายตำแหน่งไม่สำเร็จ"); return; }
     onResolve({ picked: picked + want, short: res.shortfall > 0 ? `ขาด ${res.shortfall} ชิ้น` : "", movedFrom: alt.loc, moved: want });
@@ -6787,6 +6790,13 @@ function MPack({ ctx }) {
   const waves = useMemoM(() => Object.keys(progress)
     .filter(k => k.indexOf("batch:") === 0)
     .map(k => ({ id: k, rec: progress[k] })), [progress]);
+  // An order already in an open wave is being picked there — opening it alone or
+  // adding it to a second wave would fetch the same pieces twice.
+  const waveOf = useMemoM(() => {
+    const m = {};
+    waves.forEach(w => (w.rec.orderIds || []).forEach(id => { m[id] = w.id; }));
+    return m;
+  }, [waves]);
 
   const rows = useMemoM(() => orders.map(o => {
     const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
@@ -6857,8 +6867,13 @@ function MPack({ ctx }) {
 
         <div className="m-list">
           {rows.map(r => (
-            <button key={r.o.id} className="m-row" onClick={() => {
-              if (selecting) { setSel(prev => { const n = { ...prev }; if (n[r.o.id]) delete n[r.o.id]; else n[r.o.id] = true; return n; }); return; }
+            <button key={r.o.id} className="m-row" style={selecting && waveOf[r.o.id] ? { opacity: 0.45 } : undefined} onClick={() => {
+              const w = waveOf[r.o.id];
+              if (selecting) {
+                if (w) { ctx.pushToast("ออร์เดอร์นี้อยู่ในรอบหยิบรวมอื่นแล้ว"); return; }
+                setSel(prev => { const n = { ...prev }; if (n[r.o.id]) delete n[r.o.id]; else n[r.o.id] = true; return n; }); return;
+              }
+              if (w) { ctx.push("pack-wave", { batchId: w }); return; }
               ctx.push("pack-order", { id: r.o.id });
             }}>
               {selecting && (
@@ -6871,6 +6886,7 @@ function MPack({ ctx }) {
                 <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {r.o.customer || "—"} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
                 </div>
+                {waveOf[r.o.id] && <div style={{ fontSize: 10.5, color: "var(--info)", fontWeight: 600, marginTop: 3 }}>กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</div>}
                 {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}
                 {r.started && (
                   <div className="row" style={{ gap: 6, marginTop: 5 }}>
@@ -7065,10 +7081,7 @@ function MPackOrder({ ctx }) {
           {order.note && <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 11.5 }}>โน้ต: {order.note}</div>}
         </div>
 
-        {/* ใบปะหน้า + ที่อยู่ + (owner) ยกเลิก/คืนสต็อก — pack-docs.jsx */}
-        {typeof PackShipDocs === "function" && <PackShipDocs order={order} lines={lines} pushToast={ctx.pushToast} mobile onCancelled={ctx.back}/>}
-
-        {camOpen && <CameraScanner onScan={onScan} onClose={() => setCamOpen(false)}/>}
+        {camOpen && <CameraScanner continuous onScan={onScan} onClose={() => setCamOpen(false)}/>}
 
         {lines.length === 0 && (
           <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12.5, background: "var(--surface-2)", borderRadius: 10, lineHeight: 1.7 }}>
@@ -7094,6 +7107,11 @@ function MPackOrder({ ctx }) {
             </div>
           </div>
         ))}
+
+        {/* ใบปะหน้า + ที่อยู่ + ไฟล์แนบ + (owner) ยกเลิก — AFTER the pick list:
+            the packer picks first, then prints the label right above แพ็คเสร็จ. */}
+        <div className="m-section-label" style={{ padding: "18px 4px 0" }}>ใบปะหน้าและที่อยู่</div>
+        {typeof PackShipDocs === "function" && <PackShipDocs order={order} lines={lines} pushToast={ctx.pushToast} mobile onCancelled={ctx.back}/>}
 
         {lines.length > 0 && (
           <button className={"m-btn-big " + (totals.complete ? "success" : "outline")} style={{ marginTop: 16 }} onClick={finish}>
@@ -7306,7 +7324,7 @@ function MPackWave({ ctx }) {
               </div>
             </div>
 
-            {camOpen && <CameraScanner onScan={onScan} onClose={() => setCamOpen(false)}/>}
+            {camOpen && <CameraScanner continuous onScan={onScan} onClose={() => setCamOpen(false)}/>}
 
             {groups.map((g, gi) => (
               <div key={g.loc + gi} style={{ marginTop: 12 }}>
@@ -7381,6 +7399,9 @@ function MPackWave({ ctx }) {
                       </div>
                     </div>
                   </button>
+                  {typeof PackLabelButton === "function" && (
+                    <div style={{ padding: "0 14px 10px" }}><PackLabelButton order={o} lines={oLines} pushToast={ctx.pushToast}/></div>
+                  )}
                   <div style={{ borderTop: "1px solid var(--border)" }}>
                     {oLines.map(l => (
                       <div key={l.key} className="row" style={{ gap: 10, padding: "8px 14px", borderBottom: "1px solid var(--border)" }}>
