@@ -1081,6 +1081,9 @@ async function appendOrder(order) {
   try { localStorage.setItem("ims_orders", JSON.stringify(next)); } catch (e) {}
   window._DB_ORDERS = next;
   window.dispatchEvent(new CustomEvent("ims-orders-change"));
+  // A brand-new order → the "ส่งให้คนแพ็ค" prompt (pack-docs.jsx) offers to
+  // attach the courier label / address right away.
+  window.dispatchEvent(new CustomEvent("ims-order-created", { detail: { id: order.id, status: order.status } }));
   if (typeof dbUpsertOrders !== "function") return { ok: true };
   try {
     const res = await dbUpsertOrders([order]);

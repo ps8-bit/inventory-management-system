@@ -773,6 +773,14 @@ function App({ user, onLogout, onSwitchUser }) {
   const [toast, pushToast, closeToast] = useToast();
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [sellOpen, setSellOpen] = useStateApp(false);
+  // Where to land after a sale: the แพ็คสินค้า page's "สั่งแพ็คใหม่" button opens
+  // the same ขาย + จัดส่ง modal but should return to the pack queue, not จัดส่ง.
+  const [sellBackTo, setSellBackTo] = useStateApp("outbound");
+  useEffectApp(() => {
+    const h = () => { setSellBackTo("pack"); setSellOpen(true); };
+    window.addEventListener("ims-open-pack-sell", h);
+    return () => window.removeEventListener("ims-open-pack-sell", h);
+  }, []);
   const [quickSellOpen, setQuickSellOpen] = useStateApp(false);
   const [searchOpen, setSearchOpen] = useStateApp(false);
   const [searchQ, setSearchQ] = useStateApp("");
@@ -1057,13 +1065,16 @@ function App({ user, onLogout, onSwitchUser }) {
 
       <ToastView toast={toast} onClose={closeToast}/>
 
+      {typeof PackSendPrompt === "function" && <PackSendPrompt pushToast={pushToast}/>}
+
       {sellOpen && (
         <SellProductModal
-          onClose={() => setSellOpen(false)}
+          onClose={() => { setSellOpen(false); setSellBackTo("outbound"); }}
           onSellComplete={({ orderId, customerName, itemCount }) => {
             pushToast(`สร้างออร์เดอร์ ${orderId} — ${itemCount} รายการ สำหรับ ${customerName}`);
             setSellOpen(false);
-            goTo("outbound");
+            goTo(sellBackTo === "pack" && canOpenPage("pack") ? "pack" : "outbound");
+            setSellBackTo("outbound");
           }}
         />
       )}

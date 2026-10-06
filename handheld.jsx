@@ -118,6 +118,7 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
         <Screen ctx={ctx}/>
       </ErrorBoundary>
       <TabBar tab={route.tab} onSwitch={switchTab} role={user && user.role}/>
+      {typeof PackSendPrompt === "function" && <PackSendPrompt pushToast={pushToast} mobile/>}
     </div>
   );
 }
@@ -203,7 +204,7 @@ function Screen({ ctx }) {
   if (!route.view && !mTabAllowed(route.tab, role)) return <MNoAccess ctx={ctx}/>;
   // Selling / issuing stock is a capability, not a page — MSell and MIssue have
   // several entry points, so the guard lives here rather than on each button.
-  if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell") && typeof canDo === "function" && !canDo("sell")) {
+  if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell" || route.view === "pack-new") && typeof canDo === "function" && !canDo("sell")) {
     return <MNoAccess ctx={ctx}/>;
   }
   if (route.view === "adjust" && typeof canAdjustStock === "function" && !canAdjustStock()) {
@@ -224,6 +225,7 @@ function Screen({ ctx }) {
   if (route.view === "pack-wave") return <MPackWave ctx={ctx}/>;
   if (route.view === "sell")      return <MSell ctx={ctx}/>;
   if (route.view === "quicksell") return <MQuickSell ctx={ctx}/>;
+  if (route.view === "pack-new" && typeof MPackNew === "function") return <MPackNew ctx={ctx}/>;
   if (route.view === "locations") return <MLocations ctx={ctx}/>;
   if (route.view === "labels")    return <MLabels ctx={ctx}/>;
   if (route.view === "label-view")return <MLabelView ctx={ctx}/>;
@@ -1791,7 +1793,7 @@ function MProductDetail({ ctx }) {
               <>
               <div className="row" style={{ gap: 12 }}>
                 {photo ? (
-                  <img src={photo} alt="" style={{ width: 76, height: 76, borderRadius: 10, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}/>
+                  <img src={photo} alt="" loading="lazy" decoding="async" style={{ width: 76, height: 76, borderRadius: 10, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}/>
                 ) : (
                   <div style={{ width: 76, height: 76, borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)", display: "grid", placeItems: "center", color: "var(--accent)", flexShrink: 0 }}>
                     <Icons.Map size={24}/>
@@ -3251,7 +3253,10 @@ function MSell({ ctx }) {
     }
 
     ctx.pushToast(`ขายสำเร็จ ${orderId} · สร้างฉลากแล้ว${backLabel ? ` (ย้อนหลัง ${backLabel})` : ""}`);
-    if (createdLabel) ctx.push("label-view", createdLabel);
+    // Opened from แพ็คสินค้า's "สั่งแพ็คใหม่" → go straight back to the pack queue
+    // (the "ส่งให้คนแพ็ค" popup then offers the label file).
+    if (ctx.route.params && ctx.route.params.from === "pack") ctx.back();
+    else if (createdLabel) ctx.push("label-view", createdLabel);
     else ctx.switchTab("outbound");
   };
 
@@ -3975,7 +3980,7 @@ function MFinder({ ctx }) {
                   style={{ display: "flex", gap: 12, alignItems: "stretch", width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "inherit", padding: 10 }}>
                   <div style={{ width: 84, height: 84, borderRadius: 10, overflow: "hidden", background: "#fff", border: "1px solid var(--border)", flexShrink: 0, display: "grid", placeItems: "center" }}>
                     {url
-                      ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+                      ? <img src={url} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
                       : <Icons.Box size={26} style={{ color: "var(--muted)", opacity: 0.5 }}/>}
                   </div>
                   <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "space-between", padding: "2px 0" }}>
@@ -6815,6 +6820,11 @@ function MPack({ ctx }) {
         </button>
       </div>
       <div className="m-content">
+        {canDo("sell") && !selecting && (
+          <button className="m-btn-big" style={{ marginBottom: 12 }} onClick={() => ctx.push("pack-new")}>
+            <Icons.Plus size={18}/> สั่งแพ็คใหม่
+          </button>
+        )}
         <div className="m-kpi-row">
           <div className="m-kpi"><div className="m-kpi-label">รอแพ็ค</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{rows.length}</div></div>
           <div className="m-kpi"><div className="m-kpi-label">รวมชิ้น</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{totalPieces}</div></div>
@@ -6861,6 +6871,7 @@ function MPack({ ctx }) {
                 <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {r.o.customer || "—"} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
                 </div>
+                {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}
                 {r.started && (
                   <div className="row" style={{ gap: 6, marginTop: 5 }}>
                     <div className="prog" style={{ flex: 1, height: 4 }}><span style={{ width: r.totals.pct + "%" }}/></div>
@@ -6875,7 +6886,11 @@ function MPack({ ctx }) {
             <div style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
               <Icons.Check size={26} style={{ marginBottom: 8, color: "var(--success)" }}/>
               <div>ไม่มีออร์เดอร์รอแพ็ค</div>
-              <div style={{ fontSize: 11, marginTop: 4 }}>ออร์เดอร์จะเข้ามาที่นี่หลังตัดสต็อก</div>
+              <div style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.7, textAlign: "left", display: "inline-block" }}>
+                กดปุ่ม <b>สั่งแพ็คใหม่</b> ด้านบน<br/>
+                → เลือกสินค้า + แนบใบปะหน้าหรือวางที่อยู่<br/>
+                → ส่งให้คนแพ็ค
+              </div>
             </div>
           )}
         </div>

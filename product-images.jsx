@@ -205,7 +205,7 @@ function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel }) {
         flexShrink: 0,
         display: "grid", placeItems: "center"
       }}>
-        <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+        <img src={url} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
       </div>
     );
   }
@@ -349,7 +349,7 @@ function LocationImageThumb({ code, size = 40, radius = 8 }) {
         flexShrink: 0,
         display: "grid", placeItems: "center"
       }}>
-        <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+        <img src={url} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
       </div>
     );
   }
