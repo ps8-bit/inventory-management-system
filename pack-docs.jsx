@@ -108,6 +108,122 @@ function openOrderFile(file) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
+/* ── attachments ── many photos/PDFs per order (order_attachments,
+   supabase/order-attachments.sql). Unlike the single label slot above, the
+   packer may add them too — e.g. a photo of the packed parcel as evidence. */
+const ATTACH_ROLES = ["admin", "manager", "staff", "packer"];
+function canAddOrderAttachment() {
+  const role = (typeof currentRoleId === "function") ? currentRoleId() : "viewer";
+  return ATTACH_ROLES.includes(role);
+}
+function canDeleteOrderAttachment(a) {
+  const u = window.__currentUser || {};
+  return ["admin", "manager", "staff"].includes(u.role) || (a && a.createdBy && a.createdBy === u.id);
+}
+async function loadOrderAttachments(orderId) {
+  if (!_pdDb() || !orderId) return [];
+  const { data, error } = await sb.from("order_attachments")
+    .select("id, name, type, data_url, created_by, created_by_name, created_at")
+    .eq("order_id", orderId).order("created_at", { ascending: true });
+  if (error) throw new Error(error.message);
+  return (data || []).map(r => {
+    const f = safeOrderFile({ name: r.name, type: r.type, dataUrl: r.data_url });
+    return f ? { ...f, id: r.id, createdBy: r.created_by, createdByName: r.created_by_name, createdAt: r.created_at } : null;
+  }).filter(Boolean);
+}
+async function addOrderAttachment(orderId, file) {
+  if (!_pdDb()) return { error: "ไม่ได้เชื่อมต่อฐานข้อมูล" };
+  if (!safeOrderFile(file)) return { error: "ไฟล์ไม่ถูกต้อง" };
+  const by = (window.__currentUser && window.__currentUser.name) || "";
+  const { data, error } = await sb.from("order_attachments")
+    .insert({ order_id: orderId, name: file.name || "", type: file.type, data_url: file.dataUrl, created_by_name: by })
+    .select("id");
+  if (error) return { error: /row-level security/i.test(error.message) ? "ไม่มีสิทธิ์แนบไฟล์" : error.message };
+  return (data && data.length) ? { ok: true } : { error: "ไม่มีสิทธิ์แนบไฟล์" };
+}
+async function deleteOrderAttachment(id) {
+  if (!_pdDb()) return { error: "ไม่ได้เชื่อมต่อฐานข้อมูล" };
+  const { data, error } = await sb.from("order_attachments").delete().eq("id", id).select("id");
+  if (error) return { error: error.message };
+  return (data && data.length) ? { ok: true } : { error: "ไม่มีสิทธิ์ลบไฟล์" };
+}
+
+function PackAttachments({ orderId, pushToast, card }) {
+  const [list, setList] = useStatePD([]);
+  const [state, setState] = useStatePD("loading");   // loading | ok | error
+  const [busy, setBusy] = useStatePD("");
+  const [rev, setRev] = useStatePD(0);
+  const inputRef = useRefPD(null);
+  const canAdd = canAddOrderAttachment();
+
+  useEffectPD(() => {
+    let alive = true;
+    setState("loading");
+    loadOrderAttachments(orderId)
+      .then(l => { if (alive) { setList(l); setState("ok"); } })
+      .catch(() => { if (alive) setState("error"); });
+    return () => { alive = false; };
+  }, [orderId, rev]);
+
+  const pick = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    let ok = 0;
+    for (let i = 0; i < files.length; i++) {
+      setBusy(`กำลังอัปโหลด ${i + 1}/${files.length}…`);
+      try {
+        const res = await addOrderAttachment(orderId, await readOrderFile(files[i]));
+        if (res.error) pushToast(`${files[i].name}: ${res.error}`); else ok++;
+      } catch (err) { pushToast(`${files[i].name}: ${err.message || "แนบไฟล์ไม่สำเร็จ"}`); }
+    }
+    setBusy("");
+    if (ok) { pushToast(`แนบไฟล์แล้ว ${ok} ไฟล์`); setRev(x => x + 1); }
+  };
+  const remove = async (a) => {
+    if (!confirm(`ลบไฟล์ "${a.name || "ไฟล์แนบ"}"?`)) return;
+    setBusy("กำลังลบ…");
+    const res = await deleteOrderAttachment(a.id);
+    setBusy("");
+    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); }
+  };
+
+  return (
+    <div {...card} style={{ ...card.style, flexBasis: "100%" }}>
+      <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <strong style={{ fontSize: 13 }}>รูป / ไฟล์แนบ{list.length ? ` (${list.length})` : ""}</strong>
+        {canAdd && <button className="btn btn-sm" disabled={!!busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Camera size={13}/> เพิ่มรูป/ไฟล์</button>}
+      </div>
+      <input ref={inputRef} type="file" multiple accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+      {busy && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>{busy}</div>}
+      {state === "loading" ? <div style={{ fontSize: 12, color: "var(--muted)" }}>กำลังโหลด…</div>
+        : state === "error" ? <div style={{ fontSize: 12, color: "var(--danger)" }}>โหลดไฟล์ไม่ได้ <button className="btn btn-ghost btn-sm" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
+        : !list.length ? <div style={{ fontSize: 12, color: "var(--muted)" }}>{canAdd ? "ยังไม่มีไฟล์ — ถ่ายรูปกล่องที่แพ็คแล้ว หรือแนบรูป/PDF ได้หลายไฟล์" : "ไม่มีไฟล์แนบ"}</div>
+        : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: 8 }}>
+            {list.map(a => (
+              <div key={a.id} style={{ position: "relative", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+                <button onClick={() => openOrderFile(a)} title={`${a.name}${a.createdByName ? " · " + a.createdByName : ""}`}
+                  style={{ display: "block", width: "100%", aspectRatio: "1", padding: 0, border: 0, background: "transparent", cursor: "pointer" }}>
+                  {a.type === "application/pdf"
+                    ? <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#333", padding: 4, wordBreak: "break-all" }}><span style={{ fontSize: 26 }}>📄</span>{a.name}</div>
+                    : <img src={a.dataUrl} alt={a.name || "ไฟล์แนบ"} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>}
+                </button>
+                <div style={{ fontSize: 10.5, padding: "2px 6px", color: "#555", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.createdByName || "—"}</div>
+                {canDeleteOrderAttachment(a) && (
+                  <button className="btn btn-sm btn-ghost" disabled={!!busy} onClick={() => remove(a)} title="ลบ"
+                    style={{ position: "absolute", top: 4, right: 4, padding: 4, background: "rgba(255,255,255,.9)", color: "var(--danger)" }}>
+                    <Icons.Trash size={12}/>
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+    </div>
+  );
+}
+
 /* ── recipient ── the label made by ขาย + จัดส่ง carries the address; an order
    cut via ตัดสต็อก only has a name/phone. */
 function packRecipientFor(order) {
@@ -307,6 +423,8 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
         {(r.cod > 0 || r.carrier) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
       </div>
 
+      <PackAttachments orderId={order.id} pushToast={pushToast} card={card}/>
+
       {canCancel && (
         <div style={{ flexBasis: "100%" }}>
           <button className="btn btn-sm btn-ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={cancel}>
@@ -320,5 +438,6 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs
+  packRecipientFor, printOrderAddress, printOrderFile, PackShipDocs,
+  loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments
 });
