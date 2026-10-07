@@ -138,6 +138,21 @@ Deno.serve(async (req) => {
     });
   });
 
+  // Status/tracking edits (slip scan, pack, manual edit) live in the app_state
+  // `order_overrides` blob, not on the orders row — apply the public-safe fields
+  // so a slip-scanned tracking number reaches the customer. Deleted → hidden.
+  const { data: ovRow } = await admin.from("app_state").select("value").eq("key", "order_overrides").maybeSingle();
+  const overrides: Record<string, any> = (ovRow && ovRow.value && typeof ovRow.value === "object") ? ovRow.value : {};
+  for (let i = shipments.length - 1; i >= 0; i--) {
+    const ov = overrides[shipments[i].id];
+    if (!ov || typeof ov !== "object") continue;
+    if (ov.deleted) { shipments.splice(i, 1); continue; }
+    const s = shipments[i];
+    for (const k of ["status", "carrier", "tracking", "phone", "customer"]) {
+      if (typeof ov[k] === "string" && ov[k] !== "" && ov[k] !== "—") s[k] = ov[k];
+    }
+  }
+
   // Server-side filter — only rows matching the query ever leave this function.
   const seen = new Set<string>();
   const results = shipments.filter((o) => {
