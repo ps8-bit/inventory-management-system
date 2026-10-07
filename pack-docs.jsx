@@ -326,37 +326,6 @@ function PackAttachments({ orderId, pushToast, card }) {
   const inputRef = useRefPD(null);
   const canAdd = canAddOrderAttachment();
 
-  /* Read order number + tracking off the label once it's loaded, and keep them on
-     the order (overrides) so search / tracking / ship-status use the real numbers. */
-  const [codes, setCodes] = useStatePD(null);   // null | "reading" | {orderNo,tracking,platform} | "none"
-  useEffectPD(() => {
-    if (!file) { setCodes(null); return; }
-    let alive = true;
-    setCodes("reading");
-    extractLabelCodes(file)
-      .then(c => {
-        if (!alive) return;
-        setCodes(c || "none");
-        if (!c || !canAttach || typeof setOrderField !== "function") return;
-        const ch = {};
-        if (c.orderNo && c.orderNo !== order.platformOrderNo) ch.platformOrderNo = c.orderNo;
-        if (c.platform && !order.platform) ch.platform = c.platform;
-        if (c.tracking && !order.tracking) ch.tracking = c.tracking;
-        if (Object.keys(ch).length) setOrderField(order.id, ch);
-      })
-      .catch(() => { if (alive) setCodes("none"); });
-    return () => { alive = false; };
-  }, [file]);
-  const shipped = order.status === "shipped" || order.status === "delivered";
-  const markShipped = () => {
-    if (typeof setOrderField !== "function") return;
-    const c = codes && typeof codes === "object" ? codes : {};
-    const ch = { status: "shipped", shippedAt: new Date().toISOString() };
-    if (c.tracking && !order.tracking) ch.tracking = c.tracking;
-    setOrderField(order.id, ch);
-    pushToast("จัดส่งแล้ว — " + (c.orderNo || order.platformOrderNo || order.id));
-  };
-
   useEffectPD(() => {
     let alive = true;
     setState("loading");
@@ -977,6 +946,37 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
     pushToast("บันทึกที่อยู่แล้ว");
   };
 
+  /* Read order number + tracking off the label once it's loaded, and keep them on
+     the order (overrides) so search / tracking / ship-status use the real numbers. */
+  const [codes, setCodes] = useStatePD(null);   // null | "reading" | {orderNo,tracking,platform} | "none"
+  useEffectPD(() => {
+    if (!file) { setCodes(null); return; }
+    let alive = true;
+    setCodes("reading");
+    extractLabelCodes(file)
+      .then(c => {
+        if (!alive) return;
+        setCodes(c || "none");
+        if (!c || !canAttach || typeof setOrderField !== "function") return;
+        const ch = {};
+        if (c.orderNo && c.orderNo !== order.platformOrderNo) ch.platformOrderNo = c.orderNo;
+        if (c.platform && !order.platform) ch.platform = c.platform;
+        if (c.tracking && !order.tracking) ch.tracking = c.tracking;
+        if (Object.keys(ch).length) setOrderField(order.id, ch);
+      })
+      .catch(() => { if (alive) setCodes("none"); });
+    return () => { alive = false; };
+  }, [file]);
+  const shipped = order.status === "shipped" || order.status === "delivered";
+  const markShipped = () => {
+    if (typeof setOrderField !== "function") return;
+    const c = codes && typeof codes === "object" ? codes : {};
+    const ch = { status: "shipped", shippedAt: new Date().toISOString() };
+    if (c.tracking && !order.tracking) ch.tracking = c.tracking;
+    setOrderField(order.id, ch);
+    pushToast("จัดส่งแล้ว — " + (c.orderNo || order.platformOrderNo || order.id));
+  };
+
   useEffectPD(() => {
     let alive = true;
     setState("loading");
@@ -1137,7 +1137,10 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
    (commitIssueOrder → stock, shelves, history, order in the pack queue), then
    the label file / pasted address are attached to that order. Used by the
    desktop แพ็คสินค้า page (modal) and mobile (view "pack-new"). */
-function PackNewOrder({ onClose, pushToast, mobile }) {
+function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
+  // addTo = an order already in the pack queue → "เพิ่มรายการ" mode: same picker,
+  // no label/address/channel step (the order has them), commit through
+  // addItemsToPackOrder so only the ADDED lines are cut from stock.
   const [q, setQ] = useStatePD("");
   const [cart, setCart] = useStatePD([]);            // [{ key, type, sku?, id?, name, qty, items? }]
   const [file, setFile] = useStatePD(null);
@@ -1180,7 +1183,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
     ? (parsed ? { name: parsed.name || "", phone: parsed.phone || "", addr: [parsed.addr1, parsed.addr2].filter(Boolean).join(" ") || paste.trim() }
               : { name: "", phone: "", addr: paste.trim() })
     : null;
-  const canSend = cart.length > 0 && !short.length && !!(file || shipTo) && !busy;
+  const canSend = cart.length > 0 && !short.length && (addTo ? true : !!(file || shipTo)) && !busy;
 
   const pick = async (e) => {
     const f = e.target.files && e.target.files[0];
@@ -1189,7 +1192,26 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
     try { setFile(await readOrderFile(f)); } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
   };
 
+  const sendAdd = async () => {
+    if (!canSend || typeof addItemsToPackOrder !== "function" || sendingRef.current) return;
+    sendingRef.current = true;
+    setBusy(true);
+    const lines = cart.map(x => x.type === "bundle"
+      ? { type: "bundle", id: x.id, name: x.name, items: x.items, qty: x.qty }
+      : { type: "sku", sku: x.sku, name: x.name, qty: x.qty, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === x.sku)) : "" });
+    let res = null;
+    try { res = await addItemsToPackOrder(addTo, lines, (user && user.name) || ""); }
+    catch (e) { res = { ok: false, error: "เพิ่มรายการไม่สำเร็จ: " + (e.message || e) }; }
+    sendingRef.current = false;
+    setBusy(false);
+    if (!res || !res.ok) { if (res && res.error) pushToast(res.error); return; }
+    if (res.locError) pushToast("ตัดสต็อกแล้ว แต่ปรับตำแหน่งไม่สำเร็จ: " + res.locError);
+    pushToast(`เพิ่ม ${res.lineCount} รายการ (${res.pieces} ชิ้น) เข้า ${addTo.id} แล้ว`);
+    onClose();
+  };
+
   const send = async () => {
+    if (addTo) return sendAdd();
     if (!canSend || typeof commitIssueOrder !== "function" || sendingRef.current) return;
     sendingRef.current = true;
     setBusy(true);
@@ -1222,7 +1244,13 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div>
-        <div style={sec}>1. สินค้าที่ต้องแพ็ค</div>
+        {addTo && (
+          <div style={{ padding: "10px 12px", borderRadius: 10, background: "var(--info-soft)", color: "var(--info)", fontSize: 12.5, lineHeight: 1.6, marginBottom: 10 }}>
+            เพิ่มสินค้าเข้าออร์เดอร์ <b className="mono">{addTo.id}</b>{addTo.customer ? " · " + addTo.customer : ""}<br/>
+            ระบบจะตัดสต็อกเฉพาะรายการที่เพิ่ม และขึ้นป้าย <b>เพิ่มใหม่</b> ให้คนแพ็คเห็น
+          </div>
+        )}
+        <div style={sec}>{addTo ? "สินค้าที่จะเพิ่ม" : "1. สินค้าที่ต้องแพ็ค"}</div>
         <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 พิมพ์ชื่อสินค้า หรือ SKU" style={{ width: "100%", fontSize: 15, padding: "12px 14px" }}/>
         <div style={{ fontSize: 11, color: "var(--muted)", margin: "6px 2px 4px" }}>
           {lq ? `พบ ${allHits.length} รายการ` : `สินค้าทั้งหมด ${allHits.length} รายการ — เลื่อนเลือก หรือพิมพ์ค้นหา`}{allHits.length > hits.length ? ` (แสดง ${hits.length} — พิมพ์เพิ่มเพื่อกรอง)` : ""}
@@ -1259,7 +1287,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
         )}
       </div>
 
-      <div>
+      {!addTo && <div>
         <div style={sec}>2. ใบปะหน้า หรือ ที่อยู่ <span style={{ fontWeight: 400, color: "var(--muted)" }}>(อย่างใดอย่างหนึ่ง)</span></div>
         <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
         {file ? (
@@ -1279,21 +1307,23 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
         {shipTo && (shipTo.name || shipTo.phone) && (
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>✓ ผู้รับ: <b style={{ color: "var(--fg)" }}>{shipTo.name || "—"}</b> {shipTo.phone}</div>
         )}
-      </div>
+      </div>}
 
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+      {!addTo && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>ช่องทาง:</span>
         {(typeof CHANNEL_LIST !== "undefined" ? CHANNEL_LIST : []).map(c => (
           <button key={c.id} onClick={() => setCh(c.id)}
             style={{ padding: "4px 10px", borderRadius: 999, fontSize: 12, cursor: "pointer", fontFamily: "inherit", border: "1px solid " + (ch === c.id ? "var(--fg)" : "var(--border)"), background: ch === c.id ? "var(--fg)" : "transparent", color: ch === c.id ? "var(--surface)" : "var(--fg-2)" }}>{c.name}</button>
         ))}
-      </div>
+      </div>}
     </div>
   );
   const sendBtn = (
     <button onClick={send} disabled={!canSend}
       style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: canSend ? "var(--accent)" : "var(--surface-2)", color: canSend ? "#fff" : "var(--muted)", fontSize: 17, fontWeight: 800, cursor: canSend ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
-      {busy ? "กำลังส่ง…" : cart.length === 0 ? "เลือกสินค้าก่อน" : !(file || shipTo) ? "แนบใบปะหน้าหรือวางที่อยู่" : "ส่งให้คนแพ็ค ✓"}
+      {busy ? "กำลังส่ง…" : cart.length === 0 ? "เลือกสินค้าก่อน"
+        : addTo ? (short.length ? "สต็อกไม่พอ" : `เพิ่มเข้าออร์เดอร์ (${cart.reduce((s, x) => s + x.qty, 0)}) ✓`)
+        : !(file || shipTo) ? "แนบใบปะหน้าหรือวางที่อยู่" : "ส่งให้คนแพ็ค ✓"}
     </button>
   );
 
@@ -1302,7 +1332,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
       <>
         <div className="m-topbar">
           <button className="m-back" onClick={onClose}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
-          <div className="m-title-sub">สั่งแพ็คใหม่</div>
+          <div className="m-title-sub">{addTo ? "เพิ่มรายการ " + addTo.id : "สั่งแพ็คใหม่"}</div>
           <span style={{ width: 30 }}/>
         </div>
         <div className="m-content" style={{ paddingTop: 10 }}>
@@ -1317,7 +1347,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
       <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 90 }}/>
       <div className="modal" style={{ zIndex: 91, width: 560, maxHeight: "92vh" }}>
         <div className="modal-head">
-          <h3>สั่งแพ็คใหม่</h3>
+          <h3>{addTo ? <>เพิ่มรายการ <span className="mono">{addTo.id}</span></> : "สั่งแพ็คใหม่"}</h3>
           <button className="btn btn-ghost btn-sm" onClick={onClose}><Icons.X size={14}/></button>
         </div>
         <div className="modal-body">{body}</div>
@@ -1327,6 +1357,42 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
   );
 }
 function MPackNew({ ctx }) { return <PackNewOrder mobile pushToast={ctx.pushToast} onClose={ctx.back}/>; }
+/* Mobile เพิ่มรายการ (view "pack-add", params.id) — the order is re-read live so a
+   stale route can't add to an order another device already packed. */
+function MPackAdd({ ctx }) {
+  const id = (ctx.route.params && ctx.route.params.id) || "";
+  const all = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+  const order = (all || []).find(o => o.id === id && o.status === "picking") || null;
+  if (!order) {
+    return (
+      <>
+        <div className="m-topbar">
+          <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+          <div className="m-title-sub">เพิ่มรายการ</div>
+        </div>
+        <div className="m-content" style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ออร์เดอร์นี้ไม่ได้อยู่ในคิวแพ็คแล้ว</div>
+      </>
+    );
+  }
+  return <PackNewOrder mobile addTo={order} user={ctx.user} pushToast={ctx.pushToast} onClose={ctx.back}/>;
+}
+
+/* "มีการเพิ่มรายการ" banner — shown on the pick list (phone + desktop) and the
+   queue rows, so a packer who already started never misses the extra lines. */
+function PackAddedBanner({ order, compact }) {
+  const a = (typeof packOrderAdds === "function") ? packOrderAdds(order) : null;
+  if (!a) return null;
+  if (compact) {
+    return <div style={{ display: "inline-block", marginTop: 4, fontSize: 10.5, fontWeight: 700, color: "#fff", background: "var(--info)", borderRadius: 999, padding: "1px 8px" }}>＋ มีการเพิ่มรายการ +{a.pieces} ชิ้น</div>;
+  }
+  return (
+    <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--info-soft)", borderLeft: "4px solid var(--info)", borderRadius: 8, fontSize: 12, lineHeight: 1.55 }}>
+      <div style={{ fontWeight: 700, color: "var(--info)" }}>＋ มีการเพิ่มรายการ +{a.pieces} ชิ้น{a.times > 1 ? ` (${a.times} ครั้ง)` : ""}</div>
+      <div style={{ color: "var(--fg)" }}>{a.names.join(", ")}</div>
+      <div style={{ color: "var(--muted)", fontSize: 11 }}>ล่าสุด {a.when}{a.by ? " · โดย " + a.by : ""}</div>
+    </div>
+  );
+}
 
 /* ── "ส่งให้คนแพ็ค" — shown right after a sale creates an order ──
    The owner asked for the simplest possible path: no hunting for a button on
@@ -1441,7 +1507,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
+  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });
