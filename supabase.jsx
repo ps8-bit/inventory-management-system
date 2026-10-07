@@ -898,10 +898,11 @@ function refreshLiveData() {
   // Pack progress + shelf notes (app_state) — a missed push left another
   // device's notes/ticks invisible until a full reload.
   _rtSoon('pack', async () => {
-    const [v, n] = await Promise.all([dbLoadState('pack_progress'), dbLoadState('pack_loc_notes')]);
+    const [v, n, o] = await Promise.all([dbLoadState('pack_progress'), dbLoadState('pack_loc_notes'), dbLoadState('pack_order_notes')]);
     if (v != null) window._DB_PACK_PROGRESS = v;
     if (n != null) window._DB_PACK_LOC_NOTES = n;
-    if (v != null || n != null) window.dispatchEvent(new CustomEvent('ims-pack-change'));
+    if (o != null) window._DB_PACK_ORDER_NOTES = o;
+    if (v != null || n != null || o != null) window.dispatchEvent(new CustomEvent('ims-pack-change'));
   });
 }
 let _liveFocusHooked = false;
@@ -987,6 +988,7 @@ function setupRealtimeSync() {
                     role_perms: ['_DB_ROLE_PERMS', 'ims-perms-change'],
                     pack_progress: ['_DB_PACK_PROGRESS', 'ims-pack-change'],
                     pack_loc_notes: ['_DB_PACK_LOC_NOTES', 'ims-pack-change'],
+                    pack_order_notes: ['_DB_PACK_ORDER_NOTES', 'ims-pack-change'],
                     order_overrides: ['_DB_ORDER_OVERRIDES', 'ims-orders-change'] };
       const keys = key && map[key] ? [key] : Object.keys(map).filter(k => map[k]);
       for (const k of keys) {
@@ -1132,7 +1134,7 @@ async function lineBotPreview(command) {
    ═══════════════════════════════════════════ */
 async function dbInit() {
   try {
-    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms, productLocs, packProgress, packLocNotes] = await Promise.all([
+    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms, productLocs, packProgress, packLocNotes, packOrderNotes] = await Promise.all([
       dbLoadProducts(),
       dbLoadOrders(),
       dbLoadBundles(),
@@ -1147,7 +1149,8 @@ async function dbInit() {
       dbLoadState('role_perms'),
       dbLoadProductLocs(),
       dbLoadState('pack_progress'),
-      dbLoadState('pack_loc_notes')
+      dbLoadState('pack_loc_notes'),
+      dbLoadState('pack_order_notes')
     ]);
 
     /* Hydrate global PRODUCTS array (mutated in-place so existing
@@ -1201,6 +1204,11 @@ async function dbInit() {
     if (packLocNotes && typeof packLocNotes === 'object') {
       window._DB_PACK_LOC_NOTES = packLocNotes;
       try { localStorage.setItem('ims_pack_loc_notes', JSON.stringify(packLocNotes)); } catch (e) {}
+      window.dispatchEvent(new CustomEvent('ims-pack-change'));
+    }
+    if (packOrderNotes && typeof packOrderNotes === 'object') {
+      window._DB_PACK_ORDER_NOTES = packOrderNotes;
+      try { localStorage.setItem('ims_pack_order_notes', JSON.stringify(packOrderNotes)); } catch (e) {}
       window.dispatchEvent(new CustomEvent('ims-pack-change'));
     }
     if (orderOverrides && typeof orderOverrides === 'object') window._DB_ORDER_OVERRIDES = orderOverrides;

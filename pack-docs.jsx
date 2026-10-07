@@ -478,7 +478,10 @@ async function savePackLabelConfig(next) {
    shelf note (packLocNote) for the shelves this order picks from, once each. */
 function packLabelNotes(order, lines) {
   const out = [];
-  if (order && order.note) out.push({ tag: "ออร์เดอร์", text: String(order.note) });
+  // Owner's order note first — it's the instruction for THIS parcel.
+  const own = (order && typeof packOrderNote === "function") ? packOrderNote(order.id) : null;
+  if (own) out.push({ tag: "โน้ตออร์เดอร์", text: own.text });
+  if (order && order.note) out.push({ tag: "หมายเหตุออร์เดอร์", text: String(order.note) });
   const seen = new Set();
   (lines || []).forEach(l => {
     if (!l || !l.loc || seen.has(l.loc)) return;

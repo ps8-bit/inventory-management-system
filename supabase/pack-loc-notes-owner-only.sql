@@ -1,5 +1,6 @@
 -- ═══════════════════════════════════════════════════════════════════════════
---  Shelf reminder notes (โน้ตประจำช่อง) — OWNER (admin) ONLY.  2026-10-07
+--  Shelf notes (โน้ตประจำช่อง, key 'pack_loc_notes') and order notes
+--  (โน้ตออร์เดอร์, key 'pack_order_notes') — OWNER (admin) ONLY.  2026-10-07
 --
 --  Notes live in their own app_state row 'pack_loc_notes' ({ "<loc>": {text,by,at} }).
 --  They used to sit inside 'pack_progress', which packers MUST be able to write
@@ -17,18 +18,18 @@ drop policy if exists "update" on public.app_state;
 drop policy if exists "delete" on public.app_state;
 
 create policy "insert" on public.app_state for insert with check (
-  (public.auth_role() in ('admin','manager','staff') and (key not in ('role_perms','pack_loc_notes') or public.auth_role() = 'admin'))
+  (public.auth_role() in ('admin','manager','staff') and (key not in ('role_perms','pack_loc_notes','pack_order_notes') or public.auth_role() = 'admin'))
   or (public.auth_role() = 'packer' and key in ('pack_progress','order_overrides'))
 );
 create policy "update" on public.app_state for update using (
-  (public.auth_role() in ('admin','manager','staff') and (key not in ('role_perms','pack_loc_notes') or public.auth_role() = 'admin'))
+  (public.auth_role() in ('admin','manager','staff') and (key not in ('role_perms','pack_loc_notes','pack_order_notes') or public.auth_role() = 'admin'))
   or (public.auth_role() = 'packer' and key in ('pack_progress','order_overrides'))
 ) with check (
-  (public.auth_role() in ('admin','manager','staff') and (key not in ('role_perms','pack_loc_notes') or public.auth_role() = 'admin'))
+  (public.auth_role() in ('admin','manager','staff') and (key not in ('role_perms','pack_loc_notes','pack_order_notes') or public.auth_role() = 'admin'))
   or (public.auth_role() = 'packer' and key in ('pack_progress','order_overrides'))
 );
 create policy "delete" on public.app_state for delete using (
-  public.auth_role() in ('admin','manager') and (key not in ('role_perms','pack_loc_notes') or public.auth_role() = 'admin')
+  public.auth_role() in ('admin','manager') and (key not in ('role_perms','pack_loc_notes','pack_order_notes') or public.auth_role() = 'admin')
 );
 
 -- Check

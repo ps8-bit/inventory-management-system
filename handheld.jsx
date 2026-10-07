@@ -6647,6 +6647,33 @@ function MPackLocNote({ loc, user }) {
   );
 }
 
+/* Owner's note for ONE order (โน้ตออร์เดอร์) — work details for this parcel.
+   Packers read it; only the owner gets the add/edit affordance (RLS enforces it). */
+function MPackOrderNote({ orderId, user, compact }) {
+  if (!orderId || typeof packOrderNote !== "function") return null;
+  const note = packOrderNote(orderId);
+  const canEdit = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();
+  const edit = () => editPackOrderNote(orderId, (user && user.name) || "");
+  if (!note) {
+    if (!canEdit) return null;
+    return (
+      <button onClick={edit} style={{ background: "none", border: "1px dashed var(--border)", borderRadius: 10, padding: "8px 12px", color: "var(--muted)", fontSize: 12, cursor: "pointer", width: "100%", textAlign: "left", marginTop: compact ? 0 : 10 }}>
+        + เพิ่มโน้ตออร์เดอร์ (รายละเอียดงานของออร์เดอร์นี้)
+      </button>
+    );
+  }
+  return (
+    <div onClick={canEdit ? edit : undefined} role={canEdit ? "button" : undefined} style={{ marginTop: compact ? 0 : 10, padding: "10px 12px", background: "var(--accent-soft)", borderLeft: "5px solid var(--accent)", borderRadius: 10, cursor: canEdit ? "pointer" : "default", lineHeight: 1.5 }}>
+      <div className="row" style={{ justifyContent: "space-between", gap: 8, marginBottom: 3 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--accent)" }}>📝 โน้ตออร์เดอร์</span>
+        {canEdit && <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>แตะเพื่อแก้ไข ✎</span>}
+      </div>
+      <div style={{ fontSize: compact ? 14 : 15.5, fontWeight: 700, color: "var(--fg)", whiteSpace: "pre-line", wordBreak: "break-word" }}>{note.text}</div>
+      {note.by && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 4 }}>— {note.by}</div>}
+    </div>
+  );
+}
+
 /* One pick line. `picked` / `short` come from the caller's progress record so the
    same row serves a single order and a wave without owning any state itself. */
 function MPackLine({ line, picked, short, onSet, onShort, sub }) {
@@ -7124,6 +7151,7 @@ function MPackOrder({ ctx }) {
             {totals.shortLines > 0 && <><span>·</span><span style={{ color: "var(--warning)" }}>ของขาด {totals.shortLines}</span></>}
           </div>
           {order.note && <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 11.5 }}>โน้ต: {order.note}</div>}
+          <MPackOrderNote orderId={order.id} user={ctx.user}/>
         </div>
 
         {camOpen && <CameraScanner continuous onScan={onScan} onClose={() => setCamOpen(false)}/>}
@@ -7446,6 +7474,9 @@ function MPackWave({ ctx }) {
                       </div>
                     </div>
                   </button>
+                  {typeof packOrderNote === "function" && (packOrderNote(o.id) || (typeof canEditPackLocNotes === "function" && canEditPackLocNotes())) && (
+                    <div style={{ padding: "0 14px 10px" }}><MPackOrderNote orderId={o.id} user={ctx.user} compact/></div>
+                  )}
                   {typeof PackLabelButton === "function" && (
                     <div style={{ padding: "0 14px 10px" }}><PackLabelButton order={o} lines={oLines} pushToast={ctx.pushToast}/></div>
                   )}

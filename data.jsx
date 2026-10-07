@@ -2939,6 +2939,67 @@ async function editPackLocNote(loc, by) {
   await setPackLocNote(loc, r.v, by || "");
 }
 
+/* Per-ORDER notes (โน้ตออร์เดอร์) — work details that belong to ONE parcel
+   (patch text, gift wrap, "ส่งด่วน"), which a shelf note must never carry.
+   Same rules as shelf notes: OWNER (admin) only, enforced by app_state RLS on the
+   key "pack_order_notes" (supabase/pack-loc-notes-owner-only.sql). NOT stored in
+   order_overrides — packers can write that key, so the DB couldn't stop them.
+   Shape { "<orderId>": { text, by, at } | null } (null = removed, merge can't delete). */
+const PACK_ORDER_NOTES_KEY = "pack_order_notes";
+const PACK_ORDER_NOTES_LS = "ims_pack_order_notes";
+function loadPackOrderNotes() {
+  let m = window._DB_PACK_ORDER_NOTES;
+  if (!m || typeof m !== "object") {
+    try { m = JSON.parse(localStorage.getItem(PACK_ORDER_NOTES_LS) || "null"); } catch (e) { m = null; }
+  }
+  return (m && typeof m === "object") ? m : {};
+}
+function _packOrderNotesMirror(map) {
+  window._DB_PACK_ORDER_NOTES = map;
+  try { localStorage.setItem(PACK_ORDER_NOTES_LS, JSON.stringify(map)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-pack-change"));
+}
+function packOrderNote(orderId) {
+  if (!orderId) return null;
+  const e = loadPackOrderNotes()[orderId];
+  return e && e.text ? e : null;
+}
+async function setPackOrderNote(orderId, text, by) {
+  if (!orderId) return { ok: false };
+  if (!canEditPackLocNotes()) {
+    window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เฉพาะเจ้าของร้านเท่านั้นที่แก้ไขโน้ตออร์เดอร์ได้" }));
+    return { ok: false };
+  }
+  const t = String(text || "").trim();
+  const clean = t.replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").slice(0, 500);
+  const rec = t ? { text: clean, by: by || "", at: new Date().toISOString() } : null;
+  const prev = loadPackOrderNotes();
+  _packOrderNotesMirror({ ...prev, [orderId]: rec });
+  let res = null;
+  try {
+    if (typeof dbMergeState === "function") res = await dbMergeState(PACK_ORDER_NOTES_KEY, { [orderId]: rec });
+    if (res === null && typeof dbSaveState === "function") res = await dbSaveState(PACK_ORDER_NOTES_KEY, { ...prev, [orderId]: rec });
+  } catch (e) { res = { error: String((e && e.message) || e) }; }
+  if (!res || res.error) {
+    _packOrderNotesMirror(prev);
+    _blobWriteFailed("โน้ตออร์เดอร์", (res && res.error) || "");
+    return { ok: false };
+  }
+  return { ok: true };
+}
+async function editPackOrderNote(orderId, by) {
+  if (!orderId || typeof askForm !== "function" || !canEditPackLocNotes()) return;
+  const note = packOrderNote(orderId);
+  const r = await askForm({
+    title: "โน้ตออร์เดอร์ " + orderId,
+    message: "ขึ้นเฉพาะออร์เดอร์นี้ — ในหน้าแพ็คและบนใบปะหน้า",
+    fields: [{ key: "v", label: "รายละเอียดงาน / ข้อความถึงคนแพ็ค (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ปักชื่อ ATHIP T. / กรุ๊ปเลือด Rh.B\nกด Enter เพื่อขึ้นบรรทัดใหม่", required: false, type: "textarea", rows: 6, maxLength: 500 }],
+    okLabel: note ? "บันทึก / ลบ" : "บันทึก"
+  });
+  if (!r) return;
+  await setPackOrderNote(orderId, r.v, by || "");
+}
+
 /* Shared progress math so the phone, the wave view and the desktop queue can't
    report different numbers for the same order. A line counts as settled when the
    picked qty covers it OR it has been marked short (a short line is resolved —
@@ -3773,7 +3834,7 @@ Object.assign(window, {
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
-  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
+  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, loadPackOrderNotes, packOrderNote, setPackOrderNote, editPackOrderNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,

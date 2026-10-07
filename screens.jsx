@@ -6968,7 +6968,15 @@ function PackQueue({ pushToast, goTo, user }) {
                           <>
                             <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
                               <div className="eyebrow">รายการหยิบ · เรียงตามเส้นทางเดิน</div>
-                              {r.rec && <button className="btn btn-sm btn-ghost" onClick={() => resetProgress(r.o.id)}>ล้างความคืบหน้า</button>}
+                              <div className="row" style={{ gap: 6 }}>
+                                {/* Owner-only (RLS enforces it): the per-order work note. */}
+                                {typeof canEditPackLocNotes === "function" && canEditPackLocNotes() && (
+                                  <button className="btn btn-sm" onClick={() => editPackOrderNote(r.o.id, (user && user.name) || "")}>
+                                    📝 {packOrderNote(r.o.id) ? "แก้ไขโน้ตออร์เดอร์" : "เพิ่มโน้ตออร์เดอร์"}
+                                  </button>
+                                )}
+                                {r.rec && <button className="btn btn-sm btn-ghost" onClick={() => resetProgress(r.o.id)}>ล้างความคืบหน้า</button>}
+                              </div>
                             </div>
                             <table className="t" style={{ background: "var(--surface)", borderRadius: 8 }}>
                               <thead><tr>
