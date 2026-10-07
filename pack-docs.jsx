@@ -563,7 +563,9 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
         notes.map((n, i) =>
           `<div style="${i ? `margin-top:${small ? 0.8 : 1.2}mm;padding-top:${small ? 0.8 : 1.2}mm;border-top:0.3mm dashed #000;` : ""}">` +
             `<span style="display:inline-block;background:#000;color:#fff;font-size:${pt(9)};font-weight:700;padding:0.3mm 1.4mm;border-radius:0.8mm;line-height:1.35">${_escPD(n.tag)}</span>` +
-            `<div style="font-size:${small ? pt(10) : pt(11.5)};font-weight:700;line-height:${small ? 1.4 : 1.5};margin-top:${small ? 0.3 : 0.6}mm;white-space:pre-line;word-break:break-word">${_escPD(n.text)}</div>` +
+            // --nfit shrinks the NOTES first (fitPackLabel) so the address never pays
+            // for a long note; blank lines are dropped on paper only.
+            `<div style="font-size:calc(${small ? pt(9.5) : pt(10.5)} * var(--nfit,1));font-weight:700;line-height:1.35;margin-top:${small ? 0.3 : 0.5}mm;white-space:pre-line;word-break:break-word">${_escPD(String(n.text).replace(/\n\s*\n+/g, "\n"))}</div>` +
           `</div>`).join("") +
       `</div>` : "") +
     `</div>`);
@@ -613,6 +615,14 @@ function fitPackLabel(root) {
   const prev = root.getAttribute("style") || "";
   // Keep the caller's font while measuring — the PDF path lays out in Sarabun.
   root.setAttribute("style", "display:block;position:fixed;left:-10000px;top:0;font-family:" + (root.style.fontFamily || "'IBM Plex Sans Thai','Sarabun',Tahoma,sans-serif"));
+  // 1) Notes give way first (to 70%) — the recipient is what the courier reads.
+  let nf = 1;
+  lbl.style.setProperty("--nfit", "1");
+  while (lbl.scrollHeight > lbl.clientHeight + 1 && nf > 0.7) {
+    nf = Math.round((nf - 0.05) * 100) / 100;
+    lbl.style.setProperty("--nfit", String(nf));
+  }
+  // 2) Only then shrink the recipient block.
   let f = 1;
   lbl.style.setProperty("--fit", "1");
   while (lbl.scrollHeight > lbl.clientHeight + 1 && f > 0.55) {
