@@ -6621,7 +6621,7 @@ function MPackLoc({ parts, loc }) {
    add/edit; saving blank removes it. Re-renders with the parent's pack tick. */
 function MPackLocNote({ loc, user }) {
   // "-" / blank = no shelf; a note there would land on every unshelved item.
-  if (!loc || loc === "-" || typeof packLocNote !== "function") return null;
+  if (typeof packNoteLocOk !== "function" || !packNoteLocOk(loc) || typeof packLocNote !== "function") return null;
   const note = packLocNote(loc);
   // Owner-only (RLS enforces it too): packers see the note, never edit it.
   const canEdit = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();

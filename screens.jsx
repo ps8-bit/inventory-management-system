@@ -6916,11 +6916,13 @@ function PackQueue({ pushToast, goTo, user }) {
                       {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
                       {/* Same reminders the label prints: order note + shelf notes. */}
                       {r.notes.length > 0 && (
-                        <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", borderLeft: "4px solid var(--warning)", maxWidth: 340, display: "flex", flexDirection: "column", gap: 5 }}>
+                        // Tag ABOVE the text: side by side, a long shelf tag left the text
+                        // a sliver of the narrow customer column ("หมวก / จราจร / ...").
+                        <div style={{ marginTop: 6, padding: "7px 10px", borderRadius: 8, background: "var(--warning-soft)", borderLeft: "4px solid var(--warning)", minWidth: 220, maxWidth: 340, display: "flex", flexDirection: "column", gap: 7 }}>
                           {r.notes.map((n, i) => (
-                            <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
-                              <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 700, color: "var(--warning)", background: "var(--surface)", border: "1px solid var(--warning)", borderRadius: 5, padding: "0 6px", lineHeight: "18px", whiteSpace: "nowrap" }}>📌 {n.tag}</span>
-                              <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: "var(--fg)", lineHeight: 1.45, whiteSpace: "pre-line", wordBreak: "break-word" }}>{n.text}</span>
+                            <div key={i} style={i ? { borderTop: "1px dashed var(--warning)", paddingTop: 7 } : undefined}>
+                              <span style={{ display: "inline-block", fontSize: 10.5, fontWeight: 700, color: "var(--warning)", background: "var(--surface)", border: "1px solid var(--warning)", borderRadius: 5, padding: "0 6px", lineHeight: "18px", whiteSpace: "nowrap", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis" }}>📌 {n.tag}</span>
+                              <div style={{ marginTop: 3, fontSize: 13, fontWeight: 700, color: "var(--fg)", lineHeight: 1.5, whiteSpace: "pre-line", wordBreak: "break-word" }}>{n.text}</div>
                             </div>
                           ))}
                         </div>
@@ -6985,7 +6987,7 @@ function PackQueue({ pushToast, goTo, user }) {
                                         <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>
                                           {l.parts ? `${l.parts.building}${l.parts.floor ? " · " + l.parts.floor : ""}` : ""}
                                         </div>
-                                        {l.loc && l.loc !== "-" && typeof packLocNote === "function" && (() => {
+                                        {typeof packNoteLocOk === "function" && packNoteLocOk(l.loc) && typeof packLocNote === "function" && (() => {
                                           const n = packLocNote(l.loc);
                                           // Owner-only (RLS enforces it too).
                                           const canEdit = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();
