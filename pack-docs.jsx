@@ -374,17 +374,18 @@ function PackPlatformBar({ rows, value, onChange, mobile }) {
       <button key={key || "_all"} type="button" className={"pp-card" + (on ? " is-on" : "")} aria-pressed={on}
         aria-label={`${name}: ${orders} ออร์เดอร์ ${pieces} ชิ้น`} onClick={() => onChange(on || key === "" ? "" : key)}
         style={{ "--pp-tint": tint }}>
-        <span className="pp-head">{icon}<span className="pp-name">{name}</span></span>
-        <span className="pp-body">
-          <span className="pp-num tnum">{orders}</span>
-          <span className="pp-sub"><span>ออร์เดอร์</span><span className="pp-pcs tnum">{pieces} ชิ้น</span></span>
+        {icon}
+        <span className="pp-main">
+          <span className="pp-name">{name}</span>
+          <span className="pp-sub tnum">{orders} ออร์เดอร์ · {pieces} ชิ้น</span>
+          {(isFinite(oldest) || late > 0) && (
+            <span className="pp-foot">
+              {isFinite(oldest) && <span className="pp-pill"><Clock/> รอนานสุด {_packAge(oldest)}</span>}
+              {late > 0 && <span className="pp-late">⚠ ส่งล่าช้า {late}</span>}
+            </span>
+          )}
         </span>
-        {(isFinite(oldest) || late > 0) && (
-          <span className="pp-foot">
-            {isFinite(oldest) && <span className="pp-wait"><Clock/><span className="pp-pill">รอนานสุด {_packAge(oldest)}</span></span>}
-            {late > 0 && <span className="pp-late">⚠ ส่งล่าช้า {late}</span>}
-          </span>
-        )}
+        {on && <span className="pp-check pp-check-corner" aria-hidden="true"><Icons.Check size={13}/></span>}
       </button>
     );
   };
@@ -423,12 +424,12 @@ function PackPlatformBar({ rows, value, onChange, mobile }) {
   }
   return (
     <div className="pp-row" role="group" aria-label="กรองตามแพลตฟอร์ม">
-      {card({ key: "", name: "ทุกแพลตฟอร์ม", icon: <span className="pp-icon pp-icon-all"><Icons.Grid size={15}/></span>,
+      {card({ key: "", name: "ทุกแพลตฟอร์ม", icon: <span className="pp-icon pp-icon-all pp-icon-xl"><Icons.Grid size={22}/></span>,
         tint: "var(--accent)", orders: rows.length, pieces: allPieces, oldest: NaN, late: allLate })}
       {groups.map(g => {
         const m = (typeof channelMark === "function") ? channelMark(g.name) : null;
         return card({ key: g.name, name: g.name,
-          icon: (typeof MarkTile === "function" && m) ? <MarkTile m={m} size={26}/> : <span className="pp-icon"/>,
+          icon: (typeof MarkTile === "function" && m) ? <MarkTile m={m} size={48}/> : <span className="pp-icon pp-icon-xl"/>,
           tint: (m && m.bg) || "var(--accent)", orders: g.orders, pieces: g.pieces, oldest: g.oldest, late: g.late });
       })}
     </div>
@@ -518,13 +519,14 @@ async function deleteOrderDocs(ids) {
   refreshOrderFileIds().catch(() => {});
 }
 
-function PackAttachments({ orderId, pushToast, card, mobile }) {
+function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
   const [list, setList] = useStatePD([]);
   const [state, setState] = useStatePD("loading");   // loading | ok | error
   const [busy, setBusy] = useStatePD("");
   const [rev, setRev] = useStatePD(0);
   const inputRef = useRefPD(null);
   const camRef = useRefPD(null);     // mobile ถ่ายรูป — opens the camera directly
+  const [over, setOver] = useStatePD(false);   // desktop drag-and-drop highlight
   const canAdd = canAddOrderAttachment();
 
   useEffectPD(() => {
@@ -559,12 +561,14 @@ function PackAttachments({ orderId, pushToast, card, mobile }) {
     if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); }
   };
 
-  if (mobile) {
+  if (mobile || unified) {
+    const onDrop = (e) => { e.preventDefault(); setOver(false); if (canAdd && e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) pick({ target: { files: e.dataTransfer.files, value: "" } }); };
     return (
       <section className="sd-card">
         <div className="sd-head">
           <span className="sd-head-icon"><Icons.Image size={20}/></span>
-          <span className="sd-title">รูป / ไฟล์แนบ{list.length ? ` (${list.length})` : ""}</span>
+          <span className="sd-title">{mobile ? "รูป / ไฟล์แนบ" : "รูปและไฟล์แนบ"}{list.length ? ` (${list.length})` : ""}</span>
+          {!mobile && canAdd && <button type="button" className="sd-btn-sm sd-btn-sm-plain" disabled={!!busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={15}/> เพิ่มรูป / ไฟล์</button>}
         </div>
         <div className="sd-hint" style={{ marginTop: -4 }}>แนบภาพสินค้าที่แพ็คแล้ว หรือเอกสารเพิ่มเติม</div>
         <input ref={inputRef} type="file" multiple accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
@@ -572,7 +576,15 @@ function PackAttachments({ orderId, pushToast, card, mobile }) {
         {busy && <div className="sd-muted">{busy}</div>}
         {state === "loading" ? <div className="sd-muted">กำลังโหลด…</div>
           : state === "error" ? <div className="sd-error">โหลดไฟล์ไม่ได้ <button type="button" className="sd-link" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
-          : !list.length ? <div className="sd-muted">{canAdd ? "ยังไม่มีไฟล์แนบ" : "ไม่มีไฟล์แนบ"}</div>
+          : !list.length ? (!mobile && canAdd
+            ? <button type="button" className={"sd-drop" + (over ? " is-over" : "")} disabled={!!busy}
+                onClick={() => inputRef.current && inputRef.current.click()}
+                onDragOver={e => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)} onDrop={onDrop}>
+                <Icons.Up size={26}/>
+                <span className="sd-drop-title">ลากไฟล์มาวางที่นี่ หรือ<span className="sd-drop-link">เลือกไฟล์</span></span>
+                <span className="sd-hint">รองรับรูปภาพและ PDF · แนบได้หลายไฟล์</span>
+              </button>
+            : <div className="sd-muted">{canAdd ? "ยังไม่มีไฟล์แนบ" : "ไม่มีไฟล์แนบ"}</div>)
           : (
             <div className="sd-thumbs">
               {list.map(a => (
@@ -591,7 +603,7 @@ function PackAttachments({ orderId, pushToast, card, mobile }) {
               ))}
             </div>
           )}
-        {canAdd && (
+        {canAdd && mobile && (
           <div className="sd-grid2">
             <button type="button" className="sd-btn sd-btn-outline" disabled={!!busy} onClick={() => camRef.current && camRef.current.click()}><Icons.Camera size={18}/> ถ่ายรูป</button>
             <button type="button" className="sd-btn sd-btn-outline" disabled={!!busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={18}/> เพิ่มไฟล์</button>
@@ -1272,14 +1284,27 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   const card = mobile ? { className: "m-card", style: { padding: 14, marginTop: 12 } } : { className: "card", style: { padding: 14 } };
   const btn = "btn btn-sm";
 
-  /* Mobile: one column — label file, recipient, attachments — with full-width,
-     44px-tall actions instead of a row of small buttons; cancel sits apart. */
-  if (mobile) {
+  /* One layout for both forks. Mobile: one column (label file, recipient,
+     attachments) with full-width 44px actions; desktop: a "เอกสารและการจัดส่ง"
+     panel, label + recipient side by side, actions in one row. Cancel sits apart. */
+  {
     const copyBtn = (text, what) => (
       <button type="button" className="sd-icon-btn" aria-label={"คัดลอก" + what} onClick={() => copyPackText(text, what, pushToast)}><Icons.Copy size={17}/></button>
     );
     return (
-      <div className="sd-stack">
+      <div className={"sd-stack" + (mobile ? "" : " is-desktop")}>
+        {!mobile && (
+          <div className="sd-panel-head">
+            <div>
+              <div className="sd-panel-title">เอกสารและการจัดส่ง</div>
+              <div className="sd-hint">จัดการใบปะหน้า ที่อยู่ผู้รับ และหลักฐานการแพ็ค</div>
+            </div>
+            {shipped
+              ? <span className="sd-chip-ok"><Icons.Check size={15}/> จัดส่งแล้ว</span>
+              : canAttach && <button type="button" className="sd-btn-sm sd-btn-sm-ok" onClick={markShipped}><Icons.Truck size={15}/> ส่งให้ขนส่งแล้ว</button>}
+          </div>
+        )}
+        <div className="sd-cols">
         {/* ใบปะหน้าที่แนบ */}
         <section className="sd-card">
           <div className="sd-head">
@@ -1322,13 +1347,24 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
                     )}
                   </div>
                 )}
-                <div className="sd-grid2">
-                  <button type="button" className="sd-btn sd-btn-outline" onClick={() => printOrderFile(file)}><Icons.Print size={17}/> พิมพ์</button>
-                  <button type="button" className="sd-btn sd-btn-outline" onClick={() => openOrderFile(file)}><Icons.Eye size={17}/> เปิดดู</button>
-                  <button type="button" className="sd-btn sd-btn-outline" onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={17}/> ดาวน์โหลด</button>
-                  {canUpload && <button type="button" className="sd-btn sd-btn-outline" disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Refresh size={17}/> เปลี่ยนไฟล์</button>}
-                </div>
-                {(shipped || canAttach) ? (
+                {mobile ? (
+                  <div className="sd-grid2">
+                    <button type="button" className="sd-btn sd-btn-outline" onClick={() => printOrderFile(file)}><Icons.Print size={17}/> พิมพ์</button>
+                    <button type="button" className="sd-btn sd-btn-outline" onClick={() => openOrderFile(file)}><Icons.Eye size={17}/> เปิดดู</button>
+                    <button type="button" className="sd-btn sd-btn-outline" onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={17}/> ดาวน์โหลด</button>
+                    {canUpload && <button type="button" className="sd-btn sd-btn-outline" disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Refresh size={17}/> เปลี่ยนไฟล์</button>}
+                  </div>
+                ) : (
+                  <div className="sd-actions">
+                    <button type="button" className="sd-abtn" onClick={() => openOrderFile(file)}><Icons.Eye size={15}/> เปิดดู</button>
+                    <button type="button" className="sd-abtn" onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={15}/> ดาวน์โหลด</button>
+                    <button type="button" className="sd-abtn is-primary" onClick={() => printOrderFile(file)}><Icons.Print size={15}/> พิมพ์</button>
+                    {(canUpload || canAttach) && <span className="sd-sep"/>}
+                    {canUpload && <button type="button" className="sd-abtn" disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.File size={15}/> เปลี่ยนไฟล์</button>}
+                    {canAttach && <button type="button" className="sd-abtn is-danger" aria-label="ลบไฟล์ใบปะหน้า" title="ลบไฟล์" disabled={busy} onClick={remove}><Icons.Trash size={15}/></button>}
+                  </div>
+                )}
+                {mobile && (shipped || canAttach) ? (
                   <div className="sd-row-split">
                     {shipped
                       ? <span className="sd-status sd-status-ok"><Icons.Check size={15}/> จัดส่งแล้ว</span>
@@ -1346,6 +1382,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
             <span className="sd-head-icon"><Icons.Pin size={20}/></span>
             <span className="sd-title">ที่อยู่ผู้รับ</span>
             {canAttach && !edit && <button type="button" className="sd-btn-sm" onClick={startEdit}><Icons.Edit size={15}/> {r.addr ? "แก้ไข" : "เพิ่มที่อยู่"}</button>}
+            {!mobile && !edit && <button type="button" className="sd-btn-sm sd-btn-sm-plain" disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}><Icons.Copy size={15}/> คัดลอกทั้งหมด</button>}
           </div>
           {edit ? (
             <div className="sd-form">
@@ -1376,134 +1413,40 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
                 {r.addr && copyBtn(r.addr, "ที่อยู่")}
               </div>
               {(r.cod > 0 || r.carrier) && <div className="sd-hint">{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
-              <button type="button" className="sd-btn sd-btn-outline" disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}>
-                <Icons.Clipboard size={18}/> คัดลอกข้อมูลทั้งหมด
-              </button>
+              {mobile && (
+                <button type="button" className="sd-btn sd-btn-outline" disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}>
+                  <Icons.Clipboard size={18}/> คัดลอกข้อมูลทั้งหมด
+                </button>
+              )}
               <div className="sd-divider"/>
-              <label className="sd-label" htmlFor={"sd-paper-" + order.id}>ขนาดใบปะหน้า</label>
-              <select id={"sd-paper-" + order.id} className="sd-input" value={paper} onChange={e => { setPaper(e.target.value); setPackLabelSize(e.target.value); }}>
-                {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
-              </select>
-              <button type="button" className="sd-btn sd-btn-outline" disabled={!r.addr} onClick={() => printOrderAddress(order, lines, paper)}>
-                <Icons.Print size={18}/> พิมพ์ใบปะหน้า
-              </button>
+              <div className="sd-print-row">
+                <label className="sd-label" htmlFor={"sd-paper-" + order.id}>ขนาดใบปะหน้า</label>
+                <select id={"sd-paper-" + order.id} className="sd-input" value={paper} onChange={e => { setPaper(e.target.value); setPackLabelSize(e.target.value); }}>
+                  {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
+                </select>
+                <button type="button" className="sd-btn sd-btn-outline" disabled={!r.addr} onClick={() => printOrderAddress(order, lines, paper)}>
+                  <Icons.Print size={18}/> พิมพ์ใบปะหน้า
+                </button>
+              </div>
             </>
           )}
         </section>
+        </div>
 
-        <PackAttachments orderId={order.id} pushToast={pushToast} card={card} mobile/>
+        <PackAttachments orderId={order.id} pushToast={pushToast} card={card} mobile={mobile} unified/>
 
         {canCancel && (
-          <button type="button" className="sd-cancel" disabled={busy} onClick={cancel}>
-            <Icons.X size={16}/> ยกเลิกออร์เดอร์และคืนสต็อก
-          </button>
+          <div className="sd-cancel-row">
+            <button type="button" className="sd-cancel" disabled={busy} onClick={cancel}>
+              {mobile ? <Icons.X size={16}/> : <Icons.Trash size={16}/>} ยกเลิกออร์เดอร์และคืนสต็อก
+            </button>
+            {!mobile && <span className="sd-hint">กรณีลูกค้ายกเลิกคำสั่งซื้อ</span>}
+          </div>
         )}
       </div>
     );
   }
 
-  return (
-    <div style={{ display: "flex", flexDirection: mobile ? "column" : "row", gap: 12, flexWrap: "wrap", marginTop: mobile ? 0 : 12 }}>
-      {/* attached label file */}
-      <div {...card} style={{ ...card.style, flex: 1, minWidth: 240 }}>
-        <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-          <strong style={{ fontSize: 13 }}>ใบปะหน้าที่แนบ</strong>
-          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-            {file && <button className={btn} onClick={() => openOrderFile(file)}><Icons.Eye size={13}/> เปิด</button>}
-            {file && <button className={btn} onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={13}/> ดาวน์โหลด</button>}
-            {file && <button className={btn} onClick={() => printOrderFile(file)}><Icons.Print size={13}/> พิมพ์</button>}
-            {canUpload && <button className={btn} disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={13}/> {file ? "เปลี่ยน" : "แนบไฟล์"}</button>}
-            {canAttach && file && <button className="btn btn-sm btn-ghost" disabled={busy} onClick={remove}><Icons.Trash size={13}/></button>}
-          </div>
-        </div>
-        <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
-        {state === "loading" ? <div style={{ fontSize: 12, color: "var(--muted)" }}>กำลังโหลด…</div>
-          : state === "error" ? <div style={{ fontSize: 12, color: "var(--danger)" }}>โหลดไฟล์ไม่ได้ <button className="btn btn-ghost btn-sm" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
-          : !file ? <div style={{ fontSize: 12, color: "var(--muted)" }}>{busy ? "กำลังอัปโหลด…" : canUpload ? "ยังไม่มีไฟล์ — แนบรูปหรือ PDF ใบปะหน้าจาก Shopee / Lazada / ขนส่ง" : "ไม่มีไฟล์แนบ — ใช้ที่อยู่ด้านล่าง"}</div>
-          : file.type === "application/pdf" ? <div style={{ fontSize: 13 }}>📄 {file.name}</div>
-          : <img src={file.dataUrl} alt="ใบปะหน้า" style={{ width: "100%", maxHeight: mobile ? 320 : 260, objectFit: "contain", borderRadius: 8, background: "#fff" }}/>}
-        {file && codes === "reading" && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>กำลังอ่านเลขคำสั่งซื้อจากใบปะหน้า…</div>}
-        {file && codes === "none" && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>อ่านเลขคำสั่งซื้อจากไฟล์นี้ไม่ได้</div>}
-        {file && codes && typeof codes === "object" && (
-          <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
-            {codes.orderNo && <div className="row" style={{ gap: 8, fontSize: 13, flexWrap: "wrap" }}>
-              <span style={{ color: "var(--muted)", minWidth: 92, display: "inline-flex", alignItems: "center", gap: 5 }}>{codes.platform && typeof ChannelMark === "function" && <ChannelMark channel={codes.platform} size={16}/>}เลขคำสั่งซื้อ</span>
-              <strong style={{ fontFamily: "var(--mono, monospace)" }}>{codes.orderNo}</strong>
-              <button className="btn btn-ghost btn-sm" onClick={() => copyPackText(codes.orderNo, "เลขคำสั่งซื้อ", pushToast)}><Icons.Copy size={12}/></button>
-            </div>}
-            {codes.tracking && <div className="row" style={{ gap: 8, fontSize: 13, flexWrap: "wrap" }}>
-              <span style={{ color: "var(--muted)", minWidth: 92 }}>เลขพัสดุ</span>
-              <strong style={{ fontFamily: "var(--mono, monospace)" }}>{codes.tracking}</strong>
-              <button className="btn btn-ghost btn-sm" onClick={() => copyPackText(codes.tracking, "เลขพัสดุ", pushToast)}><Icons.Copy size={12}/></button>
-            </div>}
-            {shipped
-              ? <div style={{ fontSize: 12, color: "var(--success, green)" }}>✓ จัดส่งแล้ว</div>
-              : canAttach && <div><button className="btn btn-sm btn-primary" onClick={markShipped}><Icons.Check size={13}/> จัดส่งแล้ว</button></div>}
-          </div>
-        )}
-      </div>
-
-      {/* recipient */}
-      <div {...card} style={{ ...card.style, flex: 1, minWidth: 240 }}>
-        <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-          <strong style={{ fontSize: 13 }}>ที่อยู่ผู้รับ</strong>
-          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-            {canAttach && !edit && <button className={btn} onClick={startEdit}><Icons.Edit size={13}/> {r.addr ? "แก้ไข" : "เพิ่มที่อยู่"}</button>}
-            <button className={btn} disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}><Icons.Copy size={13}/> คัดลอกทั้งหมด</button>
-            <select className="input" value={paper} onChange={e => { setPaper(e.target.value); setPackLabelSize(e.target.value); }}
-              title="ขนาดกระดาษใบปะหน้า" style={{ width: "auto", height: 30, padding: "0 6px", fontSize: 12 }}>
-              {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
-            </select>
-            <button className={btn} disabled={!r.addr} onClick={() => printOrderAddress(order, lines, paper)}><Icons.Print size={13}/> พิมพ์ใบปะหน้า</button>
-          </div>
-        </div>
-        {edit ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <div className="row" style={{ gap: 6 }}>
-              <textarea className="input" rows={2} value={edit.paste} onChange={e => setEdit({ ...edit, paste: e.target.value })} placeholder="วางที่อยู่ทั้งก้อนจากแชท/Shopee แล้วกด แยกอัตโนมัติ" style={{ flex: 1, resize: "vertical" }}/>
-              <button className={btn} disabled={!edit.paste.trim()} onClick={splitPaste}>แยกอัตโนมัติ</button>
-            </div>
-            <input className="input" value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} placeholder="ชื่อผู้รับ"/>
-            <input className="input" value={edit.phone} inputMode="tel" onChange={e => setEdit({ ...edit, phone: e.target.value })} placeholder="เบอร์โทร"/>
-            <textarea className="input" rows={3} value={edit.addr} onChange={e => setEdit({ ...edit, addr: e.target.value })} placeholder="ที่อยู่ ตำบล อำเภอ จังหวัด รหัสไปรษณีย์" style={{ resize: "vertical" }}/>
-            <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
-              <button className={btn} onClick={() => setEdit(null)}>ยกเลิก</button>
-              <button className="btn btn-sm btn-primary" disabled={!edit.name.trim() && !edit.addr.trim()} onClick={saveAddr}>บันทึกที่อยู่</button>
-            </div>
-          </div>
-        ) : (
-          <>
-            {/* Each field copies on its own so it can go into a carrier app's separate boxes. */}
-            <div className="row" style={{ gap: 6, alignItems: "flex-start" }}>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 600, userSelect: "text", WebkitUserSelect: "text" }}>{r.name || "—"}</div>
-              {r.name && <button className="btn btn-sm btn-ghost" title="คัดลอกชื่อ" onClick={() => copyPackText(r.name, "ชื่อ", pushToast)}><Icons.Copy size={12}/> ชื่อ</button>}
-            </div>
-            {r.phone && (
-              <div className="row" style={{ gap: 6, alignItems: "flex-start" }}>
-                <div className="mono" style={{ flex: 1, minWidth: 0, fontSize: 13, userSelect: "text", WebkitUserSelect: "text" }}>{r.phone}</div>
-                <button className="btn btn-sm btn-ghost" title="คัดลอกเบอร์โทร" onClick={() => copyPackText(r.phone, "เบอร์โทร", pushToast)}><Icons.Copy size={12}/> เบอร์</button>
-              </div>
-            )}
-            <div className="row" style={{ gap: 6, alignItems: "flex-start", marginTop: 4 }}>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: r.addr ? "var(--fg)" : "var(--muted)", userSelect: "text", WebkitUserSelect: "text" }}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</div>
-              {r.addr && <button className="btn btn-sm btn-ghost" title="คัดลอกที่อยู่" onClick={() => copyPackText(r.addr, "ที่อยู่", pushToast)}><Icons.Copy size={12}/> ที่อยู่</button>}
-            </div>
-          </>
-        )}
-        {(r.cod > 0 || r.carrier) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
-      </div>
-
-      <PackAttachments orderId={order.id} pushToast={pushToast} card={card}/>
-
-      {canCancel && (
-        <div style={{ flexBasis: "100%" }}>
-          <button className="btn btn-sm btn-ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={cancel}>
-            <Icons.X size={13}/> ลูกค้ายกเลิก — ยกเลิกออร์เดอร์และคืนสต็อก
-          </button>
-        </div>
-      )}
-    </div>
-  );
 }
 
 /* ── สั่งแพ็คใหม่ — ONE page: products + label/address + send ──
@@ -1523,6 +1466,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
   const [ch, setCh] = useStatePD(() => (typeof lastIssueChannel === "function" && lastIssueChannel()) || "other");
   const [busy, setBusy] = useStatePD(false);
   const sendingRef = useRefPD(false);   // sync latch: this commit moves stock
+  const [pnOver, setPnOver] = useStatePD(false);   // desktop drag-and-drop highlight
   const inputRef = useRefPD(null);
 
   const lq = q.trim().toLowerCase();
@@ -1717,16 +1661,134 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
       </>
     );
   }
+  // Desktop: two columns (① products · ② shipping), status + actions in the footer.
+  const pieces = cart.reduce((s, x) => s + x.qty, 0);
+  const status = busy ? { tone: "info", title: "กำลังส่ง…", sub: "กำลังตัดสต็อกและสร้างออร์เดอร์" }
+    : cart.length === 0 ? { tone: "muted", title: "ยังไม่ได้เลือกสินค้า", sub: addTo ? "เลือกสินค้าที่จะเพิ่มเข้าออร์เดอร์" : "เลือกสินค้าและเพิ่มข้อมูลจัดส่งเพื่อดำเนินการ" }
+    : short.length ? { tone: "danger", title: "สต็อกไม่พอ", sub: short.join(", ") }
+    : (!addTo && !(file || shipTo)) ? { tone: "warn", title: `เลือกแล้ว ${cart.length} รายการ · ${pieces} ชิ้น`, sub: "แนบใบปะหน้า หรือวางที่อยู่ผู้รับก่อนส่ง" }
+    : { tone: "ok", title: `พร้อมส่ง ${cart.length} รายการ · ${pieces} ชิ้น`, sub: addTo ? "ระบบจะตัดสต็อกเฉพาะรายการที่เพิ่ม" : "กดสร้างรายการแพ็คเพื่อส่งให้คนแพ็ค" };
+  const [over, setOver] = [pnOver, setPnOver];
+  const onDrop = (e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) pick({ target: { files: [f], value: "" } }); };
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 90 }}/>
-      <div className="modal" style={{ zIndex: 91, width: 560, maxHeight: "92vh" }}>
-        <div className="modal-head">
-          <h3>{addTo ? <>เพิ่มรายการ <span className="mono">{addTo.id}</span></> : "สั่งแพ็คใหม่"}</h3>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}><Icons.X size={14}/></button>
+      <div className="modal pn-modal" role="dialog" aria-modal="true" aria-label={addTo ? "เพิ่มรายการ" : "สั่งแพ็คใหม่"} style={{ zIndex: 91 }}>
+        <div className="pn-head">
+          <span className="pn-head-icon"><Icons.Box size={24}/></span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="pn-title">{addTo ? <>เพิ่มรายการ <span className="mono">{addTo.id}</span></> : "สั่งแพ็คใหม่"}</div>
+            <div className="pn-sub">{addTo ? ((addTo.customer ? addTo.customer + " · " : "") + "ระบบจะตัดสต็อกเฉพาะรายการที่เพิ่ม") : "เลือกสินค้าและเพิ่มข้อมูลจัดส่ง"}</div>
+          </div>
+          <button type="button" className="pn-close" onClick={onClose} aria-label="ปิด"><Icons.X size={20}/></button>
         </div>
-        <div className="modal-body">{body}</div>
-        <div className="modal-foot" style={{ display: "block" }}>{sendBtn}</div>
+
+        <div className={"pn-body" + (addTo ? " is-single" : "")}>
+          {/* ① products */}
+          <section className="pn-col">
+            <div className="pn-step"><span className="pn-step-n">1</span>{addTo ? "เลือกสินค้าที่จะเพิ่ม" : "เลือกสินค้าที่ต้องแพ็ค"}</div>
+            <div className="search pn-search">
+              <Icons.Search size={16}/>
+              <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหาชื่อสินค้า หรือ SKU" aria-label="ค้นหาสินค้า" autoFocus/>
+              {q && <Icons.X size={14} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+            </div>
+            <div className="pn-count">
+              {lq ? `พบ ${allHits.length} รายการ` : `สินค้าทั้งหมด ${allHits.length} รายการ`}{allHits.length > hits.length ? ` (แสดง ${hits.length} — พิมพ์เพิ่มเพื่อกรอง)` : ""}
+            </div>
+            <div className="pn-list">
+              {hits.map(h => {
+                const inCart = cart.find(c => c.key === h.key);
+                return (
+                  <div key={h.key} className={"pn-item" + (h.stock <= 0 ? " is-out" : "")}>
+                    {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={44}/> : <span className="pn-thumb">📦</span>}
+                    <span className="pn-item-main">
+                      <span className="pn-item-name">{h.type === "bundle" ? "ชุด: " : ""}{h.name}</span>
+                      <span className="pn-item-sub">{h.sku || "ชุดสินค้า"} · คงเหลือ {h.stock}</span>
+                    </span>
+                    {inCart && <span className="pn-incart tnum">{inCart.qty}</span>}
+                    <button type="button" className="pn-add" disabled={h.stock <= 0} onClick={() => add(h)} aria-label={"เพิ่ม " + h.name}><Icons.Plus size={18}/></button>
+                  </div>
+                );
+              })}
+              {hits.length === 0 && <div className="pn-empty-list">ไม่พบสินค้า</div>}
+            </div>
+            <div className="pn-cart">
+              <div className="pn-cart-head">สินค้าที่เลือก <span className="pn-badge tnum">{cart.length}</span></div>
+              {cart.length === 0 ? (
+                <div className="pn-cart-empty">
+                  <Icons.Cart size={30}/>
+                  <b>ยังไม่ได้เลือกสินค้า</b>
+                  <span>กด + เพื่อเพิ่มสินค้าในรายการ</span>
+                </div>
+              ) : (
+                <div className="pn-cart-list">
+                  {cart.map(x => (
+                    <div key={x.key} className="pn-cart-row">
+                      <span className="pn-cart-name">{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
+                      <button type="button" className="pn-qty" onClick={() => setQty(x.key, x.qty - 1)} aria-label="ลดจำนวน">−</button>
+                      <span className="tnum pn-qty-n">{x.qty}</span>
+                      <button type="button" className="pn-qty" onClick={() => setQty(x.key, x.qty + 1)} aria-label="เพิ่มจำนวน">＋</button>
+                    </div>
+                  ))}
+                  {short.length > 0 && <div style={{ fontSize: 12.5, color: "var(--danger)" }}>สต็อกไม่พอ: {short.join(", ")}</div>}
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* ② shipping */}
+          {!addTo && (
+            <section className="pn-col">
+              <div className="pn-step"><span className="pn-step-n">2</span>ข้อมูลจัดส่ง</div>
+              <div className="pn-hint">แนบใบปะหน้า หรือกรอกที่อยู่ อย่างใดอย่างหนึ่ง</div>
+              <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+              {file ? (
+                <div className="pn-file">
+                  <span className="sd-file-badge" style={file.type === "application/pdf" ? undefined : { background: "var(--info)" }}>{file.type === "application/pdf" ? "PDF" : "IMG"}</span>
+                  <span className="pn-file-name">{file.name}</span>
+                  <button type="button" className="btn btn-sm" onClick={() => inputRef.current && inputRef.current.click()}>เปลี่ยน</button>
+                  <button type="button" className="btn btn-sm btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setFile(null)} aria-label="เอาไฟล์ออก"><Icons.Trash size={14}/></button>
+                </div>
+              ) : (
+                <button type="button" className={"pn-drop" + (over ? " is-over" : "")} onClick={() => inputRef.current && inputRef.current.click()}
+                  onDragOver={e => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)} onDrop={onDrop}>
+                  <Icons.Up size={30}/>
+                  <span className="pn-drop-title">แนบใบปะหน้า</span>
+                  <span className="pn-drop-sub">ถ่ายรูป / รูปภาพ / PDF — ลากมาวางได้</span>
+                  <span className="pn-drop-btn">เลือกไฟล์</span>
+                </button>
+              )}
+              <div className="pn-or"><span>หรือ</span></div>
+              <label className="pn-label" htmlFor="pn-paste">ที่อยู่ผู้รับ</label>
+              <textarea id="pn-paste" className="input pn-textarea" rows={4} value={paste} onChange={e => setPaste(e.target.value)} placeholder="วางชื่อ เบอร์โทร และที่อยู่ผู้รับที่นี่"/>
+              <div className="pn-hint">ระบบจะแยกข้อมูลให้อัตโนมัติ</div>
+              {shipTo && (shipTo.name || shipTo.phone) && (
+                <div className="pn-parsed"><Icons.Check size={14}/> ผู้รับ: <b>{shipTo.name || "—"}</b> {shipTo.phone}</div>
+              )}
+              <div className="pn-label" style={{ marginTop: 6 }}>ช่องทางขาย</div>
+              <div className="pn-chips" role="radiogroup" aria-label="ช่องทางขาย">
+                {(typeof CHANNEL_LIST !== "undefined" ? CHANNEL_LIST : []).map(c => (
+                  <button key={c.id} type="button" role="radio" aria-checked={ch === c.id} className={"pn-chip" + (ch === c.id ? " is-on" : "")} onClick={() => setCh(c.id)}>
+                    {typeof ChannelMark === "function" && <ChannelMark channel={c.id} size={20}/>}
+                    <span>{c.name}</span>
+                    {ch === c.id && <span className="pn-chip-check"><Icons.Check size={11}/></span>}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+
+        <div className="pn-foot">
+          <div className={"pn-status is-" + status.tone}>
+            <span className="pn-status-icon">{status.tone === "ok" ? <Icons.Check size={16}/> : status.tone === "danger" || status.tone === "warn" ? <Icons.Warn size={16}/> : "i"}</span>
+            <span><b>{status.title}</b><span>{status.sub}</span></span>
+          </div>
+          <button type="button" className="btn pn-btn" onClick={onClose}>ยกเลิก</button>
+          <button type="button" className="btn btn-accent pn-btn" disabled={!canSend} onClick={send}>
+            {busy ? "กำลังส่ง…" : addTo ? "เพิ่มเข้าออร์เดอร์" : "สร้างรายการแพ็ค"}
+          </button>
+        </div>
       </div>
     </>
   );
