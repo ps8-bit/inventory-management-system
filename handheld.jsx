@@ -6617,6 +6617,34 @@ function MPackLoc({ parts, loc }) {
   );
 }
 
+/* Reminder note pinned to a shelf — shown at that stop of every walk. Tap to
+   add/edit; saving blank removes it. Re-renders with the parent's pack tick. */
+function MPackLocNote({ loc, user }) {
+  if (!loc || typeof packLocNote !== "function") return null;
+  const note = packLocNote(loc);
+  const edit = async () => {
+    if (typeof askText !== "function") return;
+    const v = await askText("โน้ตประจำช่อง " + loc, note ? note.text : "", {
+      label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", okLabel: "บันทึก"
+    });
+    if (v == null) return;
+    setPackLocNote(loc, v, (user && user.name) || "");
+  };
+  if (!note) {
+    return (
+      <button onClick={edit} style={{ background: "none", border: "none", padding: "0 2px 6px", color: "var(--muted)", fontSize: 11, cursor: "pointer" }}>
+        + เพิ่มโน้ตช่องนี้
+      </button>
+    );
+  }
+  return (
+    <div onClick={edit} role="button" style={{ margin: "0 0 6px", padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 12, cursor: "pointer", lineHeight: 1.5 }}>
+      <b>📌 โน้ต:</b> {note.text}
+      {note.by && <span style={{ fontSize: 10, opacity: 0.75 }}> — {note.by}</span>}
+    </div>
+  );
+}
+
 /* One pick line. `picked` / `short` come from the caller's progress record so the
    same row serves a single order and a wave without owning any state itself. */
 function MPackLine({ line, picked, short, onSet, onShort, sub }) {
@@ -7111,6 +7139,7 @@ function MPackOrder({ ctx }) {
               <MPackLoc parts={g.parts} loc={g.loc}/>
               <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>{g.lines.length} รายการ</span>
             </div>
+            <MPackLocNote loc={g.loc} user={ctx.user}/>
             <div className="m-list">
               {g.lines.map(l => (
                 <MPackLine key={l.key} line={l}
@@ -7347,6 +7376,7 @@ function MPackWave({ ctx }) {
                   <MPackLoc parts={g.parts} loc={g.loc}/>
                   <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>{g.lines.length} รายการ</span>
                 </div>
+                <MPackLocNote loc={g.loc} user={ctx.user}/>
                 <div className="m-list">
                   {g.lines.map(l => (
                     <MPackLine key={l.key} line={l}
