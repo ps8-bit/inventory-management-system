@@ -6969,7 +6969,13 @@ function PackQueue({ pushToast, goTo, user }) {
                                         <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>
                                           {l.parts ? `${l.parts.building}${l.parts.floor ? " · " + l.parts.floor : ""}` : ""}
                                         </div>
-                                        {(() => { const n = (typeof packLocNote === "function") ? packLocNote(l.loc) : null; return n ? <div style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2 }}>📌 {n.text}</div> : null; })()}
+                                        {l.loc && l.loc !== "-" && typeof packLocNote === "function" && (() => {
+                                          const n = packLocNote(l.loc);
+                                          const edit = () => editPackLocNote(l.loc, (user && user.name) || "");
+                                          return n
+                                            ? <div onClick={edit} title="แก้ไข / ลบโน้ตช่องนี้" style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2, cursor: "pointer" }}>📌 {n.text} <Icons.Edit size={10}/></div>
+                                            : <button className="btn btn-ghost btn-sm" onClick={edit} style={{ fontSize: 10.5, padding: "0 4px", height: 20, marginTop: 2, fontFamily: "var(--font-sans, inherit)", fontWeight: 400 }}>+ โน้ตช่องนี้</button>;
+                                        })()}
                                       </td>
                                       <td className="mono" style={{ fontSize: 11.5 }}>{l.sku}</td>
                                       <td style={{ fontSize: 12.5 }}>{l.name}</td>

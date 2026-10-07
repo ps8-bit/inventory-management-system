@@ -6623,17 +6623,7 @@ function MPackLocNote({ loc, user }) {
   // "-" / blank = no shelf; a note there would land on every unshelved item.
   if (!loc || loc === "-" || typeof packLocNote !== "function") return null;
   const note = packLocNote(loc);
-  const edit = async () => {
-    if (typeof askForm !== "function") return;
-    // required:false — askText blocks a blank answer, which is how a note is removed.
-    const r = await askForm({
-      title: "โน้ตประจำช่อง " + loc,
-      fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", required: false }],
-      okLabel: note ? "บันทึก / ลบ" : "บันทึก"
-    });
-    if (!r) return;
-    setPackLocNote(loc, r.v, (user && user.name) || "");
-  };
+  const edit = () => editPackLocNote(loc, (user && user.name) || "");
   if (!note) {
     return (
       <button onClick={edit} style={{ background: "none", border: "none", padding: "0 2px 6px", color: "var(--muted)", fontSize: 11, cursor: "pointer" }}>
