@@ -2029,7 +2029,7 @@ function Outbound({ goTo, pushToast, focus }) {
                 {rows.filter(c => c.units > 0).map(c => (
                   <div key={c.id} style={{ padding: "12px 14px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
                     <div className="row" style={{ gap: 6, marginBottom: 6 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+                      <ChannelMark channel={c.id} size={16}/>
                       <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 500 }}>{c.name}</span>
                     </div>
                     <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }} className="tnum">{c.units} <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 400 }}>ชิ้น</span></div>
@@ -2627,7 +2627,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
             <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
               {CHANNEL_LIST.map(c => (
                 <button key={c.id} className={"btn btn-sm" + (defCh === c.id ? " btn-accent" : "")} onClick={() => setDefCh(c.id)}>
-                  <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/> {c.name}
+                  <ChannelMark channel={c.id} size={16}/> {c.name}
                 </button>
               ))}
             </div>
@@ -2844,7 +2844,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
               <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
                 {chSummary.map(c => (
                   <span key={c.id} className="ch-chip">
-                    <span className="swatch" style={{ background: c.color }}/>{c.name} <strong className="tnum" style={{ marginLeft: 4 }}>{c.qty}</strong>
+                    <ChannelMark channel={c.id} size={16}/>{c.name} <strong className="tnum" style={{ marginLeft: 4 }}>{c.qty}</strong>
                   </span>
                 ))}
               </div>
@@ -4154,7 +4154,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
                           <div key={c.id}>
                             <div className="row" style={{ justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
                               <span className="row" style={{ gap: 6 }}>
-                                <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+                                <ChannelMark channel={c.id} size={16}/>
                                 {c.name}
                               </span>
                               <span className="tnum" style={{ color: "var(--fg-2)" }}>
@@ -5590,7 +5590,7 @@ function QuickSellModal({ onClose, pushToast }) {
           <div className="adj-reasons" style={{ marginBottom: 16 }}>
             {channels.map(c => (
               <button key={c.id} type="button" className={"adj-reason" + (reasonId === c.id ? " on" : "")} onClick={() => setReasonId(c.id)}>
-                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 999, background: c.color, marginRight: 6 }}/>{c.label}
+                <ChannelMark channel={c.ch} size={16}/> {c.label}
               </button>
             ))}
           </div>

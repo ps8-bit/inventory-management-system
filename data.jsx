@@ -972,7 +972,7 @@ function rememberAdjustReason(id) { try { if (/^sale-/.test(id || "")) localStor
 function quickSaleChannels() {
   return ADJUST_REASONS.filter(r => r.channel).map(r => {
     const ch = CHANNEL_LIST.find(c => c.id === r.channel) || {};
-    return { id: r.id, label: r.id === "sale-offline" ? "หน้าร้าน / ออฟไลน์" : (ch.name || r.label), color: ch.color || "var(--muted)" };
+    return { id: r.id, ch: r.channel, label: r.id === "sale-offline" ? "หน้าร้าน / ออฟไลน์" : (ch.name || r.label), color: ch.color || "var(--muted)" };
   });
 }
 function _saleEffQty(sku) {
