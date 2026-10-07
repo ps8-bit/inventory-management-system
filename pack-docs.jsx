@@ -362,6 +362,28 @@ function packRecipientFor(order) {
   };
 }
 
+/* Copy for the emergency hand-written / other-app label. navigator.clipboard is
+   missing or refused on some phones (non-secure context, in-app browsers), so fall
+   back to a hidden textarea + execCommand, and SAY when both fail — the old button
+   swallowed the error and staff thought they had copied. */
+function copyPackText(text, what, pushToast) {
+  const t = String(text || "").trim();
+  if (!t) return;
+  const ok = () => pushToast && pushToast("คัดลอก" + (what || "") + "แล้ว");
+  const legacy = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = t; ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;";
+      document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0, t.length);
+      const done = document.execCommand("copy"); ta.remove();
+      if (done) ok(); else throw new Error("copy");
+    } catch (e) { pushToast && pushToast("คัดลอกไม่ได้ — กดค้างที่ข้อความเพื่อเลือกแล้วคัดลอกเอง"); }
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(t).then(ok, legacy);
+  else legacy();
+}
+
 /* ── printing (same in-page technique as labels.jsx printLabels) ── */
 function _escPD(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -795,7 +817,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
           <strong style={{ fontSize: 13 }}>ที่อยู่ผู้รับ</strong>
           <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
             {canAttach && !edit && <button className={btn} onClick={startEdit}><Icons.Edit size={13}/> {r.addr ? "แก้ไข" : "เพิ่มที่อยู่"}</button>}
-            <button className={btn} disabled={!r.name && !r.addr} onClick={() => { const t = [r.name, r.phone, r.addr].filter(Boolean).join("\n"); if (navigator.clipboard) navigator.clipboard.writeText(t).then(() => pushToast("คัดลอกที่อยู่แล้ว")).catch(() => {}); }}><Icons.Copy size={13}/> คัดลอก</button>
+            <button className={btn} disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}><Icons.Copy size={13}/> คัดลอกทั้งหมด</button>
             <select className="input" value={paper} onChange={e => { setPaper(e.target.value); setPackLabelSize(e.target.value); }}
               title="ขนาดกระดาษใบปะหน้า" style={{ width: "auto", height: 30, padding: "0 6px", fontSize: 12 }}>
               {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
@@ -819,9 +841,21 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
           </div>
         ) : (
           <>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>{r.name || "—"}</div>
-            {r.phone && <div className="mono" style={{ fontSize: 13 }}>{r.phone}</div>}
-            <div style={{ fontSize: 12.5, marginTop: 4, color: r.addr ? "var(--fg)" : "var(--muted)" }}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</div>
+            {/* Each field copies on its own so it can go into a carrier app's separate boxes. */}
+            <div className="row" style={{ gap: 6, alignItems: "flex-start" }}>
+              <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 600, userSelect: "text", WebkitUserSelect: "text" }}>{r.name || "—"}</div>
+              {r.name && <button className="btn btn-sm btn-ghost" title="คัดลอกชื่อ" onClick={() => copyPackText(r.name, "ชื่อ", pushToast)}><Icons.Copy size={12}/> ชื่อ</button>}
+            </div>
+            {r.phone && (
+              <div className="row" style={{ gap: 6, alignItems: "flex-start" }}>
+                <div className="mono" style={{ flex: 1, minWidth: 0, fontSize: 13, userSelect: "text", WebkitUserSelect: "text" }}>{r.phone}</div>
+                <button className="btn btn-sm btn-ghost" title="คัดลอกเบอร์โทร" onClick={() => copyPackText(r.phone, "เบอร์โทร", pushToast)}><Icons.Copy size={12}/> เบอร์</button>
+              </div>
+            )}
+            <div className="row" style={{ gap: 6, alignItems: "flex-start", marginTop: 4 }}>
+              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: r.addr ? "var(--fg)" : "var(--muted)", userSelect: "text", WebkitUserSelect: "text" }}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</div>
+              {r.addr && <button className="btn btn-sm btn-ghost" title="คัดลอกที่อยู่" onClick={() => copyPackText(r.addr, "ที่อยู่", pushToast)}><Icons.Copy size={12}/> ที่อยู่</button>}
+            </div>
           </>
         )}
         {(r.cod > 0 || r.carrier) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}

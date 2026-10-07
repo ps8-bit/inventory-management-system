@@ -2797,6 +2797,24 @@ function clearPackEntry(id) {
 }
 function newPackBatchId() { return "batch:" + Date.now().toString(36).toUpperCase(); }
 
+/* Per-shelf reminder notes ("ช่องนี้ของแตกง่าย", "ดูสีให้ดี") shown at that stop of
+   every pick walk. Stored in the SAME pack_progress blob under a "locnote:<code>"
+   key so packers can write them through the policy they already have, and they
+   ride its realtime subscription. Shape { text, by, at }; clearing tombstones via
+   clearPackEntry like any finished record. Never confused with an order/wave:
+   order ids don't start with "locnote:" and the wave list filters "batch:". */
+function packLocNote(loc) {
+  if (!loc) return null;
+  const e = loadPackProgress()["locnote:" + loc];
+  return e && e.text ? e : null;
+}
+function setPackLocNote(loc, text, by) {
+  if (!loc) return;
+  const t = String(text || "").trim();
+  if (!t) { clearPackEntry("locnote:" + loc); return; }
+  savePackEntry("locnote:" + loc, { text: t.slice(0, 300), by: by || "", at: new Date().toISOString() });
+}
+
 /* Shared progress math so the phone, the wave view and the desktop queue can't
    report different numbers for the same order. A line counts as settled when the
    picked qty covers it OR it has been marked short (a short line is resolved —
@@ -3630,7 +3648,7 @@ Object.assign(window, {
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
-  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLineTotals, repointPackLine,
+  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, setPackLocNote, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,
