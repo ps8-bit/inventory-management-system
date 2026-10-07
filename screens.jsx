@@ -6765,6 +6765,8 @@ function PackQueue({ pushToast, goTo, user }) {
   const [tick, setTick] = useState(0);
   const [open, setOpen] = useState(null);      // expanded order id
   const [sel, setSel] = useState({});
+  const [showPacked, setShowPacked] = useState(false);  // แพ็คเสร็จแล้ว — reopen label tools
+  const [openPacked, setOpenPacked] = useState(null);
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6786,6 +6788,8 @@ function PackQueue({ pushToast, goTo, user }) {
       return { o, lines, totals, shelves: shelves.size, rec, notes };
     });
   }, [tick, progress]);
+
+  const packed = useMemo(() => (typeof packedRecent === "function") ? packedRecent(3) : [], [tick]);
 
   // Waves in flight, so the table's "why is this order half-picked" is explainable.
   const waves = useMemo(() => Object.keys(progress)
@@ -7043,6 +7047,46 @@ function PackQueue({ pushToast, goTo, user }) {
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* Packed in the last 3 days — the packer may have hit พร้อมส่ง before
+          downloading / copying / printing the label. Reopens PackShipDocs only. */}
+      <div>
+        <button className="btn" onClick={() => setShowPacked(v => !v)}>
+          <Icons.Print size={14}/> {showPacked ? "ซ่อนรายการแพ็คเสร็จ" : `แพ็คเสร็จแล้ว — โหลด/พิมพ์ใบปะหน้าอีกครั้ง (${packed.length})`}
+        </button>
+        {showPacked && (
+          <div className="card card-tight" style={{ marginTop: 12 }}>
+            <table className="t">
+              <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th style={{ width: 1 }}/></tr></thead>
+              <tbody>
+                {packed.map(o => {
+                  const isOpen = openPacked === o.id;
+                  return (
+                    <React.Fragment key={o.id}>
+                      <tr style={{ cursor: "pointer" }} onClick={() => setOpenPacked(isOpen ? null : o.id)}>
+                        <td className="mono" style={{ fontSize: 12 }}>{o.id}</td>
+                        <td>{o.customer || "—"}</td>
+                        <td style={{ fontSize: 12, color: "var(--muted)" }}>{o.channel || "—"}</td>
+                        <td style={{ fontSize: 12 }}>{new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
+                        <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{o.packedBy || "—"}</td>
+                        <td><button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button></td>
+                      </tr>
+                      {isOpen && (
+                        <tr><td colSpan="6" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                          {typeof PackShipDocs === "function" && <PackShipDocs order={o}
+                            lines={(typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []}
+                            pushToast={pushToast} onCancelled={() => setOpenPacked(null)}/>}
+                        </td></tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+                {packed.length === 0 && <tr><td colSpan="6" style={{ textAlign: "center", padding: 24, color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
       {newOpen && typeof PackNewOrder === "function" && <PackNewOrder pushToast={pushToast} onClose={() => setNewOpen(false)}/>}
     </div>

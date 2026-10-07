@@ -2739,6 +2739,17 @@ function packQueue(mode) {
   return packSortOrders((list || []).filter(o => o && o.status === "picking"), mode || packSortMode());
 }
 
+/* Orders marked packed in the last `days` days, newest first — so a packer who hit
+   แพ็คเสร็จ before downloading / copying / printing the label can reopen it. Only
+   still-"packed" orders (shipped ones are out of the packer's hands). */
+function packedRecent(days) {
+  const list = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+  const since = Date.now() - (days || 3) * 86400000;
+  return (list || [])
+    .filter(o => o && o.status === "packed" && o.packedAt && Date.parse(o.packedAt) >= since)
+    .sort((a, b) => Date.parse(b.packedAt) - Date.parse(a.packedAt));
+}
+
 /* Queue order — picked by the packer, remembered per device (two packers may
    work the queue differently). Every mode falls back to oldest-first so ties
    never shuffle between renders. */
@@ -3833,7 +3844,7 @@ Object.assign(window, {
   receiveLineShelf, receiveLinesWithoutShelf, buildReceiveReport, lastReceiveLoc, rememberReceiveLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
-  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
+  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packedRecent, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
   loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, loadPackOrderNotes, packOrderNote, setPackOrderNote, editPackOrderNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,

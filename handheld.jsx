@@ -6826,6 +6826,7 @@ function MPack({ ctx }) {
   const [selecting, setSelecting] = useStateM(false);
   const [sel, setSel] = useStateM({});
   const [labelCfg, setLabelCfg] = useStateM(false);   // ⚙ ตั้งค่าใบปะหน้า — shop-wide
+  const [showPacked, setShowPacked] = useStateM(false); // แพ็คเสร็จแล้ว — reopen label/address
 
   useEffectM(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6843,6 +6844,7 @@ function MPack({ ctx }) {
 
   const orders = useMemoM(() => (typeof packQueue === "function") ? packQueue() : [], [tick]);
   const progress = useMemoM(() => (typeof loadPackProgress === "function") ? loadPackProgress() : {}, [tick]);
+  const packed = useMemoM(() => (typeof packedRecent === "function") ? packedRecent(3) : [], [tick]);
 
   // Waves still open, so a picker who backgrounded the app can rejoin one.
   const waves = useMemoM(() => Object.keys(progress)
@@ -6983,6 +6985,29 @@ function MPack({ ctx }) {
           )}
         </div>
 
+        {!selecting && (
+          <button className="btn" style={{ width: "100%", justifyContent: "center", marginTop: 16 }} onClick={() => setShowPacked(v => !v)}>
+            <Icons.Print size={14}/> {showPacked ? "ซ่อนรายการแพ็คเสร็จ" : `แพ็คเสร็จแล้ว — โหลด/พิมพ์ใบปะหน้าอีกครั้ง (${packed.length})`}
+          </button>
+        )}
+        {!selecting && showPacked && (
+          <div className="m-list" style={{ marginTop: 10 }}>
+            {packed.map(o => (
+              <button key={o.id} className="m-row" onClick={() => ctx.push("pack-order", { id: o.id })}>
+                <div className="m-row-thumb" style={{ background: "var(--success-soft)", color: "var(--success)" }}><Icons.Check size={16}/></div>
+                <div className="m-row-main">
+                  <div className="m-row-title mono" style={{ fontSize: 13 }}>{o.id}</div>
+                  <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {o.customer || "—"} · แพ็คเสร็จ {new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}{o.packedBy ? " · " + o.packedBy : ""}
+                  </div>
+                </div>
+                <Icons.Chev size={14} className="m-row-chev"/>
+              </button>
+            ))}
+            {packed.length === 0 && <div style={{ padding: 18, textAlign: "center", color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</div>}
+          </div>
+        )}
+
         {selecting && selIds.length > 0 && (
           <button className="m-btn-big dark" style={{ marginTop: 14 }} onClick={startWave}>
             <Icons.Box size={18}/> เริ่มหยิบรวม {selIds.length} ออร์เดอร์
@@ -7115,6 +7140,9 @@ function MPackOrder({ ctx }) {
     );
   }
 
+  // Already packed (reopened from แพ็คเสร็จแล้ว): read-only — only the label tools matter.
+  const isPacked = order.status !== "picking";
+
   // Group the (already shelf-sorted) lines so one shelf is one stop on the walk.
   const groups = [];
   lines.forEach(l => {
@@ -7128,9 +7156,15 @@ function MPackOrder({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub mono">{order.id}</div>
-        <button className={"m-action" + (camOpen ? " accent" : "")} onClick={() => setCamOpen(v => !v)} title="สแกนเพื่อหยิบ"><Icons.Camera size={15}/></button>
+        {!isPacked && <button className={"m-action" + (camOpen ? " accent" : "")} onClick={() => setCamOpen(v => !v)} title="สแกนเพื่อหยิบ"><Icons.Camera size={15}/></button>}
       </div>
       <div className="m-content">
+        {isPacked && (
+          <div style={{ padding: "10px 12px", borderRadius: 10, background: "var(--success-soft)", color: "var(--success)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.6 }}>
+            <b>แพ็คเสร็จแล้ว</b>{order.packedAt ? " · " + new Date(order.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : ""}{order.packedBy ? " · " + order.packedBy : ""}
+            <div style={{ fontSize: 11.5 }}>เปิดดูเพื่อโหลด / คัดลอก / พิมพ์ใบปะหน้าอีกครั้ง — ด้านล่าง</div>
+          </div>
+        )}
         <div className="m-card" style={{ padding: 14 }}>
           <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
             <div style={{ minWidth: 0 }}>
@@ -7139,11 +7173,11 @@ function MPackOrder({ ctx }) {
                 {order.channel || "—"}{order.date ? " · " + order.date : ""}{order.ts ? " " + order.ts : ""}
               </div>
             </div>
-            <span className="tnum" style={{ fontSize: 20, fontWeight: 700, flexShrink: 0, color: totals.complete ? "var(--success)" : "var(--accent)" }}>
-              {totals.got}/{totals.need}
+            <span className="tnum" style={{ fontSize: 20, fontWeight: 700, flexShrink: 0, color: (isPacked || totals.complete) ? "var(--success)" : "var(--accent)" }}>
+              {isPacked ? totals.need + " ชิ้น" : totals.got + "/" + totals.need}
             </span>
           </div>
-          <div className="prog" style={{ marginTop: 10 }}><span style={{ width: totals.pct + "%" }}/></div>
+          {!isPacked && <div className="prog" style={{ marginTop: 10 }}><span style={{ width: totals.pct + "%" }}/></div>}
           <div className="row" style={{ gap: 10, marginTop: 8, fontSize: 11, color: "var(--muted)" }}>
             <span>{totals.lineDone}/{totals.lineCount} รายการ</span>
             <span>·</span>
@@ -7171,7 +7205,15 @@ function MPackOrder({ ctx }) {
             </div>
             <MPackLocNote loc={g.loc} user={ctx.user}/>
             <div className="m-list">
-              {g.lines.map(l => (
+              {isPacked ? g.lines.map(l => (
+                <div key={l.key} className="m-row">
+                  <div className="m-row-main">
+                    <div className="m-row-title mono" style={{ fontSize: 12.5 }}>{l.sku}</div>
+                    <div className="m-row-sub">{l.name}</div>
+                  </div>
+                  <span className="tnum" style={{ fontWeight: 700, flexShrink: 0 }}>×{l.qty}</span>
+                </div>
+              )) : g.lines.map(l => (
                 <MPackLine key={l.key} line={l}
                   picked={entry.done[l.key] || 0}
                   short={entry.short[l.key] || ""}
@@ -7187,7 +7229,7 @@ function MPackOrder({ ctx }) {
         <div className="m-section-label" style={{ padding: "18px 4px 0" }}>ใบปะหน้าและที่อยู่</div>
         {typeof PackShipDocs === "function" && <PackShipDocs order={order} lines={lines} pushToast={ctx.pushToast} mobile onCancelled={ctx.back}/>}
 
-        {lines.length > 0 && (
+        {lines.length > 0 && !isPacked && (
           <button className={"m-btn-big " + (totals.complete ? "success" : "outline")} style={{ marginTop: 16 }} onClick={finish}>
             <Icons.Check size={18}/> {totals.complete ? "แพ็คเสร็จ — พร้อมส่ง" : `แพ็คเสร็จทั้งที่ยังขาด (${totals.remaining} ชิ้น)`}
           </button>
