@@ -1420,7 +1420,7 @@ function Labels({ pushToast, store }) {
                         />
                         <span className="mono" style={{ fontSize: 12, color: "var(--fg)", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.soId}</span>
                       </div>
-                      <span style={{ fontSize: 11, color: "var(--muted)", flexShrink: 0, marginLeft: 6 }}>{l.carrier.split(" ")[0]}</span>
+                      <span className="row" style={{ gap: 4, fontSize: 11, color: "var(--muted)", flexShrink: 0, marginLeft: 6 }}><CarrierMark carrier={l.carrier} size={15}/>{(l.carrier || "").split(" ")[0]}</span>
                     </div>
                     <div style={{ fontSize: 13, marginTop: 4, paddingRight: 22 }}>{l.recipient.name}</div>
                     <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -1972,7 +1972,7 @@ function BatchView({ labels, selected, setSelected, size, zoom, store, onExportP
               <div className="row no-print" style={{ marginTop: 8, fontSize: 11, color: "var(--muted)", justifyContent: "center", gap: 6 }}>
                 <span className="mono">{l.soId}</span>
                 <span>·</span>
-                <span>{l.carrier.split(" ")[0]}</span>
+                <span className="row" style={{ gap: 4 }}><CarrierMark carrier={l.carrier} size={14}/>{(l.carrier || "").split(" ")[0]}</span>
               </div>
             </div>
           ))}

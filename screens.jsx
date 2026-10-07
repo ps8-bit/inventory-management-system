@@ -2250,14 +2250,14 @@ function Outbound({ goTo, pushToast, focus }) {
                   </td>
                   <td>
                     {chMeta ? (
-                      <span className="ch-chip"><span className="swatch" style={{ background: chMeta.color }}/>{o.channel}</span>
+                      <ChannelMark channel={o.channel} label/>
                     ) : (
                       <span className="badge badge-neutral">{typeof orderChannelLabel === "function" ? orderChannelLabel(o) : o.channel}</span>
                     )}
                   </td>
                   <td style={!o.customer || o.customer === "ไม่ระบุชื่อ" ? { color: "var(--muted)" } : undefined}>{o.customer || "ไม่ระบุชื่อ"}</td>
                   <td className="t-num tnum">{Number(o.items) > 0 ? o.items : "—"}</td>
-                  <td>{o.carrier}</td>
+                  <td>{o.carrier ? <CarrierMark carrier={o.carrier} label/> : <span style={{ color: "var(--faint)" }}>—</span>}</td>
                   <td className="t-mono">{o.tracking}</td>
                   <td><span className={"badge " + stCls}><span className="dot"/>{stLab}</span></td>
                   <td><button className="btn btn-ghost btn-icon" title="สร้างฉลากจัดส่ง" onClick={() => { queueLabelsAndGo(o, goTo); pushToast(`สร้างฉลาก ${o.id}`); }}><Icons.Tag size={14}/></button></td>

@@ -762,10 +762,7 @@ function TrackingPage({ pushToast, store, focus }) {
                   </td>
                   <td onClick={() => setEdit(o)}>
                     {o.carrier ? (
-                      <span className="ch-chip">
-                        <span className="swatch" style={{ background: carrierMeta.color || "var(--muted)" }}/>
-                        {o.carrier}
-                      </span>
+                      <CarrierMark carrier={o.carrier} label/>
                     ) : <span style={{ color: "var(--faint)", fontSize: 12 }}>—</span>}
                   </td>
                   <td onClick={() => setEdit(o)}>

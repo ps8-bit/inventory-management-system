@@ -1080,7 +1080,7 @@ function MOutbound({ ctx }) {
             return (
               <button key={o.id} className={"m-row" + (isSelected ? " selected" : "")} onClick={() => selecting ? toggle(o.id) : openLabel(o)}>
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
-                <div className="m-row-thumb" style={{ background: chMeta?.color || "var(--surface-2)", color: chMeta?.color ? "white" : "var(--fg-2)", fontSize: 11, fontWeight: 600 }}>{chMeta?.short || (o.channel || "?").slice(0,2)}</div>
+                {chMeta ? <MarkTile m={channelMark(o.channel)} size={36} title={o.channel}/> : <div className="m-row-thumb" style={{ background: "var(--surface-2)", color: "var(--fg-2)", fontSize: 11, fontWeight: 600 }}>{(o.channel || "?").slice(0,2)}</div>}
                 <div className="m-row-main">
                   {/* Customer first — a person reads "who", not "LBL-NEW-1781451656731-762". */}
                   <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
@@ -1089,7 +1089,7 @@ function MOutbound({ ctx }) {
                   </div>
                   <div className="m-row-sub">
                     <span className="mono">{typeof orderShortId === "function" ? orderShortId(o) : o.id}</span>
-                    {Number(o.items) > 0 ? ` · ${o.items} ชิ้น` : ""}{o.carrier ? " · " + o.carrier : ""}{o.tracking ? " · " + o.tracking : ""}
+                    {Number(o.items) > 0 ? ` · ${o.items} ชิ้น` : ""}{o.carrier && <> · <CarrierMark carrier={o.carrier} size={13}/> {o.carrier}</>}{o.tracking ? " · " + o.tracking : ""}
                   </div>
                   {when && <div className="m-row-sub" style={{ fontSize: 11, color: "var(--faint)", marginTop: 1 }}>{when}</div>}
                 </div>
@@ -4832,7 +4832,7 @@ function MLabels({ ctx }) {
                 <div className="m-row-main">
                   <div className="row" style={{ justifyContent: "space-between" }}>
                     <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{l.soId || "ฉลากใหม่"}</span>
-                    <span style={{ fontSize: 10, color: "var(--muted)" }}>{(l.carrier || "").split(" ")[0]}</span>
+                    <span className="row" style={{ gap: 4, fontSize: 10, color: "var(--muted)" }}><CarrierMark carrier={l.carrier} size={14}/>{(l.carrier || "").split(" ")[0]}</span>
                   </div>
                   {/* Guarded: one partial label row (no recipient / no items) used to
                       throw here and white-screen the whole ฉลาก list. */}
@@ -5365,7 +5365,7 @@ function MLabelEdit({ ctx }) {
         <div className="m-list" style={{ marginBottom: 12 }}>
           {CARRIERS.map(c => (
             <button key={c.id} className={"m-row" + (label.carrier === c.name ? " selected" : "")} onClick={() => setField("carrier", c.name)}>
-              <span style={{ width: 10, height: 10, borderRadius: 999, background: c.color, flexShrink: 0 }}/>
+              <CarrierMark carrier={c.name} size={22}/>
               <span style={{ flex: 1, fontSize: 13 }}>{c.name}</span>
               {label.carrier === c.name && <Icons.Check size={14} style={{ color: "var(--accent)" }}/>}
             </button>
@@ -8378,9 +8378,9 @@ function MTracking({ ctx }) {
             return (
               <button key={o.id} className={"m-row" + (isSelected ? " selected" : "")} onClick={() => selecting ? toggle(o.id) : ctx.push("track-edit", o)}>
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
-                <div className="m-row-thumb" style={{ background: carrierMeta.color || "var(--surface-2)", color: carrierMeta.color ? "white" : "var(--fg-2)" }}>
-                  <Icons.Truck size={16}/>
-                </div>
+                {o.carrier ? <MarkTile m={carrierMark(o.carrier)} size={36} title={o.carrier}/> : (
+                  <div className="m-row-thumb" style={{ background: "var(--surface-2)", color: "var(--fg-2)" }}><Icons.Truck size={16}/></div>
+                )}
                 <div className="m-row-main">
                   <div className="row" style={{ justifyContent: "space-between" }}>
                     <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{o.id}</span>
