@@ -327,6 +327,15 @@ function phoneNSN(s) {
   return d.replace(/^0+/, "");
 }
 
+// Orders made from an attached label have no real name ("ดูใบปะหน้า"); once the
+// marketplace number has been read off that label, show it instead.
+const LABEL_PLACEHOLDER_NAMES = ["ดูใบปะหน้า", "ลูกค้า", ""];
+function orderCustomerText(o) {
+  const name = String((o && o.customer) || "").trim();
+  if (o && o.platformOrderNo && LABEL_PLACEHOLDER_NAMES.includes(name)) return (o.platform ? o.platform + " " : "") + o.platformOrderNo;
+  return name;
+}
+
 // Does an order match a customer's free-text query (phone / name / tracking / id)?
 // Phone is matched format-agnostically; name matches as a full substring OR when
 // every typed word appears in the stored name (handles reversed order, titles,
@@ -504,11 +513,21 @@ function TrackingPage({ pushToast, store, focus }) {
     setQ(focus.orderId);
   }, [focus && focus.n, orders]);
 
+  // Read order no. + tracking off attached labels that haven't been read yet.
+  useEffectTrk(() => {
+    if (typeof backfillLabelCodes !== "function") return;
+    backfillLabelCodes(orders).then(n => { if (n) pushToast(`อ่านเลขคำสั่งซื้อจากใบปะหน้าแล้ว ${n} ออร์เดอร์`); }).catch(() => {});
+  }, [orders.length]);
+  const shipOne = (o) => {
+    setOrderField(o.id, { status: "shipped", shippedAt: new Date().toISOString() });
+    pushToast(`${o.platformOrderNo || o.id} — ส่งให้ขนส่งแล้ว`);
+  };
+
   const filtered = orders.filter(o => {
     if (statusFilter !== "all" && o.status !== statusFilter) return false;
     if (q) {
       const ql = q.toLowerCase();
-      const match = (o.id + " " + o.customer + " " + o.phone + " " + o.tracking + " " + o.carrier).toLowerCase().includes(ql);
+      const match = (o.id + " " + o.customer + " " + o.phone + " " + o.tracking + " " + o.carrier + " " + (o.platformOrderNo || "")).toLowerCase().includes(ql);
       if (!match) return false;
     }
     return true;
@@ -755,9 +774,12 @@ function TrackingPage({ pushToast, store, focus }) {
                   <td onClick={(e) => { e.stopPropagation(); toggleOne(o.id); }}>
                     <span className={"check" + (isSelected ? " on" : "")}/>
                   </td>
-                  <td className="t-mono" style={{ color: "var(--fg)", fontWeight: 500 }} onClick={() => setEdit(o)}>{o.id}</td>
+                  <td className="t-mono" style={{ color: "var(--fg)", fontWeight: 500 }} onClick={() => setEdit(o)}>
+                    {o.id}
+                    {o.platformOrderNo && orderCustomerText(o) === o.customer && <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400, marginTop: 2 }}>{o.platform || "คำสั่งซื้อ"} {o.platformOrderNo}</div>}
+                  </td>
                   <td onClick={() => setEdit(o)}>
-                    <div style={{ fontSize: 13 }}>{o.customer}</div>
+                    <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>{o.platform && <ChannelMark channel={o.platform} size={18}/>}<span>{orderCustomerText(o)}</span></div>
                     <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{o.phone}</div>
                   </td>
                   <td onClick={() => setEdit(o)}>
@@ -778,7 +800,14 @@ function TrackingPage({ pushToast, store, focus }) {
                     </span>
                   </td>
                   <td style={{ fontSize: 12, color: "var(--muted)" }} onClick={() => setEdit(o)}>{o.date} {o.ts}</td>
-                  <td onClick={() => setEdit(o)}><Icons.Edit size={14} style={{ color: "var(--muted)" }}/></td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {(o.status === "picking" || o.status === "packed") && canDo("sell") && (
+                      <button className="btn btn-sm" title="ส่งให้ขนส่งแล้ว" onClick={(e) => { e.stopPropagation(); shipOne(o); }} style={{ marginRight: 6 }}>
+                        <Icons.Truck size={13}/> ส่งแล้ว
+                      </button>
+                    )}
+                    <Icons.Edit size={14} style={{ color: "var(--muted)", cursor: "pointer", verticalAlign: "middle" }} onClick={() => setEdit(o)}/>
+                  </td>
                 </tr>
               );
             })}
@@ -1075,21 +1104,121 @@ function slipMatchCarrier(courier) {
   return courier.trim();
 }
 
+/* ── Slip ↔ customer matching ──
+   The scanner used to accept a match only when the AI echoed a pending label's
+   name byte-for-byte, or the slip phone was a raw substring of it, and it only
+   looked at the label queue. So a ตัดสต็อก order (no label), a "คุณ"/extra-space
+   name, a +66 or masked phone, or a slip whose tracking was already saved (LINE
+   bot / a second scan) all fell through to "สร้างลูกค้าใหม่" — a duplicate.
+   Matching is now done locally on normalised keys, against labels AND orders. */
+const SLIP_TITLE_RE = /^(?:คุณ|นางสาว|นาง|นาย|น\.ส\.?|ด\.ช\.?|ด\.ญ\.?|mrs?\.?|ms\.?|miss)\s*/i;
+const SLIP_PLACEHOLDER_NAMES = ["ลูกค้าใหม่", "(ลูกค้าใหม่)", "ไม่ระบุชื่อ"];
+
+// "คุณ สมชาย  ใจดี" and "สมชาย ใจดี" → the same key (titles, spaces, dots dropped).
+function slipNameKey(s) {
+  let t = String(s || "").toLowerCase().replace(/[\s​]+/g, " ").trim();
+  if (SLIP_PLACEHOLDER_NAMES.includes(t)) return "";
+  for (let i = 0; i < 3; i++) {
+    const n = t.replace(SLIP_TITLE_RE, "").trim();
+    if (n === t) break;
+    t = n;
+  }
+  return t.replace(/[\s.]+/g, "");
+}
+
+// 3 = same name, 2 = one name contains the other (first name only, nickname
+// added), 0 = different. Containment alone is never enough to match.
+function slipNameScore(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 3;
+  const s = a.length <= b.length ? a : b, l = s === a ? b : a;
+  return s.length >= 3 && l.includes(s) ? 2 : 0;
+}
+
+// 3 = same number in any format (+66 / dashes / leading 0), 1 = a masked slip
+// number ("08x-xxx-5678") whose visible tail matches, 0 = no evidence.
+function slipPhoneScore(slipPhone, candPhone) {
+  const a = phoneNSN(slipPhone), b = phoneNSN(candPhone);
+  if (a.length >= 8 && b.length >= 8) return a === b ? 3 : 0;
+  // Tail from the raw digits — phoneNSN would eat a masked "…0000" tail.
+  const ra = String(slipPhone || "").replace(/\D/g, ""), rb = String(candPhone || "").replace(/\D/g, "");
+  if (ra.length >= 4 && rb.length >= 9 && rb.endsWith(ra.slice(-4))) return 1;
+  return 0;
+}
+
+// Best unused candidate for one parcel, or null. Accepted at score ≥ 3: same
+// name, same phone, or name-contains + masked-phone tail.
+function slipPickCandidate(p, cands, used) {
+  const keys = [slipNameKey(p.extracted_name_from_slip), slipNameKey(p.matched_customer_name)].filter(Boolean);
+  let best = null;
+  for (const c of cands) {
+    if (used.has(c.key)) continue;
+    const ck = slipNameKey(c.name);
+    const ns = keys.reduce((m, k) => Math.max(m, slipNameScore(k, ck)), 0);
+    const ps = slipPhoneScore(p.customer_phone, c.phone);
+    const score = ns + ps;
+    if (score >= 3 && (!best || score > best.score)) best = { c, score, ns, ps };
+  }
+  return best;
+}
+
+function slipMatchReason(m) {
+  const n = m.ns === 3 ? "ชื่อตรง" : m.ns === 2 ? "ชื่อใกล้เคียง" : "";
+  const p = m.ps === 3 ? "เบอร์ตรง" : m.ps === 1 ? "เบอร์ 4 ตัวท้ายตรง" : "";
+  return [n, p].filter(Boolean).join(" + ");
+}
+
+const slipTrackKey = (s) => String(s || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+
 function SlipScanModal({ onClose, pushToast }) {
-  // Match target = the label queue (คิวฉลาก). Each label awaiting a tracking
-  // number is a pending shipment with a recipient name/phone + a linked order (soId).
-  const pendingLabels = useMemoTrk(() => {
-    const all = (typeof loadLabels === "function" ? loadLabels() : []);
-    return all
-      .filter(l => !l.tracking || l.tracking === "")
-      .map(l => ({
-        id: l.id,
-        soId: l.soId || "",
-        name: ((l.recipient && l.recipient.name) || "").trim(),
-        phone: ((l.recipient && l.recipient.phone) || "").replace(/\D/g, ""),
-      }))
-      .filter(l => l.name);
+  // Match targets = every known shipment with a recipient: labels (คิวฉลาก) AND
+  // orders that never got a label (desktop ตัดสต็อก writes only an order).
+  // `tracking` is the effective one (label, else the order's override).
+  const candidates = useMemoTrk(() => {
+    const labels = (typeof loadLabels === "function" ? loadLabels() : []) || [];
+    const orders = (typeof buildOrders === "function" ? buildOrders() : []) || [];
+    const byId = new Map(orders.map(o => [o.id, o]));
+    const overrides = (typeof loadOrderOverrides === "function" ? loadOrderOverrides() : {}) || {};
+    const digits = (s) => String(s || "").replace(/\D/g, "");
+    const usable = (name, phone) => !!(slipNameKey(name) || digits(phone).length >= 9);
+    const out = [];
+    const seen = new Set();
+    for (const l of labels) {
+      const rcp = l.recipient || {};
+      const oid = orderIdForLabel(l);
+      seen.add(oid);
+      if (overrides[oid] && overrides[oid].deleted) continue;
+      const o = byId.get(oid);
+      const name = String(rcp.name || "").trim();
+      const phone = digits(rcp.phone || (o && o.phone));
+      if (!usable(name, phone)) continue;
+      out.push({
+        key: "L:" + l.id, kind: "label", id: l.id, orderId: oid, soId: l.soId || "",
+        name: name || "ไม่ระบุชื่อ", phone, recipient: rcp,
+        tracking: String(l.tracking || (o && o.tracking) || "").trim(),
+      });
+    }
+    for (const o of orders) {
+      if (o.__fromLabel || seen.has(o.id)) continue;
+      const name = String(o.customer || "").trim();
+      const phone = digits(o.phone);
+      if (!usable(name, phone)) continue;
+      out.push({
+        key: "O:" + o.id, kind: "order", id: o.id, orderId: o.id, soId: o.id,
+        name: name || "ไม่ระบุชื่อ", phone, recipient: null,
+        tracking: String(o.tracking || "").trim(),
+      });
+    }
+    return out;
   }, []);
+  // Shipments still waiting for a tracking number — what a parcel should land on.
+  const pendingLabels = useMemoTrk(() => candidates.filter(c => !c.tracking), [candidates]);
+  const shippedCands = useMemoTrk(() => candidates.filter(c => c.tracking), [candidates]);
+  const trackIndex = useMemoTrk(() => {
+    const m = new Map();
+    for (const c of shippedCands) m.set(slipTrackKey(c.tracking), c);
+    return m;
+  }, [shippedCands]);
 
   const [step, setStep] = useStateTrk("capture"); // capture | loading | result | error | done
   const [preview, setPreview] = useStateTrk("");
@@ -1099,19 +1228,6 @@ function SlipScanModal({ onClose, pushToast }) {
   const [saved, setSaved] = useStateTrk([]); // summary shown on the success screen
   const fileRef = useRefTrk(null);        // camera (capture)
   const galleryRef = useRefTrk(null);     // import from photo library / files
-
-  // Resolve which pending label a parcel belongs to (matched name → exact, then phone).
-  const resolveLabel = (p) => {
-    if (p.matched_customer_name) {
-      const byName = pendingLabels.find(l => l.name === p.matched_customer_name.trim());
-      if (byName) return byName;
-    }
-    if (p.customer_phone && p.customer_phone.length >= 9) {
-      const byPhone = pendingLabels.find(l => l.phone && l.phone.includes(p.customer_phone));
-      if (byPhone) return byPhone;
-    }
-    return null;
-  };
 
   const runScan = async (file) => {
     setStep("loading");
@@ -1131,7 +1247,7 @@ function SlipScanModal({ onClose, pushToast }) {
         body: JSON.stringify({
           image_base64: base64,
           mime_type: "image/jpeg",
-          pending_customers: pendingLabels.map(l => ({ name: l.name, phone: l.phone })),
+          pending_customers: pendingLabels.filter(l => slipNameKey(l.name)).map(l => ({ name: l.name, phone: l.phone })),
         }),
       });
       const json = await res.json();
@@ -1141,23 +1257,40 @@ function SlipScanModal({ onClose, pushToast }) {
         return;
       }
       const parcels = Array.isArray(json.parcels) ? json.parcels : [];
+      const used = new Set(); // two parcels on one slip never land on the same shipment
+      // A masked slip number ("08x-xxx-5678") must never replace a known full one.
+      const bestPhone = (slip, known) => String(slip || "").replace(/\D/g, "").length >= 9 ? slip : (known || slip || "");
       setRows(parcels.map(p => {
-        const match = resolveLabel(p);
-        // Best-known phone: from the slip, else from the matched label.
-        const phone = p.customer_phone || (match ? match.phone : "") || "";
-        return {
+        const base = {
           extractedName: p.extracted_name_from_slip || "",
-          matchedName: p.matched_customer_name || null,
           confidence: p.confidence_score || 0,
-          phone,                       // editable; flagged when empty
           courierRaw: p.courier || "",
-          // No match in the คิวฉลาก → default to creating a new customer from the slip.
-          labelId: match ? match.id : "__new__",
-          newName: p.extracted_name_from_slip || "",
           carrier: slipMatchCarrier(p.courier),
           tracking: p.tracking_number || "",
           include: true,
+          matchReason: "", known: null, already: null,
         };
+        // 1. This tracking number is already saved (LINE bot, an earlier scan) —
+        //    recognise it instead of creating a second customer for it.
+        const dup = trackIndex.get(slipTrackKey(p.tracking_number));
+        if (dup && slipTrackKey(p.tracking_number)) {
+          return { ...base, already: dup, labelId: "", newName: "", phone: bestPhone(p.customer_phone, dup.phone), include: false };
+        }
+        // 2. A shipment still waiting for its tracking number.
+        const m = slipPickCandidate(p, pendingLabels, used);
+        if (m) {
+          used.add(m.c.key);
+          return { ...base, labelId: m.c.key, matchReason: slipMatchReason(m), newName: "", phone: bestPhone(p.customer_phone, m.c.phone) };
+        }
+        // 3. Nothing pending, but a past customer matches — a new shipment for
+        //    that SAME customer: their system name/phone/address, not the OCR guess.
+        const k = slipPickCandidate(p, shippedCands, new Set());
+        if (k) {
+          return { ...base, labelId: "__new__", known: k.c, matchReason: slipMatchReason(k),
+                   newName: k.c.name, phone: bestPhone(p.customer_phone, k.c.phone) };
+        }
+        // 4. Genuinely new.
+        return { ...base, labelId: "__new__", newName: p.extracted_name_from_slip || "", phone: p.customer_phone || "" };
       }));
       setStep("result");
     } catch (e) {
@@ -1175,7 +1308,7 @@ function SlipScanModal({ onClose, pushToast }) {
 
   // A row applies if it has a tracking number and either matches an existing
   // label or is set to create a new customer (with a name).
-  const rowReady = (r) => r.include && r.tracking.trim() && (
+  const rowReady = (r) => r.include && !r.already && r.tracking.trim() && (
     (r.labelId && r.labelId !== "__new__") ||
     (r.labelId === "__new__" && (r.newName || "").trim())
   );
@@ -1193,13 +1326,16 @@ function SlipScanModal({ onClose, pushToast }) {
         const tracking = r.tracking.trim();
         const phone = (r.phone || "").replace(/\D/g, "");
         if (r.labelId === "__new__") {
-          // Create a brand-new label + order from the slip data.
+          // Create a brand-new label + order from the slip data. A recognised past
+          // customer keeps their address from the earlier label.
           const id = "LBL-SCAN-" + Date.now() + "-" + i;
           const soId = "SO-" + Math.random().toString(36).slice(2, 8).toUpperCase();
+          const name = (r.newName || "").trim();
+          const prev = (r.known && r.known.recipient) || {};
           newLabels.push({
             id, soId,
             sender: senderTemplate,
-            recipient: { name: (r.newName || "").trim(), addr1: "", addr2: "", phone },
+            recipient: { ...prev, name, addr1: prev.addr1 || "", addr2: prev.addr2 || "", phone: phone || String(prev.phone || "") },
             carrier: r.carrier || "Flash Express",
             tracking,
             cod: 0, weight: "0.5 kg", items: [],
@@ -1207,24 +1343,26 @@ function SlipScanModal({ onClose, pushToast }) {
           setOrderField(soId, { carrier: r.carrier, tracking, status: "shipped", phone });
           recordChange({
             entity: "order", entityId: soId, action: "create",
-            summary: `สแกนสลิป — สร้างลูกค้าใหม่ ${(r.newName || "").trim()}`.trim(),
+            summary: (r.known ? `สแกนสลิป — ออร์เดอร์ใหม่ของลูกค้าเดิม ${name}` : `สแกนสลิป — สร้างลูกค้าใหม่ ${name}`).trim(),
             changes: [{ label: "เลขพัสดุ", to: tracking }, { label: "ขนส่ง", to: r.carrier || "—" }],
           });
-          return { name: (r.newName || "").trim() || "(ลูกค้าใหม่)", tracking, carrier: r.carrier, phone, isNew: true };
+          return { name: name || "(ลูกค้าใหม่)", tracking, carrier: r.carrier, phone, isNew: !r.known };
         }
-        // Existing label → update its tracking + carrier (+ phone if added) and mirror onto the order.
-        const lbl = pendingLabels.find(l => l.id === r.labelId);
-        const soId = lbl ? lbl.soId : "";
-        const name = (lbl && lbl.name) || r.matchedName || r.extractedName || "";
-        existingUpdates[r.labelId] = { tracking, carrier: r.carrier, phone };
-        if (soId) setOrderField(soId, { carrier: r.carrier, tracking, status: "shipped", phone });
+        // Existing shipment → update its tracking + carrier (+ phone if added) and
+        // mirror onto the order. An order with no label is updated through its override.
+        const c = pendingLabels.find(l => l.key === r.labelId);
+        if (!c) return null;
+        const soId = c.orderId;
+        const name = c.name || r.extractedName || "";
+        if (c.kind === "label") existingUpdates[c.id] = { tracking, carrier: r.carrier, phone };
+        if (soId) setOrderField(soId, { carrier: r.carrier, tracking, status: "shipped", ...(phone ? { phone } : {}) });
         recordChange({
           entity: "order", entityId: soId || r.labelId, action: "update",
           summary: `สแกนสลิป — ใส่เลขพัสดุ ${name}`.trim(),
           changes: [{ label: "เลขพัสดุ", to: tracking }, { label: "ขนส่ง", to: r.carrier || "—" }],
         });
         return { name, tracking, carrier: r.carrier, phone, isNew: false };
-      });
+      }).filter(Boolean);
 
       const updated = all.map(l => existingUpdates[l.id]
         ? {
@@ -1254,7 +1392,7 @@ function SlipScanModal({ onClose, pushToast }) {
         <div className="modal-head">
           <div>
             <h3>สแกนสลิปขนส่ง</h3>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>ถ่ายรูปสลิป/ใบเสร็จ — AI อ่านได้ทุกพัสดุในใบเดียว แล้วจับคู่ลูกค้าจากคิวฉลากให้อัตโนมัติ</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>ถ่ายรูปสลิป/ใบเสร็จ — AI อ่านได้ทุกพัสดุในใบเดียว แล้วจับคู่ลูกค้าจากชื่อ/เบอร์ในระบบให้อัตโนมัติ</div>
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
@@ -1269,7 +1407,7 @@ function SlipScanModal({ onClose, pushToast }) {
               </div>
               <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>สแกนสลิปขนส่ง</div>
               <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 18, lineHeight: 1.5 }}>
-                จับคู่กับ <strong style={{ color: "var(--fg)" }}>{pendingLabels.length}</strong> ฉลากที่รอใส่เลขพัสดุ<br/>
+                จับคู่กับ <strong style={{ color: "var(--fg)" }}>{pendingLabels.length}</strong> ออร์เดอร์/ฉลากที่รอใส่เลขพัสดุ<br/>
                 ถ่ายรูปหรือเลือกรูปสลิปจากเครื่อง — ให้เห็นชื่อผู้รับ เบอร์โทร และเลขพัสดุชัดเจน
               </div>
               <div className="row" style={{ gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
@@ -1371,24 +1509,34 @@ function SlipScanModal({ onClose, pushToast }) {
                       </label>
                     </div>
 
-                    <div className="row" style={{ justifyContent: "space-between", marginBottom: 4 }}>
-                      <span className="eyebrow">จับคู่ลูกค้า (คิวฉลาก)</span>
+                    {r.already ? (
+                      <div style={{ fontSize: 12, padding: "8px 10px", marginBottom: 8, borderRadius: 8, background: "var(--success-soft)", color: "var(--fg)", lineHeight: 1.5 }}>
+                        <strong>บันทึกเลขพัสดุนี้แล้ว</strong> — {r.already.name}{r.already.phone ? " · " + r.already.phone : ""}
+                        {r.already.orderId ? " · " + (typeof orderShortId === "function" ? orderShortId({ id: r.already.orderId }) : r.already.orderId) : ""}
+                        <div style={{ color: "var(--muted)" }}>ไม่ต้องบันทึกซ้ำ</div>
+                      </div>
+                    ) : (<>
+                    <div className="row" style={{ justifyContent: "space-between", marginBottom: 4, gap: 6 }}>
+                      <span className="eyebrow">จับคู่ลูกค้า</span>
                       {r.labelId === "__new__"
-                        ? <span className="badge badge-info" style={{ fontSize: 11 }}><span className="dot"/>สร้างลูกค้าใหม่</span>
+                        ? (r.known
+                            ? <span className="badge badge-success" style={{ fontSize: 11 }}><span className="dot"/>ลูกค้าเดิม · {r.matchReason}</span>
+                            : <span className="badge badge-info" style={{ fontSize: 11 }}><span className="dot"/>สร้างลูกค้าใหม่</span>)
                         : r.labelId
-                          ? <span className={"badge badge-" + (r.matchedName ? tone : "success")} style={{ fontSize: 11 }}><span className="dot"/>{r.matchedName ? "มั่นใจ " + Math.round(conf * 100) + "%" : "เลือกแล้ว"}</span>
+                          ? <span className={"badge badge-" + (r.matchReason ? "success" : tone)} style={{ fontSize: 11 }}><span className="dot"/>{r.matchReason || "เลือกแล้ว"}</span>
                           : <span className="badge badge-danger" style={{ fontSize: 11 }}><span className="dot"/>ยังไม่เลือก</span>}
                     </div>
                     <select className="input" value={r.labelId} onChange={e => setRow(i, { labelId: e.target.value })} style={{ width: "100%", marginBottom: 8 }}>
                       <option value="">— ข้าม (ไม่บันทึก) —</option>
-                      <option value="__new__">➕ สร้างลูกค้าใหม่จากสลิป</option>
-                      {pendingLabels.length > 0 && <option disabled>──── ลูกค้าในคิวฉลาก ────</option>}
+                      <option value="__new__">{r.known ? "➕ ออร์เดอร์ใหม่ของ " + r.known.name : "➕ สร้างลูกค้าใหม่จากสลิป"}</option>
+                      {pendingLabels.length > 0 && <option disabled>──── รอใส่เลขพัสดุ ────</option>}
                       {pendingLabels.map(l => (
-                        <option key={l.id} value={l.id}>{l.name}{l.phone ? " · " + l.phone : ""}{l.soId ? " · " + l.soId : ""}</option>
+                        <option key={l.key} value={l.key}>{l.name}{l.phone ? " · " + l.phone : ""}{l.orderId ? " · " + (typeof orderShortId === "function" ? orderShortId({ id: l.orderId }) : l.orderId) : ""}</option>
                       ))}
                     </select>
+                    </>)}
 
-                    {r.labelId === "__new__" && (
+                    {!r.already && r.labelId === "__new__" && (
                       <input className="input" value={r.newName} onChange={e => setRow(i, { newName: e.target.value })}
                         placeholder="ชื่อลูกค้าใหม่" style={{ width: "100%", marginBottom: 8, fontSize: 13 }}/>
                     )}
@@ -2130,4 +2278,4 @@ function CustomerOrderDetail({ order, store, onBack }) {
   );
 }
 
-Object.assign(window, { TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });
+Object.assign(window, { orderCustomerText, TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });

@@ -138,6 +138,337 @@ async function downloadOrderFile(file, fallbackName) {
   window.dispatchEvent(new CustomEvent("ims-toast", { detail: "ดาวน์โหลด " + name + " แล้ว" }));
 }
 
+/* ── codes on the attached label ── order number + tracking, read from the file
+   itself so the order can be found by the marketplace number and marked shipped.
+   A marketplace PDF (Shopee "Order No. 261006VVEJ5G05", tracking TH…) carries a
+   real text layer, so it is read as TEXT — exact, no OCR. A photo falls back to
+   decoding its barcodes / QR (the same codes, printed). pdf.js is loaded lazily,
+   only when a PDF label is opened; both scripts as plain <script> tags so pdf.js
+   runs its "fake worker" on the main thread (CSP only allows blob:/self workers). */
+const PDFJS_BASE = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+let _pdfjsP = null;
+function _loadPdfJs() {
+  if (window.pdfjsLib && window.pdfjsWorker) return Promise.resolve(window.pdfjsLib);
+  if (_pdfjsP) return _pdfjsP;
+  const add = (src) => new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src; s.crossOrigin = "anonymous";
+    s.onload = res; s.onerror = () => rej(new Error("โหลดตัวอ่าน PDF ไม่ได้"));
+    document.head.appendChild(s);
+  });
+  _pdfjsP = add(PDFJS_BASE + "pdf.min.js")
+    .then(() => add(PDFJS_BASE + "pdf.worker.min.js"))
+    .then(() => window.pdfjsLib)
+    .catch(e => { _pdfjsP = null; throw e; });
+  return _pdfjsP;
+}
+async function _pdfText(dataUrl) {
+  const lib = await _loadPdfJs();
+  lib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + "pdf.worker.min.js";
+  const bin = atob(dataUrl.split(",")[1] || "");
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  const doc = await lib.getDocument({ data: arr, isEvalSupported: false }).promise;
+  let out = "";
+  for (let n = 1; n <= Math.min(doc.numPages, 2); n++) {
+    // Rebuild lines from positions: Thai comes back glyph-by-glyph, so items on
+    // one baseline are glued, with a space only where there is a visible gap.
+    const tc = await (await doc.getPage(n)).getTextContent();
+    let lastY = null, lastEnd = null;
+    for (const it of tc.items) {
+      if (!it.str || !it.str.trim()) continue;   // pdf.js adds its own zero-width " " items
+      // A lone Thai vowel/tone mark has no width — glue it, keep the base glyph's end.
+      if (lastY !== null && /^[ัิ-ฺ็-๎-]+$/.test(it.str)) { out += it.str; continue; }
+      const x = it.transform[4], y = it.transform[5], size = Math.abs(it.transform[3]) || 8;
+      if (lastY === null || Math.abs(y - lastY) > size * 0.5) out += (lastY === null ? "" : "\n");
+      else if (x - lastEnd > size * 0.25) out += " ";
+      out += it.str;
+      lastY = y; lastEnd = x + (it.width || 0);
+    }
+    out += "\n";
+  }
+  doc.destroy();
+  return out;
+}
+async function _imageCodes(dataUrl) {
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = dataUrl; });
+  if ("BarcodeDetector" in window) {
+    try { return (await new BarcodeDetector().detect(img)).map(b => b.rawValue); } catch (e) {}
+  }
+  if (window.ZXing && window.ZXing.MultiFormatReader) {
+    // ZXing decodes one code per pass: decode, blank that code's area, repeat.
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+    const reader = new ZXing.MultiFormatReader();
+    const hints = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
+    const found = [];
+    for (let k = 0; k < 4; k++) {
+      try {
+        const src = new ZXing.HTMLCanvasElementLuminanceSource(c);
+        const r = reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(src)), hints);
+        found.push(r.getText());
+        const pts = r.getResultPoints().map(p => [p.getX(), p.getY()]);
+        const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+        g.fillStyle = "#fff";
+        g.fillRect(Math.min(...xs) - 40, Math.min(...ys) - 40, Math.max(...xs) - Math.min(...xs) + 80, Math.max(...ys) - Math.min(...ys) + 80);
+      } catch (e) { break; }
+    }
+    return found;
+  }
+  return [];
+}
+const LABEL_TRACK_RE = /\b(TH[0-9A-Z]{10,16}|SPX[0-9A-Z]{8,}|[A-Z]{2}\d{9}TH|JNT[0-9A-Z]{8,}|LEX[0-9A-Z]{8,}|KER[0-9A-Z]{8,}|\d{12,15})\b/;
+const SHOPEE_ORDER_RE = /\b(\d{6}[0-9A-Z]{8})\b/;
+/* Mac-made PDFs store Thai tone marks as private-use glyphs (U+F70A…) — map them
+   back so a name reads "ผู้รับ", not "ผูรับ". */
+const THAI_PUA = { "\uF70A": "\u0E48", "\uF70B": "\u0E49", "\uF70C": "\u0E4A", "\uF70D": "\u0E4B", "\uF70E": "\u0E4C",
+  "\uF705": "\u0E48", "\uF706": "\u0E49", "\uF707": "\u0E4A", "\uF708": "\u0E4B", "\uF709": "\u0E4C",
+  "\uF710": "\u0E31", "\uF711": "\u0E34", "\uF712": "\u0E35", "\uF713": "\u0E47", "\uF701": "\u0E34", "\uF702": "\u0E35", "\uF703": "\u0E36", "\uF704": "\u0E37" };
+function fixThaiPua(s) { return String(s || "").replace(/[\uF700-\uF71F]/g, c => THAI_PUA[c] || "").replace(/ํา/g, "ำ"); }
+/* Shopee: "ผู้รับ (TO)" / "ผู้ส่ง (FROM)" headers, then the recipient's name on the
+   next line and their address after it (up to the line with the 5-digit postcode,
+   at most 3 lines, stopping at NOTE / the shop's own block). Only a short,
+   address-free line is accepted as a name. */
+function _labelRecipient(text) {
+  const out = { name: "", addr: "", phone: "" };
+  const lines = fixThaiPua(text).split(/\n/).map(l => l.trim()).filter(Boolean);
+  const i = lines.findIndex(l => /\(FROM\)/i.test(l));
+  if (i < 0) return out;
+  const shop = String((window.__storeName || "PS Tactical")).toLowerCase();
+  const stop = (l) => l.toLowerCase() === shop || /^(NOTE|SPEED|DROP|PICKUP)/i.test(l) || /\((TO|FROM)\)/i.test(l);
+  for (let j = i + 1; j < Math.min(lines.length, i + 3); j++) {
+    const l = lines[j];
+    if (stop(l)) continue;
+    if (l.length > 40 || /\d{3,}|ตำบล|อำเภอ|จังหวัด/.test(l)) break;
+    out.name = l; break;
+  }
+  // Two-column layout, read in mixed order: the line after the name is the
+  // SENDER's (shop's) address; the recipient's address follows "NOTE" and runs
+  // up to the shop-name line. Take that block, ending at its postcode.
+  const n = lines.findIndex((l, k) => k > i && /^NOTE\b/i.test(l));
+  if (n < 0) return out;
+  const parts = [];
+  for (let k = n + 1; k < lines.length && parts.length < 4; k++) {
+    const l = lines[k];
+    if (stop(l)) break;
+    const ph = l.match(/(?:\+?66|0)\d[\d\s-]{7,11}\d/);
+    if (ph && !out.phone && l.replace(ph[0], "").trim().length < 3) { out.phone = ph[0].replace(/[\s-]/g, ""); continue; }
+    parts.push(l);
+  }
+  let last = -1;
+  parts.forEach((l, k) => { if (/\b\d{5}\b/.test(l)) last = k; });
+  if (last >= 0) out.addr = parts.slice(0, last + 1).join(" ").replace(/\s+/g, " ").replace(/,\s*,/g, ",").trim();
+  return out;
+}
+/* Classify raw text/codes → { orderNo, tracking, platform, name } (any may be ""). */
+function parseLabelCodes(text, codes) {
+  const who = _labelRecipient(text);
+  const name = who.name;
+  const t = String(text || "").toUpperCase();
+  const all = [t, ...(codes || []).map(c => String(c).toUpperCase().trim())].join("\n");
+  let platform = /SHOPEE/.test(t) ? "Shopee" : /LAZADA/.test(t) ? "Lazada" : /TIKTOK/.test(t) ? "TikTok" : "";
+  let orderNo = "";
+  const labelled = t.match(/ORDER\s*(?:NO\.?|ID|NUMBER)?\s*[:.]?\s*((?=[0-9A-Z]*\d)[0-9A-Z]{8,20})\b/);
+  if (labelled) orderNo = labelled[1];
+  if (!orderNo) { const m = all.match(SHOPEE_ORDER_RE); if (m) { orderNo = m[1]; platform = platform || "Shopee"; } }
+  let tracking = "";
+  for (const s of [...(codes || []).map(c => String(c).toUpperCase().trim()), ...t.split(/\s+/)]) {
+    if (s === orderNo) continue;
+    const m = s.match(LABEL_TRACK_RE);
+    if (m && m[1] !== orderNo) { tracking = m[1]; break; }
+  }
+  return { orderNo, tracking, platform, name, addr: who.addr, phone: who.phone };
+}
+async function extractLabelCodes(file) {
+  const f = safeOrderFile(file);
+  if (!f) return null;
+  if (f.type === "application/pdf") {
+    const r = parseLabelCodes(await _pdfText(f.dataUrl), []);
+    if (r.orderNo || r.tracking) return r;
+    return null;
+  }
+  const codes = await _imageCodes(f.dataUrl);
+  const r = parseLabelCodes("", codes);
+  return (r.orderNo || r.tracking) ? r : null;
+}
+
+function isLabelPlaceholderName(n) { return ["ดูใบปะหน้า", "ลูกค้า", "—", ""].includes(String(n || "").trim()); }
+/* "ลูกค้า <name>" + the marketplace order number, for the pack queue rows. */
+function PackOrderWho({ order }) {
+  const placeholder = isLabelPlaceholderName(order.customer);
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+      <span>{placeholder ? (order.platformOrderNo ? "ลูกค้า —" : (order.customer || "—")) : "ลูกค้า " + order.customer}</span>
+      {order.platformOrderNo && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "var(--muted)" }}>
+        {order.platform && typeof ChannelMark === "function" && <ChannelMark channel={order.platform} size={15}/>}
+        <span className="mono">{order.platformOrderNo}</span>
+      </span>}
+    </span>
+  );
+}
+
+/* Pack queue split by selling platform — Shopee / Lazada / TikTok / Facebook…
+   Each tile: orders, pieces, and how long the oldest one has waited, so staff can
+   see which platform's cut-off is closest. Tapping a tile filters the queue. */
+function packPlatformOf(o) {
+  const v = String((o && (o.platform || o.channel)) || "").trim();
+  return (!v || v === "ฉลาก") ? "อื่นๆ" : v;
+}
+function _packOrderMs(o) {
+  const iso = o.dateIso || "";
+  if (!iso) return NaN;
+  return Date.parse(iso + "T" + (/^\d{1,2}:\d{2}/.test(o.ts || "") ? String(o.ts).slice(0, 5).padStart(5, "0") : "00:00") + ":00+07:00");
+}
+function _packAge(ms) {
+  if (!isFinite(ms)) return "";
+  const h = (Date.now() - ms) / 3600000;
+  if (h < 1) return Math.max(1, Math.round(h * 60)) + " นาที";
+  if (h < 48) return Math.floor(h) + " ชม.";
+  return Math.floor(h / 24) + " วัน";
+}
+/* An order still in the pack queue from before today (Bangkok date) is late —
+   it missed its same-day dispatch. Returns days waited (1+) or 0. */
+function packLateDays(o) {
+  const iso = String((o && o.dateIso) || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return 0;
+  const today = new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10);
+  if (iso >= today) return 0;
+  return Math.round((Date.parse(today) - Date.parse(iso)) / 86400000);
+}
+function PackLateBadge({ order, compact }) {
+  const d = packLateDays(order);
+  if (!d) return null;
+  return (
+    <span title="ออร์เดอร์ค้างข้ามวัน — รีบแพ็คส่ง" style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: compact ? "1px 7px" : "2px 8px", borderRadius: 999,
+      background: "var(--danger)", color: "#fff", fontSize: compact ? 10.5 : 11, fontWeight: 700, whiteSpace: "nowrap", fontFamily: "var(--font-sans, inherit)" }}>
+      ⚠ ส่งล่าช้า · ค้าง {d} วัน
+    </span>
+  );
+}
+function packPlatformSummary(rows) {
+  const m = new Map();
+  (rows || []).forEach(r => {
+    const k = packPlatformOf(r.o);
+    const g = m.get(k) || { name: k, orders: 0, pieces: 0, oldest: Infinity, late: 0 };
+    g.orders++; if (packLateDays(r.o)) g.late++; g.pieces += Number((r.totals && r.totals.need) || 0);
+    const t = _packOrderMs(r.o); if (isFinite(t) && t < g.oldest) g.oldest = t;
+    m.set(k, g);
+  });
+  return [...m.values()].sort((a, b) => (a.oldest - b.oldest) || (b.orders - a.orders));
+}
+function PackPlatformBar({ rows, value, onChange, mobile }) {
+  const groups = packPlatformSummary(rows);
+  if (groups.length < 1) return null;
+  const allPieces = groups.reduce((n, g) => n + g.pieces, 0);
+  const allLate = groups.reduce((n, g) => n + g.late, 0);
+  const Clock = () => (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+    </svg>
+  );
+  // One card: icon + name / big order count + pieces / oldest-wait pill (+ late).
+  const card = ({ key, name, icon, tint, orders, pieces, oldest, late }) => {
+    const on = key === "" ? !value : value === key;
+    return (
+      <button key={key || "_all"} type="button" className={"pp-card" + (on ? " is-on" : "")} aria-pressed={on}
+        aria-label={`${name}: ${orders} ออร์เดอร์ ${pieces} ชิ้น`} onClick={() => onChange(on || key === "" ? "" : key)}
+        style={{ "--pp-tint": tint }}>
+        {icon}
+        <span className="pp-main">
+          <span className="pp-name">{name}</span>
+          <span className="pp-sub tnum">{orders} ออร์เดอร์ · {pieces} ชิ้น</span>
+          {(isFinite(oldest) || late > 0) && (
+            <span className="pp-foot">
+              {isFinite(oldest) && <span className="pp-pill"><Clock/> รอนานสุด {_packAge(oldest)}</span>}
+              {late > 0 && <span className="pp-late">⚠ ส่งล่าช้า {late}</span>}
+            </span>
+          )}
+        </span>
+        {on && <span className="pp-check pp-check-corner" aria-hidden="true"><Icons.Check size={13}/></span>}
+      </button>
+    );
+  };
+  // Mobile: a stacked list — one 56px+ row per platform, check mark on the chosen one.
+  if (mobile) {
+    const item = ({ key, name, icon, tint, orders, pieces, oldest, late }) => {
+      const on = key === "" ? !value : value === key;
+      return (
+        <button key={key || "_all"} type="button" className={"pp-item" + (on ? " is-on" : "")} aria-pressed={on}
+          onClick={() => onChange(on || key === "" ? "" : key)} style={{ "--pp-tint": tint }}>
+          {icon}
+          <span className="pp-item-main">
+            <span className="pp-item-name">{name}</span>
+            <span className="pp-item-sub tnum">{orders} ออร์เดอร์ · {pieces} ชิ้น</span>
+          </span>
+          <span className="pp-item-side">
+            {late > 0 && <span className="pp-late">⚠ ล่าช้า {late}</span>}
+            {isFinite(oldest) && <span className="pp-pill"><Clock/> รอนานสุด {_packAge(oldest)}</span>}
+            {on && <span className="pp-check" aria-hidden="true"><Icons.Check size={14}/></span>}
+          </span>
+        </button>
+      );
+    };
+    return (
+      <div className="pp-list" role="group" aria-label="กรองตามแพลตฟอร์ม">
+        {item({ key: "", name: "ทุกแพลตฟอร์ม", icon: <span className="pp-icon pp-icon-all pp-icon-lg"><Icons.Grid size={18}/></span>,
+          tint: "var(--accent)", orders: rows.length, pieces: allPieces, oldest: NaN, late: allLate })}
+        {groups.map(g => {
+          const m = (typeof channelMark === "function") ? channelMark(g.name) : null;
+          return item({ key: g.name, name: g.name,
+            icon: (typeof MarkTile === "function" && m) ? <MarkTile m={m} size={36}/> : <span className="pp-icon pp-icon-lg"/>,
+            tint: (m && m.bg) || "var(--accent)", orders: g.orders, pieces: g.pieces, oldest: g.oldest, late: g.late });
+        })}
+      </div>
+    );
+  }
+  return (
+    <div className="pp-row" role="group" aria-label="กรองตามแพลตฟอร์ม">
+      {card({ key: "", name: "ทุกแพลตฟอร์ม", icon: <span className="pp-icon pp-icon-all pp-icon-xl"><Icons.Grid size={22}/></span>,
+        tint: "var(--accent)", orders: rows.length, pieces: allPieces, oldest: NaN, late: allLate })}
+      {groups.map(g => {
+        const m = (typeof channelMark === "function") ? channelMark(g.name) : null;
+        return card({ key: g.name, name: g.name,
+          icon: (typeof MarkTile === "function" && m) ? <MarkTile m={m} size={48}/> : <span className="pp-icon pp-icon-xl"/>,
+          tint: (m && m.bg) || "var(--accent)", orders: g.orders, pieces: g.pieces, oldest: g.oldest, late: g.late });
+      })}
+    </div>
+  );
+}
+
+/* Fill in order number + tracking for every order that has a label attached but
+   none recorded yet — so the tracking list shows them without each order being
+   opened in แพ็คสินค้า. One file at a time (each is a ~250 KB fetch + parse); an
+   order is tried once per session, so a label with no readable codes isn't
+   re-downloaded on every orders refresh. Writers only (same gate as attaching). */
+const _codesTried = new Set();
+let _codesRunning = false;
+async function backfillLabelCodes(orders) {
+  if (_codesRunning || !_pdDb() || typeof setOrderField !== "function") return 0;
+  if (typeof canDo === "function" && !canDo("sell")) return 0;
+  _codesRunning = true;
+  let n = 0;
+  try {
+    if (!_orderFileIds) await refreshOrderFileIds();
+    const ids = _orderFileIds || new Set();
+    const todo = (orders || []).filter(o => o && ids.has(o.id) && (!o.platformOrderNo || isLabelPlaceholderName(o.customer) || !(packRecipientFor(o) || {}).addr) && !_codesTried.has(o.id));
+    for (const o of todo) {
+      _codesTried.add(o.id);
+      let c = null;
+      try { c = await extractLabelCodes(await loadOrderFile(o.id)); } catch (e) { continue; }
+      if (!c) continue;
+      const ch = {};
+      if (c.orderNo) ch.platformOrderNo = c.orderNo;
+      if (c.platform && !o.platform) ch.platform = c.platform;
+      if (c.tracking && !o.tracking) ch.tracking = c.tracking;
+      if (c.name && isLabelPlaceholderName(o.customer)) ch.customer = c.name;
+      if (c.addr && !(o.shipTo && o.shipTo.addr) && !(packRecipientFor(o) || {}).addr) ch.shipTo = { name: c.name || "", phone: c.phone || "", addr: c.addr };
+      if (Object.keys(ch).length) { setOrderField(o.id, ch); n++; }
+    }
+  } finally { _codesRunning = false; }
+  return n;
+}
+
 /* ── attachments ── many photos/PDFs per order (order_attachments,
    supabase/order-attachments.sql). Unlike the single label slot above, the
    packer may add them too — e.g. a photo of the packed parcel as evidence. */
@@ -188,12 +519,14 @@ async function deleteOrderDocs(ids) {
   refreshOrderFileIds().catch(() => {});
 }
 
-function PackAttachments({ orderId, pushToast, card }) {
+function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
   const [list, setList] = useStatePD([]);
   const [state, setState] = useStatePD("loading");   // loading | ok | error
   const [busy, setBusy] = useStatePD("");
   const [rev, setRev] = useStatePD(0);
   const inputRef = useRefPD(null);
+  const camRef = useRefPD(null);     // mobile ถ่ายรูป — opens the camera directly
+  const [over, setOver] = useStatePD(false);   // desktop drag-and-drop highlight
   const canAdd = canAddOrderAttachment();
 
   useEffectPD(() => {
@@ -227,6 +560,58 @@ function PackAttachments({ orderId, pushToast, card }) {
     setBusy("");
     if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); }
   };
+
+  if (mobile || unified) {
+    const onDrop = (e) => { e.preventDefault(); setOver(false); if (canAdd && e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) pick({ target: { files: e.dataTransfer.files, value: "" } }); };
+    return (
+      <section className="sd-card">
+        <div className="sd-head">
+          <span className="sd-head-icon"><Icons.Image size={20}/></span>
+          <span className="sd-title">{mobile ? "รูป / ไฟล์แนบ" : "รูปและไฟล์แนบ"}{list.length ? ` (${list.length})` : ""}</span>
+          {!mobile && canAdd && <button type="button" className="sd-btn-sm sd-btn-sm-plain" disabled={!!busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={15}/> เพิ่มรูป / ไฟล์</button>}
+        </div>
+        <div className="sd-hint" style={{ marginTop: -4 }}>แนบภาพสินค้าที่แพ็คแล้ว หรือเอกสารเพิ่มเติม</div>
+        <input ref={inputRef} type="file" multiple accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+        <input ref={camRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={pick}/>
+        {busy && <div className="sd-muted">{busy}</div>}
+        {state === "loading" ? <div className="sd-muted">กำลังโหลด…</div>
+          : state === "error" ? <div className="sd-error">โหลดไฟล์ไม่ได้ <button type="button" className="sd-link" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
+          : !list.length ? (!mobile && canAdd
+            ? <button type="button" className={"sd-drop" + (over ? " is-over" : "")} disabled={!!busy}
+                onClick={() => inputRef.current && inputRef.current.click()}
+                onDragOver={e => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)} onDrop={onDrop}>
+                <Icons.Up size={26}/>
+                <span className="sd-drop-title">ลากไฟล์มาวางที่นี่ หรือ<span className="sd-drop-link">เลือกไฟล์</span></span>
+                <span className="sd-hint">รองรับรูปภาพและ PDF · แนบได้หลายไฟล์</span>
+              </button>
+            : <div className="sd-muted">{canAdd ? "ยังไม่มีไฟล์แนบ" : "ไม่มีไฟล์แนบ"}</div>)
+          : (
+            <div className="sd-thumbs">
+              {list.map(a => (
+                <div key={a.id} className="sd-thumb">
+                  <button type="button" className="sd-thumb-open" onClick={() => openOrderFile(a)} aria-label={"เปิด " + (a.name || "ไฟล์แนบ")}>
+                    {a.type === "application/pdf"
+                      ? <span className="sd-thumb-pdf"><span className="sd-file-badge">PDF</span><span className="sd-thumb-name">{a.name}</span></span>
+                      : <img src={a.dataUrl} alt={a.name || "ไฟล์แนบ"}/>}
+                  </button>
+                  <div className="sd-thumb-bar">
+                    <span className="sd-thumb-by">{a.createdByName || "—"}</span>
+                    <button type="button" className="sd-thumb-act" aria-label="ดาวน์โหลด" onClick={() => downloadOrderFile(a, "ไฟล์แนบ-" + orderId)}><Icons.Download size={15}/></button>
+                    {canDeleteOrderAttachment(a) && <button type="button" className="sd-thumb-act sd-danger" aria-label="ลบ" disabled={!!busy} onClick={() => remove(a)}><Icons.Trash size={15}/></button>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        {canAdd && mobile && (
+          <div className="sd-grid2">
+            <button type="button" className="sd-btn sd-btn-outline" disabled={!!busy} onClick={() => camRef.current && camRef.current.click()}><Icons.Camera size={18}/> ถ่ายรูป</button>
+            <button type="button" className="sd-btn sd-btn-outline" disabled={!!busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={18}/> เพิ่มไฟล์</button>
+          </div>
+        )}
+      </section>
+    );
+  }
 
   return (
     <div {...card} style={{ ...card.style, flexBasis: "100%" }}>
@@ -816,6 +1201,39 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
     pushToast("บันทึกที่อยู่แล้ว");
   };
 
+  /* Read order number + tracking off the label once it's loaded, and keep them on
+     the order (overrides) so search / tracking / ship-status use the real numbers. */
+  const [codes, setCodes] = useStatePD(null);   // null | "reading" | {orderNo,tracking,platform} | "none"
+  useEffectPD(() => {
+    if (!file) { setCodes(null); return; }
+    let alive = true;
+    setCodes("reading");
+    extractLabelCodes(file)
+      .then(c => {
+        if (!alive) return;
+        setCodes(c || "none");
+        if (!c || !canAttach || typeof setOrderField !== "function") return;
+        const ch = {};
+        if (c.orderNo && c.orderNo !== order.platformOrderNo) ch.platformOrderNo = c.orderNo;
+        if (c.platform && !order.platform) ch.platform = c.platform;
+        if (c.tracking && !order.tracking) ch.tracking = c.tracking;
+        if (c.name && isLabelPlaceholderName(order.customer)) ch.customer = c.name;
+        if (c.addr && !(order.shipTo && order.shipTo.addr) && !(packRecipientFor(order) || {}).addr) ch.shipTo = { name: c.name || "", phone: c.phone || "", addr: c.addr };
+        if (Object.keys(ch).length) setOrderField(order.id, ch);
+      })
+      .catch(() => { if (alive) setCodes("none"); });
+    return () => { alive = false; };
+  }, [file]);
+  const shipped = order.status === "shipped" || order.status === "delivered";
+  const markShipped = () => {
+    if (typeof setOrderField !== "function") return;
+    const c = codes && typeof codes === "object" ? codes : {};
+    const ch = { status: "shipped", shippedAt: new Date().toISOString() };
+    if (c.tracking && !order.tracking) ch.tracking = c.tracking;
+    setOrderField(order.id, ch);
+    pushToast("จัดส่งแล้ว — " + (c.orderNo || order.platformOrderNo || order.id));
+  };
+
   useEffectPD(() => {
     let alive = true;
     setState("loading");
@@ -866,89 +1284,171 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   const card = mobile ? { className: "m-card", style: { padding: 14, marginTop: 12 } } : { className: "card", style: { padding: 14 } };
   const btn = "btn btn-sm";
 
-  return (
-    <div style={{ display: "flex", flexDirection: mobile ? "column" : "row", gap: 12, flexWrap: "wrap", marginTop: mobile ? 0 : 12 }}>
-      {/* attached label file */}
-      <div {...card} style={{ ...card.style, flex: 1, minWidth: 240 }}>
-        <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-          <strong style={{ fontSize: 13 }}>ใบปะหน้าที่แนบ</strong>
-          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-            {file && <button className={btn} onClick={() => openOrderFile(file)}><Icons.Eye size={13}/> เปิด</button>}
-            {file && <button className={btn} onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={13}/> ดาวน์โหลด</button>}
-            {file && <button className={btn} onClick={() => printOrderFile(file)}><Icons.Print size={13}/> พิมพ์</button>}
-            {canUpload && <button className={btn} disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={13}/> {file ? "เปลี่ยน" : "แนบไฟล์"}</button>}
-            {canAttach && file && <button className="btn btn-sm btn-ghost" disabled={busy} onClick={remove}><Icons.Trash size={13}/></button>}
+  /* One layout for both forks. Mobile: one column (label file, recipient,
+     attachments) with full-width 44px actions; desktop: a "เอกสารและการจัดส่ง"
+     panel, label + recipient side by side, actions in one row. Cancel sits apart. */
+  {
+    const copyBtn = (text, what) => (
+      <button type="button" className="sd-icon-btn" aria-label={"คัดลอก" + what} onClick={() => copyPackText(text, what, pushToast)}><Icons.Copy size={17}/></button>
+    );
+    return (
+      <div className={"sd-stack" + (mobile ? "" : " is-desktop")}>
+        {!mobile && (
+          <div className="sd-panel-head">
+            <div>
+              <div className="sd-panel-title">เอกสารและการจัดส่ง</div>
+              <div className="sd-hint">จัดการใบปะหน้า ที่อยู่ผู้รับ และหลักฐานการแพ็ค</div>
+            </div>
+            {shipped
+              ? <span className="sd-chip-ok"><Icons.Check size={15}/> จัดส่งแล้ว</span>
+              // Same rule as before the redesign: only once the label was read or the
+              // order is packed — never as a shortcut that skips packing.
+              : canAttach && ((codes && typeof codes === "object") || order.status === "packed") && <button type="button" className="sd-btn-sm sd-btn-sm-ok" onClick={markShipped}><Icons.Truck size={15}/> ส่งให้ขนส่งแล้ว</button>}
           </div>
-        </div>
-        <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
-        {state === "loading" ? <div style={{ fontSize: 12, color: "var(--muted)" }}>กำลังโหลด…</div>
-          : state === "error" ? <div style={{ fontSize: 12, color: "var(--danger)" }}>โหลดไฟล์ไม่ได้ <button className="btn btn-ghost btn-sm" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
-          : !file ? <div style={{ fontSize: 12, color: "var(--muted)" }}>{busy ? "กำลังอัปโหลด…" : canUpload ? "ยังไม่มีไฟล์ — แนบรูปหรือ PDF ใบปะหน้าจาก Shopee / Lazada / ขนส่ง" : "ไม่มีไฟล์แนบ — ใช้ที่อยู่ด้านล่าง"}</div>
-          : file.type === "application/pdf" ? <div style={{ fontSize: 13 }}>📄 {file.name}</div>
-          : <img src={file.dataUrl} alt="ใบปะหน้า" style={{ width: "100%", maxHeight: mobile ? 320 : 260, objectFit: "contain", borderRadius: 8, background: "#fff" }}/>}
-      </div>
-
-      {/* recipient */}
-      <div {...card} style={{ ...card.style, flex: 1, minWidth: 240 }}>
-        <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-          <strong style={{ fontSize: 13 }}>ที่อยู่ผู้รับ</strong>
-          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
-            {canAttach && !edit && <button className={btn} onClick={startEdit}><Icons.Edit size={13}/> {r.addr ? "แก้ไข" : "เพิ่มที่อยู่"}</button>}
-            <button className={btn} disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}><Icons.Copy size={13}/> คัดลอกทั้งหมด</button>
-            <select className="input" value={paper} onChange={e => { setPaper(e.target.value); setPackLabelSize(e.target.value); }}
-              title="ขนาดกระดาษใบปะหน้า" style={{ width: "auto", height: 30, padding: "0 6px", fontSize: 12 }}>
-              {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
-            </select>
-            <button className={btn} disabled={!r.addr} onClick={() => printOrderAddress(order, lines, paper)}><Icons.Print size={13}/> พิมพ์ใบปะหน้า</button>
-          </div>
-        </div>
-        {edit ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <div className="row" style={{ gap: 6 }}>
-              <textarea className="input" rows={2} value={edit.paste} onChange={e => setEdit({ ...edit, paste: e.target.value })} placeholder="วางที่อยู่ทั้งก้อนจากแชท/Shopee แล้วกด แยกอัตโนมัติ" style={{ flex: 1, resize: "vertical" }}/>
-              <button className={btn} disabled={!edit.paste.trim()} onClick={splitPaste}>แยกอัตโนมัติ</button>
-            </div>
-            <input className="input" value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} placeholder="ชื่อผู้รับ"/>
-            <input className="input" value={edit.phone} inputMode="tel" onChange={e => setEdit({ ...edit, phone: e.target.value })} placeholder="เบอร์โทร"/>
-            <textarea className="input" rows={3} value={edit.addr} onChange={e => setEdit({ ...edit, addr: e.target.value })} placeholder="ที่อยู่ ตำบล อำเภอ จังหวัด รหัสไปรษณีย์" style={{ resize: "vertical" }}/>
-            <div className="row" style={{ gap: 6, justifyContent: "flex-end" }}>
-              <button className={btn} onClick={() => setEdit(null)}>ยกเลิก</button>
-              <button className="btn btn-sm btn-primary" disabled={!edit.name.trim() && !edit.addr.trim()} onClick={saveAddr}>บันทึกที่อยู่</button>
-            </div>
-          </div>
-        ) : (
-          <>
-            {/* Each field copies on its own so it can go into a carrier app's separate boxes. */}
-            <div className="row" style={{ gap: 6, alignItems: "flex-start" }}>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 600, userSelect: "text", WebkitUserSelect: "text" }}>{r.name || "—"}</div>
-              {r.name && <button className="btn btn-sm btn-ghost" title="คัดลอกชื่อ" onClick={() => copyPackText(r.name, "ชื่อ", pushToast)}><Icons.Copy size={12}/> ชื่อ</button>}
-            </div>
-            {r.phone && (
-              <div className="row" style={{ gap: 6, alignItems: "flex-start" }}>
-                <div className="mono" style={{ flex: 1, minWidth: 0, fontSize: 13, userSelect: "text", WebkitUserSelect: "text" }}>{r.phone}</div>
-                <button className="btn btn-sm btn-ghost" title="คัดลอกเบอร์โทร" onClick={() => copyPackText(r.phone, "เบอร์โทร", pushToast)}><Icons.Copy size={12}/> เบอร์</button>
-              </div>
-            )}
-            <div className="row" style={{ gap: 6, alignItems: "flex-start", marginTop: 4 }}>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: r.addr ? "var(--fg)" : "var(--muted)", userSelect: "text", WebkitUserSelect: "text" }}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</div>
-              {r.addr && <button className="btn btn-sm btn-ghost" title="คัดลอกที่อยู่" onClick={() => copyPackText(r.addr, "ที่อยู่", pushToast)}><Icons.Copy size={12}/> ที่อยู่</button>}
-            </div>
-          </>
         )}
-        {(r.cod > 0 || r.carrier) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
-      </div>
+        <div className="sd-cols">
+        {/* ใบปะหน้าที่แนบ */}
+        <section className="sd-card">
+          <div className="sd-head">
+            <span className="sd-head-icon"><Icons.File size={20}/></span>
+            <span className="sd-title">ใบปะหน้าที่แนบ</span>
+          </div>
+          <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+          {state === "loading" ? <div className="sd-muted">กำลังโหลด…</div>
+            : state === "error" ? <div className="sd-error">โหลดไฟล์ไม่ได้ <button type="button" className="sd-link" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
+            : !file ? (
+              <>
+                <div className="sd-muted">{busy ? "กำลังอัปโหลด…" : "ยังไม่มีไฟล์แนบ"}</div>
+                {!busy && <div className="sd-hint">{canUpload ? "แนบรูปหรือ PDF ใบปะหน้าจากช่องทางขาย" : "ใช้ที่อยู่ด้านล่างแทน"}</div>}
+                {canUpload && <button type="button" className="sd-btn sd-btn-outline" disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={18}/> แนบใบปะหน้า</button>}
+              </>
+            ) : (
+              <>
+                <div className="sd-file">
+                  {file.type === "application/pdf"
+                    ? <span className="sd-file-badge">PDF</span>
+                    : <img className="sd-file-thumb" src={file.dataUrl} alt="ใบปะหน้า"/>}
+                  <span className="sd-file-name">{file.name || "ใบปะหน้า"}</span>
+                </div>
+                {codes === "reading" && <div className="sd-hint">กำลังอ่านเลขคำสั่งซื้อจากใบปะหน้า…</div>}
+                {codes && typeof codes === "object" && (codes.orderNo || codes.tracking) && (
+                  <div className="sd-codes">
+                    {codes.orderNo && (
+                      <div className="sd-code-row">
+                        <span className="sd-code-label">{codes.platform && typeof ChannelMark === "function" ? <ChannelMark channel={codes.platform} size={18}/> : null}เลขคำสั่งซื้อ</span>
+                        <span className="sd-code-val mono">{codes.orderNo}</span>
+                        {copyBtn(codes.orderNo, "เลขคำสั่งซื้อ")}
+                      </div>
+                    )}
+                    {codes.tracking && (
+                      <div className="sd-code-row">
+                        <span className="sd-code-label"><Icons.Box size={17}/>เลขพัสดุ</span>
+                        <span className="sd-code-val mono">{codes.tracking}</span>
+                        {copyBtn(codes.tracking, "เลขพัสดุ")}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {mobile ? (
+                  <div className="sd-grid2">
+                    <button type="button" className="sd-btn sd-btn-outline" onClick={() => printOrderFile(file)}><Icons.Print size={17}/> พิมพ์</button>
+                    <button type="button" className="sd-btn sd-btn-outline" onClick={() => openOrderFile(file)}><Icons.Eye size={17}/> เปิดดู</button>
+                    <button type="button" className="sd-btn sd-btn-outline" onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={17}/> ดาวน์โหลด</button>
+                    {canUpload && <button type="button" className="sd-btn sd-btn-outline" disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Refresh size={17}/> เปลี่ยนไฟล์</button>}
+                  </div>
+                ) : (
+                  <div className="sd-actions">
+                    <button type="button" className="sd-abtn" onClick={() => openOrderFile(file)}><Icons.Eye size={15}/> เปิดดู</button>
+                    <button type="button" className="sd-abtn" onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={15}/> ดาวน์โหลด</button>
+                    <button type="button" className="sd-abtn is-primary" onClick={() => printOrderFile(file)}><Icons.Print size={15}/> พิมพ์</button>
+                    {(canUpload || canAttach) && <span className="sd-sep"/>}
+                    {canUpload && <button type="button" className="sd-abtn" disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.File size={15}/> เปลี่ยนไฟล์</button>}
+                    {canAttach && <button type="button" className="sd-abtn is-danger" aria-label="ลบไฟล์ใบปะหน้า" title="ลบไฟล์" disabled={busy} onClick={remove}><Icons.Trash size={15}/></button>}
+                  </div>
+                )}
+                {mobile && (shipped || canAttach) ? (
+                  <div className="sd-row-split">
+                    {shipped
+                      ? <span className="sd-status sd-status-ok"><Icons.Check size={15}/> จัดส่งแล้ว</span>
+                      : canAttach && ((codes && typeof codes === "object") || order.status === "packed") ? <button type="button" className="sd-btn sd-btn-ghost-ok" onClick={markShipped}><Icons.Truck size={17}/> ส่งให้ขนส่งแล้ว</button> : <span/>}
+                    {canAttach && <button type="button" className="sd-icon-btn sd-danger" aria-label="ลบไฟล์ใบปะหน้า" disabled={busy} onClick={remove}><Icons.Trash size={17}/></button>}
+                  </div>
+                ) : null}
+              </>
+            )}
+        </section>
 
-      <PackAttachments orderId={order.id} pushToast={pushToast} card={card}/>
-
-      {canCancel && (
-        <div style={{ flexBasis: "100%" }}>
-          <button className="btn btn-sm btn-ghost" style={{ color: "var(--danger)" }} disabled={busy} onClick={cancel}>
-            <Icons.X size={13}/> ลูกค้ายกเลิก — ยกเลิกออร์เดอร์และคืนสต็อก
-          </button>
+        {/* ที่อยู่ผู้รับ */}
+        <section className="sd-card">
+          <div className="sd-head">
+            <span className="sd-head-icon"><Icons.Pin size={20}/></span>
+            <span className="sd-title">ที่อยู่ผู้รับ</span>
+            {canAttach && !edit && <button type="button" className="sd-btn-sm" onClick={startEdit}><Icons.Edit size={15}/> {r.addr ? "แก้ไข" : "เพิ่มที่อยู่"}</button>}
+            {!mobile && !edit && <button type="button" className="sd-btn-sm sd-btn-sm-plain" disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}><Icons.Copy size={15}/> คัดลอกทั้งหมด</button>}
+          </div>
+          {edit ? (
+            <div className="sd-form">
+              <textarea className="sd-input" rows={3} value={edit.paste} onChange={e => setEdit({ ...edit, paste: e.target.value })} placeholder="วางที่อยู่ทั้งก้อนจากแชท/Shopee แล้วกด แยกอัตโนมัติ"/>
+              <button type="button" className="sd-btn sd-btn-outline" disabled={!edit.paste.trim()} onClick={splitPaste}>แยกอัตโนมัติ</button>
+              <input className="sd-input" value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} placeholder="ชื่อผู้รับ"/>
+              <input className="sd-input" value={edit.phone} inputMode="tel" onChange={e => setEdit({ ...edit, phone: e.target.value })} placeholder="เบอร์โทร"/>
+              <textarea className="sd-input" rows={3} value={edit.addr} onChange={e => setEdit({ ...edit, addr: e.target.value })} placeholder="ที่อยู่ ตำบล อำเภอ จังหวัด รหัสไปรษณีย์"/>
+              <div className="sd-grid2">
+                <button type="button" className="sd-btn sd-btn-outline-plain" onClick={() => setEdit(null)}>ยกเลิก</button>
+                <button type="button" className="sd-btn sd-btn-primary" disabled={!edit.name.trim() && !edit.addr.trim()} onClick={saveAddr}>บันทึกที่อยู่</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="sd-field">
+                <span className="sd-name">{r.name || "—"}</span>
+                {r.name && copyBtn(r.name, "ชื่อ")}
+              </div>
+              {r.phone && (
+                <div className="sd-field">
+                  <span className="sd-phone"><Icons.Phone size={17}/><span className="mono">{r.phone}</span></span>
+                  {copyBtn(r.phone, "เบอร์โทร")}
+                </div>
+              )}
+              <div className="sd-field">
+                <span className={"sd-addr" + (r.addr ? "" : " is-empty")}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</span>
+                {r.addr && copyBtn(r.addr, "ที่อยู่")}
+              </div>
+              {(r.cod > 0 || r.carrier) && <div className="sd-hint">{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
+              {mobile && (
+                <button type="button" className="sd-btn sd-btn-outline" disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}>
+                  <Icons.Clipboard size={18}/> คัดลอกข้อมูลทั้งหมด
+                </button>
+              )}
+              <div className="sd-divider"/>
+              <div className="sd-print-row">
+                <label className="sd-label" htmlFor={"sd-paper-" + order.id}>ขนาดใบปะหน้า</label>
+                <select id={"sd-paper-" + order.id} className="sd-input" value={paper} onChange={e => { setPaper(e.target.value); setPackLabelSize(e.target.value); }}>
+                  {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
+                </select>
+                <button type="button" className="sd-btn sd-btn-outline" disabled={!r.addr} onClick={() => printOrderAddress(order, lines, paper)}>
+                  <Icons.Print size={18}/> พิมพ์ใบปะหน้า
+                </button>
+              </div>
+            </>
+          )}
+        </section>
         </div>
-      )}
-    </div>
-  );
+
+        <PackAttachments orderId={order.id} pushToast={pushToast} card={card} mobile={mobile} unified/>
+
+        {canCancel && (
+          <div className="sd-cancel-row">
+            <button type="button" className="sd-cancel" disabled={busy} onClick={cancel}>
+              {mobile ? <Icons.X size={16}/> : <Icons.Trash size={16}/>} ยกเลิกออร์เดอร์และคืนสต็อก
+            </button>
+            {!mobile && <span className="sd-hint">กรณีลูกค้ายกเลิกคำสั่งซื้อ</span>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
 }
 
 /* ── สั่งแพ็คใหม่ — ONE page: products + label/address + send ──
@@ -957,7 +1457,10 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
    (commitIssueOrder → stock, shelves, history, order in the pack queue), then
    the label file / pasted address are attached to that order. Used by the
    desktop แพ็คสินค้า page (modal) and mobile (view "pack-new"). */
-function PackNewOrder({ onClose, pushToast, mobile }) {
+function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
+  // addTo = an order already in the pack queue → "เพิ่มรายการ" mode: same picker,
+  // no label/address/channel step (the order has them), commit through
+  // addItemsToPackOrder so only the ADDED lines are cut from stock.
   const [q, setQ] = useStatePD("");
   const [cart, setCart] = useStatePD([]);            // [{ key, type, sku?, id?, name, qty, items? }]
   const [file, setFile] = useStatePD(null);
@@ -965,6 +1468,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
   const [ch, setCh] = useStatePD(() => (typeof lastIssueChannel === "function" && lastIssueChannel()) || "other");
   const [busy, setBusy] = useStatePD(false);
   const sendingRef = useRefPD(false);   // sync latch: this commit moves stock
+  const [pnOver, setPnOver] = useStatePD(false);   // desktop drag-and-drop highlight
   const inputRef = useRefPD(null);
 
   const lq = q.trim().toLowerCase();
@@ -1000,7 +1504,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
     ? (parsed ? { name: parsed.name || "", phone: parsed.phone || "", addr: [parsed.addr1, parsed.addr2].filter(Boolean).join(" ") || paste.trim() }
               : { name: "", phone: "", addr: paste.trim() })
     : null;
-  const canSend = cart.length > 0 && !short.length && !!(file || shipTo) && !busy;
+  const canSend = cart.length > 0 && !short.length && (addTo ? true : !!(file || shipTo)) && !busy;
 
   const pick = async (e) => {
     const f = e.target.files && e.target.files[0];
@@ -1009,7 +1513,26 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
     try { setFile(await readOrderFile(f)); } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
   };
 
+  const sendAdd = async () => {
+    if (!canSend || typeof addItemsToPackOrder !== "function" || sendingRef.current) return;
+    sendingRef.current = true;
+    setBusy(true);
+    const lines = cart.map(x => x.type === "bundle"
+      ? { type: "bundle", id: x.id, name: x.name, items: x.items, qty: x.qty }
+      : { type: "sku", sku: x.sku, name: x.name, qty: x.qty, loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === x.sku)) : "" });
+    let res = null;
+    try { res = await addItemsToPackOrder(addTo, lines, (user && user.name) || ""); }
+    catch (e) { res = { ok: false, error: "เพิ่มรายการไม่สำเร็จ: " + (e.message || e) }; }
+    sendingRef.current = false;
+    setBusy(false);
+    if (!res || !res.ok) { if (res && res.error) pushToast(res.error); return; }
+    if (res.locError) pushToast("ตัดสต็อกแล้ว แต่ปรับตำแหน่งไม่สำเร็จ: " + res.locError);
+    pushToast(`เพิ่ม ${res.lineCount} รายการ (${res.pieces} ชิ้น) เข้า ${addTo.id} แล้ว`);
+    onClose();
+  };
+
   const send = async () => {
+    if (addTo) return sendAdd();
     if (!canSend || typeof commitIssueOrder !== "function" || sendingRef.current) return;
     sendingRef.current = true;
     setBusy(true);
@@ -1042,7 +1565,13 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div>
-        <div style={sec}>1. สินค้าที่ต้องแพ็ค</div>
+        {addTo && (
+          <div style={{ padding: "10px 12px", borderRadius: 10, background: "var(--info-soft)", color: "var(--info)", fontSize: 12.5, lineHeight: 1.6, marginBottom: 10 }}>
+            เพิ่มสินค้าเข้าออร์เดอร์ <b className="mono">{addTo.id}</b>{addTo.customer ? " · " + addTo.customer : ""}<br/>
+            ระบบจะตัดสต็อกเฉพาะรายการที่เพิ่ม และขึ้นป้าย <b>เพิ่มใหม่</b> ให้คนแพ็คเห็น
+          </div>
+        )}
+        <div style={sec}>{addTo ? "สินค้าที่จะเพิ่ม" : "1. สินค้าที่ต้องแพ็ค"}</div>
         <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="🔍 พิมพ์ชื่อสินค้า หรือ SKU" style={{ width: "100%", fontSize: 15, padding: "12px 14px" }}/>
         <div style={{ fontSize: 11, color: "var(--muted)", margin: "6px 2px 4px" }}>
           {lq ? `พบ ${allHits.length} รายการ` : `สินค้าทั้งหมด ${allHits.length} รายการ — เลื่อนเลือก หรือพิมพ์ค้นหา`}{allHits.length > hits.length ? ` (แสดง ${hits.length} — พิมพ์เพิ่มเพื่อกรอง)` : ""}
@@ -1079,7 +1608,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
         )}
       </div>
 
-      <div>
+      {!addTo && <div>
         <div style={sec}>2. ใบปะหน้า หรือ ที่อยู่ <span style={{ fontWeight: 400, color: "var(--muted)" }}>(อย่างใดอย่างหนึ่ง)</span></div>
         <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
         {file ? (
@@ -1099,21 +1628,23 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
         {shipTo && (shipTo.name || shipTo.phone) && (
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>✓ ผู้รับ: <b style={{ color: "var(--fg)" }}>{shipTo.name || "—"}</b> {shipTo.phone}</div>
         )}
-      </div>
+      </div>}
 
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+      {!addTo && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>ช่องทาง:</span>
         {(typeof CHANNEL_LIST !== "undefined" ? CHANNEL_LIST : []).map(c => (
           <button key={c.id} onClick={() => setCh(c.id)}
             style={{ padding: "4px 10px", borderRadius: 999, fontSize: 12, cursor: "pointer", fontFamily: "inherit", border: "1px solid " + (ch === c.id ? "var(--fg)" : "var(--border)"), background: ch === c.id ? "var(--fg)" : "transparent", color: ch === c.id ? "var(--surface)" : "var(--fg-2)" }}>{c.name}</button>
         ))}
-      </div>
+      </div>}
     </div>
   );
   const sendBtn = (
     <button onClick={send} disabled={!canSend}
       style={{ width: "100%", padding: 16, borderRadius: 14, border: "none", background: canSend ? "var(--accent)" : "var(--surface-2)", color: canSend ? "#fff" : "var(--muted)", fontSize: 17, fontWeight: 800, cursor: canSend ? "pointer" : "not-allowed", fontFamily: "inherit" }}>
-      {busy ? "กำลังส่ง…" : cart.length === 0 ? "เลือกสินค้าก่อน" : !(file || shipTo) ? "แนบใบปะหน้าหรือวางที่อยู่" : "ส่งให้คนแพ็ค ✓"}
+      {busy ? "กำลังส่ง…" : cart.length === 0 ? "เลือกสินค้าก่อน"
+        : addTo ? (short.length ? "สต็อกไม่พอ" : `เพิ่มเข้าออร์เดอร์ (${cart.reduce((s, x) => s + x.qty, 0)}) ✓`)
+        : !(file || shipTo) ? "แนบใบปะหน้าหรือวางที่อยู่" : "ส่งให้คนแพ็ค ✓"}
     </button>
   );
 
@@ -1122,7 +1653,7 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
       <>
         <div className="m-topbar">
           <button className="m-back" onClick={onClose}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
-          <div className="m-title-sub">สั่งแพ็คใหม่</div>
+          <div className="m-title-sub">{addTo ? "เพิ่มรายการ " + addTo.id : "สั่งแพ็คใหม่"}</div>
           <span style={{ width: 30 }}/>
         </div>
         <div className="m-content" style={{ paddingTop: 10 }}>
@@ -1132,21 +1663,175 @@ function PackNewOrder({ onClose, pushToast, mobile }) {
       </>
     );
   }
+  // Desktop: two columns (① products · ② shipping), status + actions in the footer.
+  const pieces = cart.reduce((s, x) => s + x.qty, 0);
+  const status = busy ? { tone: "info", title: "กำลังส่ง…", sub: "กำลังตัดสต็อกและสร้างออร์เดอร์" }
+    : cart.length === 0 ? { tone: "muted", title: "ยังไม่ได้เลือกสินค้า", sub: addTo ? "เลือกสินค้าที่จะเพิ่มเข้าออร์เดอร์" : "เลือกสินค้าและเพิ่มข้อมูลจัดส่งเพื่อดำเนินการ" }
+    : short.length ? { tone: "danger", title: "สต็อกไม่พอ", sub: short.join(", ") }
+    : (!addTo && !(file || shipTo)) ? { tone: "warn", title: `เลือกแล้ว ${cart.length} รายการ · ${pieces} ชิ้น`, sub: "แนบใบปะหน้า หรือวางที่อยู่ผู้รับก่อนส่ง" }
+    : { tone: "ok", title: `พร้อมส่ง ${cart.length} รายการ · ${pieces} ชิ้น`, sub: addTo ? "ระบบจะตัดสต็อกเฉพาะรายการที่เพิ่ม" : "กดสร้างรายการแพ็คเพื่อส่งให้คนแพ็ค" };
+  const [over, setOver] = [pnOver, setPnOver];
+  const onDrop = (e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) pick({ target: { files: [f], value: "" } }); };
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 90 }}/>
-      <div className="modal" style={{ zIndex: 91, width: 560, maxHeight: "92vh" }}>
-        <div className="modal-head">
-          <h3>สั่งแพ็คใหม่</h3>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}><Icons.X size={14}/></button>
+      <div className="modal pn-modal" role="dialog" aria-modal="true" aria-label={addTo ? "เพิ่มรายการ" : "สั่งแพ็คใหม่"} style={{ zIndex: 91 }}>
+        <div className="pn-head">
+          <span className="pn-head-icon"><Icons.Box size={24}/></span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="pn-title">{addTo ? <>เพิ่มรายการ <span className="mono">{addTo.id}</span></> : "สั่งแพ็คใหม่"}</div>
+            <div className="pn-sub">{addTo ? ((addTo.customer ? addTo.customer + " · " : "") + "ระบบจะตัดสต็อกเฉพาะรายการที่เพิ่ม") : "เลือกสินค้าและเพิ่มข้อมูลจัดส่ง"}</div>
+          </div>
+          <button type="button" className="pn-close" onClick={onClose} aria-label="ปิด"><Icons.X size={20}/></button>
         </div>
-        <div className="modal-body">{body}</div>
-        <div className="modal-foot" style={{ display: "block" }}>{sendBtn}</div>
+
+        <div className={"pn-body" + (addTo ? " is-single" : "")}>
+          {/* ① products */}
+          <section className="pn-col">
+            <div className="pn-step"><span className="pn-step-n">1</span>{addTo ? "เลือกสินค้าที่จะเพิ่ม" : "เลือกสินค้าที่ต้องแพ็ค"}</div>
+            <div className="search pn-search">
+              <Icons.Search size={16}/>
+              <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหาชื่อสินค้า หรือ SKU" aria-label="ค้นหาสินค้า" autoFocus/>
+              {q && <Icons.X size={14} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+            </div>
+            <div className="pn-count">
+              {lq ? `พบ ${allHits.length} รายการ` : `สินค้าทั้งหมด ${allHits.length} รายการ`}{allHits.length > hits.length ? ` (แสดง ${hits.length} — พิมพ์เพิ่มเพื่อกรอง)` : ""}
+            </div>
+            <div className="pn-list">
+              {hits.map(h => {
+                const inCart = cart.find(c => c.key === h.key);
+                return (
+                  <div key={h.key} className={"pn-item" + (h.stock <= 0 ? " is-out" : "")}>
+                    {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={44}/> : <span className="pn-thumb">📦</span>}
+                    <span className="pn-item-main">
+                      <span className="pn-item-name">{h.type === "bundle" ? "ชุด: " : ""}{h.name}</span>
+                      <span className="pn-item-sub">{h.sku || "ชุดสินค้า"} · คงเหลือ {h.stock}</span>
+                    </span>
+                    {inCart && <span className="pn-incart tnum">{inCart.qty}</span>}
+                    <button type="button" className="pn-add" disabled={h.stock <= 0} onClick={() => add(h)} aria-label={"เพิ่ม " + h.name}><Icons.Plus size={18}/></button>
+                  </div>
+                );
+              })}
+              {hits.length === 0 && <div className="pn-empty-list">ไม่พบสินค้า</div>}
+            </div>
+            <div className="pn-cart">
+              <div className="pn-cart-head">สินค้าที่เลือก <span className="pn-badge tnum">{cart.length}</span></div>
+              {cart.length === 0 ? (
+                <div className="pn-cart-empty">
+                  <Icons.Cart size={30}/>
+                  <b>ยังไม่ได้เลือกสินค้า</b>
+                  <span>กด + เพื่อเพิ่มสินค้าในรายการ</span>
+                </div>
+              ) : (
+                <div className="pn-cart-list">
+                  {cart.map(x => (
+                    <div key={x.key} className="pn-cart-row">
+                      <span className="pn-cart-name">{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
+                      <button type="button" className="pn-qty" onClick={() => setQty(x.key, x.qty - 1)} aria-label="ลดจำนวน">−</button>
+                      <span className="tnum pn-qty-n">{x.qty}</span>
+                      <button type="button" className="pn-qty" onClick={() => setQty(x.key, x.qty + 1)} aria-label="เพิ่มจำนวน">＋</button>
+                    </div>
+                  ))}
+                  {short.length > 0 && <div style={{ fontSize: 12.5, color: "var(--danger)" }}>สต็อกไม่พอ: {short.join(", ")}</div>}
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* ② shipping */}
+          {!addTo && (
+            <section className="pn-col">
+              <div className="pn-step"><span className="pn-step-n">2</span>ข้อมูลจัดส่ง</div>
+              <div className="pn-hint">แนบใบปะหน้า หรือกรอกที่อยู่ อย่างใดอย่างหนึ่ง</div>
+              <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+              {file ? (
+                <div className="pn-file">
+                  <span className="sd-file-badge" style={file.type === "application/pdf" ? undefined : { background: "var(--info)" }}>{file.type === "application/pdf" ? "PDF" : "IMG"}</span>
+                  <span className="pn-file-name">{file.name}</span>
+                  <button type="button" className="btn btn-sm" onClick={() => inputRef.current && inputRef.current.click()}>เปลี่ยน</button>
+                  <button type="button" className="btn btn-sm btn-ghost" style={{ color: "var(--danger)" }} onClick={() => setFile(null)} aria-label="เอาไฟล์ออก"><Icons.Trash size={14}/></button>
+                </div>
+              ) : (
+                <button type="button" className={"pn-drop" + (over ? " is-over" : "")} onClick={() => inputRef.current && inputRef.current.click()}
+                  onDragOver={e => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)} onDrop={onDrop}>
+                  <Icons.Up size={30}/>
+                  <span className="pn-drop-title">แนบใบปะหน้า</span>
+                  <span className="pn-drop-sub">ถ่ายรูป / รูปภาพ / PDF — ลากมาวางได้</span>
+                  <span className="pn-drop-btn">เลือกไฟล์</span>
+                </button>
+              )}
+              <div className="pn-or"><span>หรือ</span></div>
+              <label className="pn-label" htmlFor="pn-paste">ที่อยู่ผู้รับ</label>
+              <textarea id="pn-paste" className="input pn-textarea" rows={4} value={paste} onChange={e => setPaste(e.target.value)} placeholder="วางชื่อ เบอร์โทร และที่อยู่ผู้รับที่นี่"/>
+              <div className="pn-hint">ระบบจะแยกข้อมูลให้อัตโนมัติ</div>
+              {shipTo && (shipTo.name || shipTo.phone) && (
+                <div className="pn-parsed"><Icons.Check size={14}/> ผู้รับ: <b>{shipTo.name || "—"}</b> {shipTo.phone}</div>
+              )}
+              <div className="pn-label" style={{ marginTop: 6 }}>ช่องทางขาย</div>
+              <div className="pn-chips" role="radiogroup" aria-label="ช่องทางขาย">
+                {(typeof CHANNEL_LIST !== "undefined" ? CHANNEL_LIST : []).map(c => (
+                  <button key={c.id} type="button" role="radio" aria-checked={ch === c.id} className={"pn-chip" + (ch === c.id ? " is-on" : "")} onClick={() => setCh(c.id)}>
+                    {typeof ChannelMark === "function" && <ChannelMark channel={c.id} size={20}/>}
+                    <span>{c.name}</span>
+                    {ch === c.id && <span className="pn-chip-check"><Icons.Check size={11}/></span>}
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+
+        <div className="pn-foot">
+          <div className={"pn-status is-" + status.tone}>
+            <span className="pn-status-icon">{status.tone === "ok" ? <Icons.Check size={16}/> : status.tone === "danger" || status.tone === "warn" ? <Icons.Warn size={16}/> : "i"}</span>
+            <span><b>{status.title}</b><span>{status.sub}</span></span>
+          </div>
+          <button type="button" className="btn pn-btn" onClick={onClose}>ยกเลิก</button>
+          <button type="button" className="btn btn-accent pn-btn" disabled={!canSend} onClick={send}>
+            {busy ? "กำลังส่ง…" : addTo ? "เพิ่มเข้าออร์เดอร์" : "สร้างรายการแพ็ค"}
+          </button>
+        </div>
       </div>
     </>
   );
 }
 function MPackNew({ ctx }) { return <PackNewOrder mobile pushToast={ctx.pushToast} onClose={ctx.back}/>; }
+/* Mobile เพิ่มรายการ (view "pack-add", params.id) — the order is re-read live so a
+   stale route can't add to an order another device already packed. */
+function MPackAdd({ ctx }) {
+  const id = (ctx.route.params && ctx.route.params.id) || "";
+  const all = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+  const order = (all || []).find(o => o.id === id && o.status === "picking") || null;
+  if (!order) {
+    return (
+      <>
+        <div className="m-topbar">
+          <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+          <div className="m-title-sub">เพิ่มรายการ</div>
+        </div>
+        <div className="m-content" style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ออร์เดอร์นี้ไม่ได้อยู่ในคิวแพ็คแล้ว</div>
+      </>
+    );
+  }
+  return <PackNewOrder mobile addTo={order} user={ctx.user} pushToast={ctx.pushToast} onClose={ctx.back}/>;
+}
+
+/* "มีการเพิ่มรายการ" banner — shown on the pick list (phone + desktop) and the
+   queue rows, so a packer who already started never misses the extra lines. */
+function PackAddedBanner({ order, compact }) {
+  const a = (typeof packOrderAdds === "function") ? packOrderAdds(order) : null;
+  if (!a) return null;
+  if (compact) {
+    return <div style={{ display: "inline-block", marginTop: 4, fontSize: 10.5, fontWeight: 700, color: "#fff", background: "var(--info)", borderRadius: 999, padding: "1px 8px" }}>＋ มีการเพิ่มรายการ +{a.pieces} ชิ้น</div>;
+  }
+  return (
+    <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--info-soft)", borderLeft: "4px solid var(--info)", borderRadius: 8, fontSize: 12, lineHeight: 1.55 }}>
+      <div style={{ fontWeight: 700, color: "var(--info)" }}>＋ มีการเพิ่มรายการ +{a.pieces} ชิ้น{a.times > 1 ? ` (${a.times} ครั้ง)` : ""}</div>
+      <div style={{ color: "var(--fg)" }}>{a.names.join(", ")}</div>
+      <div style={{ color: "var(--muted)", fontSize: 11 }}>ล่าสุด {a.when}{a.by ? " · โดย " + a.by : ""}</div>
+    </div>
+  );
+}
 
 /* ── "ส่งให้คนแพ็ค" — shown right after a sale creates an order ──
    The owner asked for the simplest possible path: no hunting for a button on
@@ -1261,7 +1946,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
+  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });

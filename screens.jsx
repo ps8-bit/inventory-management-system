@@ -6761,10 +6761,16 @@ function ProductFinder({ pushToast, goTo, focus }) {
    ═══════════════════════════════════════════════════════════════════ */
 function PackQueue({ pushToast, goTo, user }) {
   const [newOpen, setNewOpen] = useState(false);   // สั่งแพ็คใหม่ — one-page form (pack-docs.jsx)
+  const [addTo, setAddTo] = useState(null);        // เพิ่มรายการ — same form, bound to one queued order
   const [labelCfg, setLabelCfg] = useState(false);  // ⚙ ตั้งค่าใบปะหน้า — shop-wide, all labels
   const [tick, setTick] = useState(0);
   const [open, setOpen] = useState(null);      // expanded order id
   const [sel, setSel] = useState({});
+  const [view, setView] = useState("open");      // "open" = กำลังแพ็ค · "done" = แพ็คเสร็จแล้ว (reopen label tools)
+  const [q, setQ] = useState("");                // search: order id / customer / platform order no.
+  const [page, setPage] = useState(0);           // table pages of PQ_PAGE rows
+  const [openPacked, setOpenPacked] = useState(null);
+  const [plat, setPlat] = useState("");          // platform filter ("" = all)
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6786,6 +6792,12 @@ function PackQueue({ pushToast, goTo, user }) {
       return { o, lines, totals, shelves: shelves.size, rec, notes };
     });
   }, [tick, progress]);
+
+  const packed = useMemo(() => (typeof packedRecent === "function") ? packedRecent(3) : [], [tick]);
+  // Name + order no. off attached labels the queue hasn't read yet.
+  useEffect(() => {
+    if (typeof backfillLabelCodes === "function") backfillLabelCodes(rows.map(r => r.o)).catch(() => {});
+  }, [rows.length]);
 
   // Waves in flight, so the table's "why is this order half-picked" is explainable.
   const waves = useMemo(() => Object.keys(progress)
@@ -6829,6 +6841,20 @@ function PackQueue({ pushToast, goTo, user }) {
     pushToast(`พร้อมส่ง ${ids.length} ออร์เดอร์`);
   };
 
+  // Platform → search → page. Paging resets whenever the filter changes.
+  const PQ_PAGE = 20;
+  const filtered = rows.filter(r => {
+    if (plat && !(typeof packPlatformOf === "function" && packPlatformOf(r.o) === plat)) return false;
+    const lq = q.trim().toLowerCase();
+    if (!lq) return true;
+    return [r.o.id, r.o.customer, r.o.platformOrderNo, r.o.tracking].some(v => String(v || "").toLowerCase().includes(lq));
+  });
+  const pages = Math.max(1, Math.ceil(filtered.length / PQ_PAGE));
+  const pg = Math.min(page, pages - 1);
+  const shown = filtered.slice(pg * PQ_PAGE, pg * PQ_PAGE + PQ_PAGE);
+  useEffect(() => { setPage(0); }, [plat, q]);
+  const initials = (n) => String(n || "").trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
+
   const resetProgress = (id) => {
     if (!confirm("ล้างความคืบหน้าการหยิบของออร์เดอร์นี้?")) return;
     if (typeof clearPackEntry === "function") clearPackEntry(id);
@@ -6836,38 +6862,79 @@ function PackQueue({ pushToast, goTo, user }) {
   };
 
   return (
-    <div className="stack" style={{ gap: 24 }}>
+    <div className="stack pq-page" style={{ gap: 18 }}>
       <div className="page-head">
         <div>
           <h1 className="page-title">แพ็คสินค้า</h1>
-          <div className="page-sub">
-            รอแพ็ค {rows.length} ออร์เดอร์ · {totalPieces} ชิ้น · กำลังแพ็ค {started}
-            {waves.length > 0 ? ` · หยิบรวม ${waves.length} รอบ` : ""}
-          </div>
+          <div className="page-sub">จัดการคิวหยิบและแพ็คสินค้าให้พร้อมจัดส่ง{waves.length > 0 ? ` · หยิบรวม ${waves.length} รอบ` : ""}</div>
         </div>
         <div className="row">
-          {typeof PACK_SORTS !== "undefined" && (
-            <select className="input" value={packSortMode()} onChange={e => setPackSortMode(e.target.value)} title="เรียงออร์เดอร์" style={{ width: "auto", height: 34 }}>
-              {PACK_SORTS.map(x => <option key={x.id} value={x.id}>เรียง: {x.label}</option>)}
-            </select>
-          )}
-          {canDo("sell") && <button className="btn btn-primary" onClick={() => setNewOpen(true)}><Icons.Plus size={14}/> สั่งแพ็คใหม่</button>}
-          {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
-          {typeof PackLabelSettings === "function" && canEditPackLabel() && <button className={"btn" + (labelCfg ? " btn-primary" : "")} onClick={() => setLabelCfg(o => !o)}>⚙ ตั้งค่าใบปะหน้า</button>}
-          <span className="badge badge-neutral" title="การหยิบ ติ๊ก และสแกน ทำบนมือถือ"><Icons.Phone size={12}/> หยิบของบนมือถือ: เพิ่มเติม → แพ็คสินค้า</span>
+          {canDo("sell") && <button className="btn btn-accent pq-btn-lg" onClick={() => setNewOpen(true)}><Icons.Plus size={16}/> สั่งแพ็คใหม่</button>}
+          {canOpenPage("outbound") && <button className="btn pq-btn-lg" onClick={() => goTo("outbound")}><Icons.Truck size={16}/> จัดส่งสินค้า</button>}
         </div>
+      </div>
+
+      <div className="pq-tabbar">
+        <div className="pq-tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={view === "open"} className={"pq-tab" + (view === "open" ? " is-on" : "")} onClick={() => setView("open")}>
+            กำลังแพ็ค <span className="pq-tab-n tnum">{rows.length}</span>
+          </button>
+          <button type="button" role="tab" aria-selected={view === "done"} className={"pq-tab" + (view === "done" ? " is-on" : "")} onClick={() => setView("done")}>
+            แพ็คเสร็จแล้ว <span className="pq-tab-n tnum">{packed.length}</span>
+          </button>
+        </div>
+        {typeof PackLabelSettings === "function" && canEditPackLabel() && (
+          <button className={"btn" + (labelCfg ? " btn-primary" : "")} onClick={() => setLabelCfg(o => !o)}><Icons.Setting size={15}/> ตั้งค่าใบปะหน้า</button>
+        )}
       </div>
       {labelCfg && typeof PackLabelSettings === "function" && <PackLabelSettings pushToast={pushToast} onClose={() => setLabelCfg(false)}/>}
 
-      <div className="grid-3">
-        <SmallStat label="รอแพ็ค"    value={rows.length}  tone="warning" hint="ออร์เดอร์ที่ตัดสต็อกแล้วรอหยิบ"/>
-        <SmallStat label="หยิบครบแล้ว" value={readyCount}   tone="success" hint="พร้อมปิดเป็นพร้อมส่ง"/>
-        <SmallStat label="รวมชิ้นที่ต้องหยิบ" value={totalPieces} tone="info" hint="ทุกออร์เดอร์ในคิว"/>
+      {/* Packed in the last 3 days — the packer may have hit พร้อมส่ง before
+          downloading / copying / printing the label. Reopens PackShipDocs only. */}
+      {view === "done" ? (
+          <div className="card card-tight">
+            <table className="t">
+              <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th style={{ width: 1 }}/></tr></thead>
+              <tbody>
+                {packed.map(o => {
+                  const isOpen = openPacked === o.id;
+                  return (
+                    <React.Fragment key={o.id}>
+                      <tr style={{ cursor: "pointer" }} onClick={() => setOpenPacked(isOpen ? null : o.id)}>
+                        <td className="mono" style={{ fontSize: 12 }}>{o.id}</td>
+                        <td>{o.customer || "—"}</td>
+                        <td style={{ fontSize: 12, color: "var(--muted)" }}>{o.channel || "—"}</td>
+                        <td style={{ fontSize: 12 }}>{new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
+                        <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{o.packedBy || "—"}</td>
+                        <td><button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button></td>
+                      </tr>
+                      {isOpen && (
+                        <tr><td colSpan="6" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                          {typeof PackShipDocs === "function" && <PackShipDocs order={o}
+                            lines={(typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []}
+                            pushToast={pushToast} onCancelled={() => setOpenPacked(null)}/>}
+                        </td></tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+                {packed.length === 0 && <tr><td colSpan="6" style={{ textAlign: "center", padding: 24, color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</td></tr>}
+              </tbody>
+            </table>
+          </div>
+      ) : (<>
+      <div className="pq-kpis">
+        <div className="pq-kpi"><span className="pq-kpi-icon is-accent"><Icons.Box size={22}/></span><span><span className="pq-kpi-label">รอแพ็ค</span><span className="pq-kpi-val tnum">{rows.length}</span><span className="pq-kpi-hint">ออร์เดอร์ในคิว{started ? ` · กำลังหยิบ ${started}` : ""}</span></span></div>
+        <div className="pq-kpi"><span className="pq-kpi-icon is-success"><Icons.Check size={22}/></span><span><span className="pq-kpi-label">หยิบครบแล้ว</span><span className="pq-kpi-val tnum">{readyCount}</span><span className="pq-kpi-hint">พร้อมแพ็คและจัดส่ง</span></span></div>
+        <div className="pq-kpi"><span className="pq-kpi-icon is-info"><Icons.Pkg size={22}/></span><span><span className="pq-kpi-label">รวมชิ้นที่ต้องหยิบ</span><span className="pq-kpi-val tnum">{totalPieces}</span><span className="pq-kpi-hint">ชิ้นจากทุกออร์เดอร์</span></span></div>
       </div>
 
-      <div style={{ padding: "12px 16px", borderRadius: 12, background: "var(--info-soft)", color: "var(--info)", fontSize: 12.5, lineHeight: 1.7 }}>
-        <strong>สต็อกถูกตัดไปแล้วตอนกดตัดสต็อก</strong> — หน้านี้บอกว่าต้องไปหยิบของจากชั้นไหน ไม่ได้ตัดสต็อกซ้ำ
-        การติ๊กทีละชิ้น สแกนบาร์โค้ด และแจ้งของขาด ทำบนมือถือ (แพ็คสินค้า ในเมนูเพิ่มเติม)
+      {typeof PackPlatformBar === "function" && rows.length > 0 && <PackPlatformBar rows={rows} value={plat} onChange={setPlat}/>}
+
+      <div className="pq-info">
+        <span className="pq-info-dot">i</span>
+        <span><strong>ตัดสต็อกแล้ว</strong> · หน้านี้ใช้จัดคิวหยิบสินค้า ไม่ตัดสต็อกซ้ำ</span>
+        <span className="pq-info-right" title="การติ๊กทีละชิ้น สแกนบาร์โค้ด และแจ้งของขาด ทำบนมือถือ"><Icons.Phone size={13}/> หยิบบนมือถือ: เพิ่มเติม → แพ็คสินค้า</span>
       </div>
 
       {selIds.length > 0 && (
@@ -6880,39 +6947,52 @@ function PackQueue({ pushToast, goTo, user }) {
         </div>
       )}
 
-      <div className="card card-tight">
-        <table className="t">
+      <div className="card card-tight pq-table-card">
+        <div className="pq-table-head">
+          <div className="pq-table-title">รายการออร์เดอร์ <span className="pq-tab-n tnum">{filtered.length}</span></div>
+          <div className="row" style={{ gap: 8 }}>
+            <div className="search pq-search">
+              <Icons.Search size={14}/>
+              <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหาเลขออร์เดอร์หรือลูกค้า" aria-label="ค้นหาออร์เดอร์"/>
+              {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+            </div>
+            {typeof PACK_SORTS !== "undefined" && (
+              <select className="input pq-sort" value={packSortMode()} onChange={e => setPackSortMode(e.target.value)} aria-label="เรียงออร์เดอร์">
+                {PACK_SORTS.map(x => <option key={x.id} value={x.id}>{x.label}</option>)}
+              </select>
+            )}
+          </div>
+        </div>
+        <table className="t pq-table">
           <thead><tr>
             <th style={{ width: 24 }}>
-              <span className={"check" + (selIds.length && selIds.length === rows.length ? " on" : "")}
-                onClick={() => setSel(selIds.length === rows.length ? {} : Object.fromEntries(rows.map(r => [r.o.id, true])))}
+              <span className={"check" + (selIds.length && selIds.length === filtered.length ? " on" : "")}
+                onClick={() => setSel(selIds.length === filtered.length ? {} : Object.fromEntries(filtered.map(r => [r.o.id, true])))}
                 title="เลือกทั้งหมด"/>
             </th>
-            <th>เลขที่ออร์เดอร์</th>
-            <th>ลูกค้า</th>
+            <th>ออร์เดอร์ / ลูกค้า</th>
             <th>ช่องทาง</th>
-            <th className="t-num">รายการ</th>
-            <th className="t-num">ชิ้น</th>
-            <th className="t-num">ตำแหน่ง</th>
-            <th style={{ minWidth: 150 }}>ความคืบหน้า</th>
+            <th>สินค้า</th>
+            <th>ตำแหน่ง</th>
+            <th style={{ minWidth: 220 }}>การหยิบ</th>
             <th>ผู้หยิบ</th>
-            <th style={{ width: 1 }}/>
+            <th>จัดการ</th>
           </tr></thead>
           <tbody>
-            {rows.map(r => {
+            {shown.map(r => {
               const isOpen = open === r.o.id;
               const w = waveOf[r.o.id];
               return (
                 <React.Fragment key={r.o.id}>
-                  <tr style={r.totals.complete ? { background: "var(--success-soft)" } : undefined}>
+                  <tr className={r.totals.complete ? "pq-row-done" : undefined}>
                     <td><span className={"check" + (sel[r.o.id] ? " on" : "")} onClick={() => setSel(p => ({ ...p, [r.o.id]: !p[r.o.id] }))}/></td>
-                    <td className="mono" style={{ fontSize: 12, cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
-                      {r.o.id}
-                      {typeof packOrderTime === "function" && packOrderTime(r.o) && <div style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "inherit" }}>{packOrderTime(r.o)}</div>}
-                      {w && <div style={{ fontSize: 10, color: "var(--info)" }}>หยิบรวม · {w.rec.stage === "sort" ? "แยกลงออร์เดอร์" : "เดินหยิบ"}</div>}
-                    </td>
-                    <td style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
-                      {r.o.customer || "—"}
+                    <td style={{ cursor: "pointer", minWidth: 220 }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
+                      <div className="pq-oid mono">{r.o.id}</div>
+                      <div className="pq-cust">{typeof PackOrderWho === "function" ? <PackOrderWho order={r.o}/> : (r.o.customer || "—")}</div>
+                      {typeof packOrderTime === "function" && packOrderTime(r.o) && <div className="pq-time">{packOrderTime(r.o)}</div>}
+                      {typeof PackLateBadge === "function" && <div><PackLateBadge order={r.o} compact/></div>}
+                      {w && <div style={{ fontSize: 11, color: "var(--info)", marginTop: 2 }}>หยิบรวม · {w.rec.stage === "sort" ? "แยกลงออร์เดอร์" : "เดินหยิบ"}</div>}
+                      {typeof PackAddedBanner === "function" && <div><PackAddedBanner order={r.o} compact/></div>}
                       {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
                       {/* Same reminders the label prints: order note + shelf notes. */}
                       {r.notes.length > 0 && (
@@ -6928,38 +7008,51 @@ function PackQueue({ pushToast, goTo, user }) {
                         </div>
                       )}
                     </td>
-                    <td style={{ fontSize: 12, color: "var(--muted)" }}>{r.o.channel || "—"}</td>
-                    <td className="t-num tnum">{r.totals.lineCount}</td>
-                    <td className="t-num tnum" style={{ fontWeight: 500 }}>{r.totals.need}</td>
-                    <td className="t-num tnum" style={{ color: "var(--muted)" }}>{r.shelves}</td>
                     <td>
-                      {r.rec ? (
-                        <div className="row" style={{ gap: 8 }}>
-                          <div className={"prog" + (r.totals.complete ? " success" : "")} style={{ flex: 1, height: 5 }}><span style={{ width: r.totals.pct + "%" }}/></div>
-                          <span className="tnum" style={{ fontSize: 11, color: "var(--muted)", flexShrink: 0 }}>{r.totals.got}/{r.totals.need}</span>
-                        </div>
-                      ) : <span style={{ fontSize: 11.5, color: "var(--muted)" }}>ยังไม่เริ่ม</span>}
+                      {(() => { const pf = typeof packPlatformOf === "function" ? packPlatformOf(r.o) : (r.o.channel || "—");
+                        return <span className="pq-chan">{typeof ChannelMark === "function" && <ChannelMark channel={pf} size={22}/>}{pf}</span>; })()}
+                    </td>
+                    <td className="tnum" style={{ whiteSpace: "nowrap" }}>{r.totals.lineCount} รายการ · {r.totals.need} ชิ้น</td>
+                    <td className="tnum" style={{ whiteSpace: "nowrap", color: "var(--fg-2)" }}>{r.shelves} จุด</td>
+                    <td>
+                      <div className="pq-prog">
+                        <span className={"mp-bar" + (r.totals.complete ? " is-done" : "")} style={{ flex: 1 }}><span style={{ width: (r.totals.pct || 0) + "%" }}/></span>
+                        <span className="tnum pq-prog-n">{r.totals.got}/{r.totals.need}</span>
+                        {r.totals.complete
+                          ? <span className="pq-pill is-done"><Icons.Check size={12}/> หยิบครบแล้ว</span>
+                          : r.rec ? <span className="pq-pill is-going">กำลังหยิบ</span> : <span className="pq-pill">ยังไม่เริ่ม</span>}
+                      </div>
                       {r.totals.shortLines > 0 && (
-                        <div style={{ fontSize: 10.5, color: "var(--warning)", marginTop: 3 }}>
+                        <div style={{ fontSize: 11, color: "var(--warning)", marginTop: 4 }}>
                           <Icons.Warn size={10}/> ของขาด {r.totals.shortLines} รายการ
                         </div>
                       )}
                     </td>
-                    <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{(r.rec && r.rec.by) || "—"}</td>
                     <td>
-                      <div className="row" style={{ gap: 4 }}>
-                        <button className="btn btn-sm" onClick={() => markPacked([r.o.id])} title="ทำเครื่องหมายพร้อมส่ง">
-                          <Icons.Check size={12}/>
+                      {r.rec && r.rec.by
+                        ? <span className="pq-who"><span className="pq-avatar">{initials(r.rec.by)}</span>{r.rec.by}</span>
+                        : <span style={{ color: "var(--muted)" }}>—</span>}
+                    </td>
+                    <td>
+                      <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                        {canDo("sell") && (
+                          <button className="btn btn-sm pq-act-add" onClick={() => setAddTo(r.o)} title="เพิ่มรายการเข้าออร์เดอร์นี้">
+                            <Icons.Plus size={13}/> เพิ่มสินค้า
+                          </button>
+                        )}
+                        <button className="btn btn-sm pq-act-done" onClick={() => markPacked([r.o.id])} title="ทำเครื่องหมายพร้อมส่ง">
+                          <Icons.Check size={13}/> แพ็คเสร็จ
                         </button>
-                        <button className="btn btn-sm btn-ghost" onClick={() => setOpen(isOpen ? null : r.o.id)}>
-                          <Icons.Chev size={13} style={isOpen ? { transform: "rotate(90deg)" } : undefined}/>
+                        <button className="btn btn-sm btn-ghost" aria-label={isOpen ? "ซ่อนรายละเอียด" : "ดูรายละเอียด"} onClick={() => setOpen(isOpen ? null : r.o.id)}>
+                          <Icons.Chev size={14} style={isOpen ? { transform: "rotate(90deg)" } : undefined}/>
                         </button>
                       </div>
                     </td>
                   </tr>
                   {isOpen && (
                     <tr>
-                      <td colSpan="10" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                      <td colSpan="8" className="pq-expand" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                        {typeof PackAddedBanner === "function" && packOrderAdds(r.o) && <div style={{ marginTop: -10, marginBottom: 10, maxWidth: 560 }}><PackAddedBanner order={r.o}/></div>}
                         {r.lines.length === 0 ? (
                           <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
                             ออร์เดอร์นี้ไม่มีรายการที่ระบุ SKU (ออร์เดอร์เก่า หรือฉลากที่พิมพ์ชื่อสินค้าเอง) — หยิบตามฉลากแทน
@@ -6969,6 +7062,7 @@ function PackQueue({ pushToast, goTo, user }) {
                             <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
                               <div className="eyebrow">รายการหยิบ · เรียงตามเส้นทางเดิน</div>
                               <div className="row" style={{ gap: 6 }}>
+                                {canDo("sell") && <button className="btn btn-sm" onClick={() => setAddTo(r.o)}><Icons.Plus size={12}/> เพิ่มรายการ</button>}
                                 {/* Owner-only (RLS enforces it): the per-order work note. */}
                                 {typeof canEditPackLocNotes === "function" && canEditPackLocNotes() && (
                                   <button className="btn btn-sm" onClick={() => editPackOrderNote(r.o.id, (user && user.name) || "")}>
@@ -7008,7 +7102,10 @@ function PackQueue({ pushToast, goTo, user }) {
                                         })()}
                                       </td>
                                       <td className="mono" style={{ fontSize: 11.5 }}>{l.sku}</td>
-                                      <td style={{ fontSize: 12.5 }}>{l.name}</td>
+                                      <td style={{ fontSize: 12.5 }}>
+                                        {l.name}
+                                        {l.addedQty > 0 && <span style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, color: "#fff", background: "var(--info)", borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" }}>＋ เพิ่มใหม่{l.addedQty < l.qty ? " " + l.addedQty + " ชิ้น" : ""}</span>}
+                                      </td>
                                       <td className="t-num tnum" style={{ fontWeight: 600 }}>{l.qty}</td>
                                       <td className="t-num tnum" style={{ color: picked >= l.qty ? "var(--success)" : "var(--muted)" }}>{picked}</td>
                                       <td className="t-num tnum" style={{ color: thin ? "var(--danger)" : "var(--muted)" }}>{l.shelfQty}</td>
@@ -7032,8 +7129,11 @@ function PackQueue({ pushToast, goTo, user }) {
                 </React.Fragment>
               );
             })}
+            {rows.length > 0 && filtered.length === 0 && (
+              <tr><td colSpan="8" style={{ textAlign: "center", padding: 32, color: "var(--muted)", fontSize: 13 }}>ไม่พบออร์เดอร์ที่ตรงกับตัวกรอง</td></tr>
+            )}
             {rows.length === 0 && (
-              <tr><td colSpan="10" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
+              <tr><td colSpan="8" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
                 <Icons.Check size={22} style={{ opacity: 0.5, marginBottom: 8, color: "var(--success)" }}/>
                 <div>ไม่มีออร์เดอร์รอแพ็ค</div>
                 <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
@@ -7043,8 +7143,21 @@ function PackQueue({ pushToast, goTo, user }) {
             )}
           </tbody>
         </table>
+        {filtered.length > 0 && (
+          <div className="pq-foot">
+            <span>แสดง {pg * PQ_PAGE + 1}–{Math.min(filtered.length, pg * PQ_PAGE + PQ_PAGE)} จาก {filtered.length} ออร์เดอร์</span>
+            <div className="row" style={{ gap: 6 }}>
+              <button className="btn btn-sm" disabled={pg === 0} onClick={() => setPage(pg - 1)} aria-label="หน้าก่อน"><Icons.Chev size={13} style={{ transform: "rotate(180deg)" }}/></button>
+              <span className="pq-page-n tnum">{pg + 1}</span>
+              <button className="btn btn-sm" disabled={pg >= pages - 1} onClick={() => setPage(pg + 1)} aria-label="หน้าถัดไป"><Icons.Chev size={13}/></button>
+            </div>
+          </div>
+        )}
       </div>
+      </>)}
+
       {newOpen && typeof PackNewOrder === "function" && <PackNewOrder pushToast={pushToast} onClose={() => setNewOpen(false)}/>}
+      {addTo && typeof PackNewOrder === "function" && <PackNewOrder addTo={addTo} user={user} pushToast={pushToast} onClose={() => setAddTo(null)}/>}
     </div>
   );
 }
