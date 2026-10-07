@@ -1301,7 +1301,9 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
             </div>
             {shipped
               ? <span className="sd-chip-ok"><Icons.Check size={15}/> จัดส่งแล้ว</span>
-              : canAttach && <button type="button" className="sd-btn-sm sd-btn-sm-ok" onClick={markShipped}><Icons.Truck size={15}/> ส่งให้ขนส่งแล้ว</button>}
+              // Same rule as before the redesign: only once the label was read or the
+              // order is packed — never as a shortcut that skips packing.
+              : canAttach && ((codes && typeof codes === "object") || order.status === "packed") && <button type="button" className="sd-btn-sm sd-btn-sm-ok" onClick={markShipped}><Icons.Truck size={15}/> ส่งให้ขนส่งแล้ว</button>}
           </div>
         )}
         <div className="sd-cols">
@@ -1368,7 +1370,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
                   <div className="sd-row-split">
                     {shipped
                       ? <span className="sd-status sd-status-ok"><Icons.Check size={15}/> จัดส่งแล้ว</span>
-                      : canAttach ? <button type="button" className="sd-btn sd-btn-ghost-ok" onClick={markShipped}><Icons.Truck size={17}/> ส่งให้ขนส่งแล้ว</button> : <span/>}
+                      : canAttach && ((codes && typeof codes === "object") || order.status === "packed") ? <button type="button" className="sd-btn sd-btn-ghost-ok" onClick={markShipped}><Icons.Truck size={17}/> ส่งให้ขนส่งแล้ว</button> : <span/>}
                     {canAttach && <button type="button" className="sd-icon-btn sd-danger" aria-label="ลบไฟล์ใบปะหน้า" disabled={busy} onClick={remove}><Icons.Trash size={17}/></button>}
                   </div>
                 ) : null}
