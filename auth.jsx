@@ -229,7 +229,11 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
    login screen and creates their own email + password. Codes live server-side
    (public.invite_codes, service-role only); see manage-users + redeem-invite. */
 function fmtInviteCode(raw) {
-  const s = String(raw || "").toUpperCase().replace(/[^0-9A-Z]/g, "").slice(0, 8);
+  // Staff usually paste the whole LINE message or the link — pull the code out
+  // of it first, or the alnum fallback would turn "PS TACTICAL…" into PSTA-CTIC.
+  const str = String(raw || "");
+  const hit = str.match(/invite=([0-9A-Za-z]{4}-?[0-9A-Za-z]{4})/) || str.match(/\b([0-9A-Za-z]{4}-[0-9A-Za-z]{4})\b/);
+  const s = (hit ? hit[1] : str).toUpperCase().replace(/[^0-9A-Z]/g, "").slice(0, 8);
   return s.length > 4 ? s.slice(0, 4) + "-" + s.slice(4) : s;
 }
 
@@ -250,8 +254,14 @@ function RedeemInviteForm({ onBack }) {
     if (f.password !== f.confirm) { setError("รหัสผ่านทั้งสองช่องไม่ตรงกัน"); return; }
     busyRef.current = true; setBusy(true); setError("");
     const email = f.email.trim().toLowerCase();
-    const { error: err } = await redeemInviteCode({ code: f.code, name: f.name.trim(), email, password: f.password });
-    if (err) { setError(err); busyRef.current = false; setBusy(false); return; }
+    const { error: err, code: errCode } = await redeemInviteCode({ code: f.code, name: f.name.trim(), email, password: f.password });
+    if (err) {
+      // The project's password policy is enforced by GoTrue, so its English
+      // rejection needs the same Thai mapping as the set-password screen.
+      const pw = /weak_password|should contain|should be at least|pwned|leaked|known to be weak|longer than 72/i.test(errCode + " " + err);
+      setError(pw ? passwordUpdateErrorToThai({ code: errCode, message: err }) : err);
+      busyRef.current = false; setBusy(false); return;
+    }
     try { history.replaceState(null, "", window.location.pathname); } catch (x) {}
     // Account exists — sign straight in; authOnChange in Root takes over.
     const { error: sErr } = await authSignIn(email, f.password);
@@ -293,6 +303,7 @@ function InviteCodesPanel({ pushToast }) {
   const [days, setDays] = useStateAuth(7);
   const [note, setNote] = useStateAuth("");
   const [busy, setBusy] = useStateAuth(false);
+  const busyRef = useRefAuth(false);   // a double-tap lands before the disabled re-render
   const toast = (m) => pushToast ? pushToast(m) : window.dispatchEvent(new CustomEvent("ims-toast", { detail: m }));
   const roles = ROLES.filter(r => r.id !== "admin");
   const roleLabel = (id) => (ROLES.find(r => r.id === id) || {}).label || id;
@@ -322,10 +333,10 @@ function InviteCodesPanel({ pushToast }) {
   };
 
   const create = async () => {
-    if (busy) return;
-    setBusy(true);
+    if (busyRef.current) return;
+    busyRef.current = true; setBusy(true);
     const { data, error } = await manageUsers("codeCreate", { role, days, note });
-    setBusy(false);
+    busyRef.current = false; setBusy(false);
     if (error) { toast(error); return; }
     setCodes(cs => [data.code, ...cs]);
     setNote("");

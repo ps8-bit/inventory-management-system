@@ -64,16 +64,22 @@ Deno.serve(async (req) => {
   const release = () => admin.from("invite_codes")
     .update({ used_at: null, used_email: null }).eq("code", code);
 
-  const { data, error } = await admin.auth.admin.createUser({
-    email, password, email_confirm: true,
-    app_metadata: { role },                                   // authoritative claim RLS reads
-    user_metadata: { name, role, avatar: name.slice(0, 2), invite_code: code },
-  });
+  let data: any = null, error: any = null;
+  try {
+    ({ data, error } = await admin.auth.admin.createUser({
+      email, password, email_confirm: true,
+      app_metadata: { role },                                   // authoritative claim RLS reads
+      user_metadata: { name, role, avatar: name.slice(0, 2), invite_code: code },
+    }));
+  } catch (e) {
+    error = { message: (e as Error).message || "สร้างบัญชีไม่สำเร็จ" };   // a throw must not burn the code
+  }
   if (error || !data?.user) {
-    await release();   // give the code back so they can retry with another email
-    const msg = /already|registered|exists/i.test(error?.message || "")
+    await release();   // give the code back so they can retry with another email/password
+    const errCode = String(error?.code || "");
+    const msg = /email_exists|already|registered/i.test(errCode + " " + (error?.message || ""))
       ? "อีเมลนี้มีบัญชีอยู่แล้ว — ใช้ “ลืมรหัสผ่าน?” แทน" : (error?.message || "สร้างบัญชีไม่สำเร็จ");
-    return json({ error: msg }, 400);
+    return json({ error: msg, code: errCode }, 400);
   }
   await admin.from("invite_codes").update({ used_by: data.user.id }).eq("code", code);
   return json({ ok: true, role });

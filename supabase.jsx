@@ -1040,10 +1040,10 @@ async function redeemInviteCode(payload) {
       body: JSON.stringify(payload),
     });
     const json = await res.json().catch(() => ({}));
-    if (!res.ok) return { error: json.error || 'เกิดข้อผิดพลาด' };
+    if (!res.ok) return { error: json.error || 'เกิดข้อผิดพลาด', code: json.code || '' };
     return { data: json };
   } catch (e) {
-    return { error: 'เชื่อมต่อไม่ได้ — ตรวจสอบอินเทอร์เน็ต' };
+    return { error: 'เชื่อมต่อไม่ได้ — ตรวจสอบอินเทอร์เน็ต', code: '' };
   }
 }
 
