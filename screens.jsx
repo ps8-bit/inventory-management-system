@@ -71,11 +71,19 @@ function AskFormDialog({ title, message, fields, okLabel, onDone }) {
             return (
               <div key={f.key} style={{ marginBottom: 14 }}>
                 <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{f.label}</label>
+                {f.type === "textarea" ? (
+                  // Multi-line: Enter is a new line here, so it never submits the form.
+                  <textarea ref={i === 0 ? firstRef : undefined} className="input" rows={f.rows || 4}
+                    value={vals[f.key]} placeholder={f.placeholder || ""}
+                    onChange={e => setVals(v => ({ ...v, [f.key]: e.target.value }))}
+                    style={{ width: "100%", fontSize: 15, padding: "10px 12px", resize: "vertical", lineHeight: 1.5, fontFamily: "inherit" }}/>
+                ) : (
                 <input ref={i === 0 ? firstRef : undefined} className="input" list={listId}
                   type="text" inputMode={f.type === "number" ? "numeric" : undefined}
                   value={vals[f.key]} placeholder={f.placeholder || ""}
                   onChange={e => setVals(v => ({ ...v, [f.key]: f.type === "number" ? e.target.value.replace(/[^\d]/g, "") : e.target.value }))}
                   style={{ width: "100%", fontSize: 15, padding: "10px 12px" }}/>
+                )}
                 {listId && <datalist id={listId}>{opts.map(o => <option key={o} value={o}/>)}</datalist>}
                 {opts.length > 0 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
@@ -6905,8 +6913,8 @@ function PackQueue({ pushToast, goTo, user }) {
                       {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
                       {/* Same reminders the label prints: order note + shelf notes. */}
                       {r.notes.length > 0 && (
-                        <div style={{ marginTop: 4, padding: "3px 8px", borderRadius: 6, background: "var(--warning-soft)", color: "var(--warning)", fontSize: 11, lineHeight: 1.5, maxWidth: 320 }}>
-                          📌 {r.notes.join(" · ")}
+                        <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", borderLeft: "4px solid var(--warning)", color: "var(--fg)", fontSize: 13, fontWeight: 700, lineHeight: 1.5, maxWidth: 340 }}>
+                          <span style={{ whiteSpace: "pre-line" }}>📌 {r.notes.join("\n")}</span>
                         </div>
                       )}
                     </td>
@@ -6974,10 +6982,10 @@ function PackQueue({ pushToast, goTo, user }) {
                                           // Owner-only (RLS enforces it too).
                                           const canEdit = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();
                                           const edit = () => editPackLocNote(l.loc, (user && user.name) || "");
-                                          if (n && !canEdit) return <div style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2 }}>📌 {n.text}</div>;
+                                          if (n && !canEdit) return <div style={{ fontSize: 12.5, color: "var(--fg)", fontWeight: 700, fontFamily: "var(--font-sans, inherit)", marginTop: 4, padding: "4px 8px", background: "var(--warning-soft)", borderLeft: "3px solid var(--warning)", borderRadius: 6, whiteSpace: "pre-line" }}>📌 {n.text}</div>;
                                           if (!canEdit) return null;
                                           return n
-                                            ? <div onClick={edit} title="แก้ไข / ลบโน้ตช่องนี้" style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2, cursor: "pointer" }}>📌 {n.text} <Icons.Edit size={10}/></div>
+                                            ? <div onClick={edit} title="แก้ไข / ลบโน้ตช่องนี้" style={{ fontSize: 12.5, color: "var(--fg)", fontWeight: 700, fontFamily: "var(--font-sans, inherit)", marginTop: 4, padding: "4px 8px", background: "var(--warning-soft)", borderLeft: "3px solid var(--warning)", borderRadius: 6, cursor: "pointer", whiteSpace: "pre-line" }}>📌 {n.text} <Icons.Edit size={11}/></div>
                                             : <button className="btn btn-ghost btn-sm" onClick={edit} style={{ fontSize: 10.5, padding: "0 4px", height: 20, marginTop: 2, fontFamily: "var(--font-sans, inherit)", fontWeight: 400 }}>+ โน้ตช่องนี้</button>;
                                         })()}
                                       </td>

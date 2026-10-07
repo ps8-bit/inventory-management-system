@@ -2837,7 +2837,9 @@ async function setPackLocNote(loc, text, by) {
     return { ok: false };
   }
   const t = String(text || "").trim();
-  const rec = t ? { text: t.slice(0, 300), by: by || "", at: new Date().toISOString() } : null;
+  // Multi-line allowed: normalise line endings, cap blank runs at one empty line.
+  const clean = t.replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").slice(0, 500);
+  const rec = t ? { text: clean, by: by || "", at: new Date().toISOString() } : null;
   const prev = loadPackLocNotes();
   _packNotesMirror({ ...prev, [loc]: rec });
   let res = null;
@@ -2861,7 +2863,7 @@ async function editPackLocNote(loc, by) {
   const note = packLocNote(loc);
   const r = await askForm({
     title: "โน้ตประจำช่อง " + loc,
-    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", required: false }],
+    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น\nกด Enter เพื่อขึ้นบรรทัดใหม่", required: false, type: "textarea", rows: 4 }],
     okLabel: note ? "บันทึก / ลบ" : "บันทึก"
   });
   if (!r) return;
