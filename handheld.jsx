@@ -6995,6 +6995,7 @@ function MPack({ ctx }) {
                 <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(r.o.customer) ? "ลูกค้า " + r.o.customer : (r.o.customer || "—")} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
                 </div>
+                {typeof PackLateBadge === "function" && packLateDays(r.o) > 0 && <div style={{ marginTop: 3 }}><PackLateBadge order={r.o} compact/></div>}
                 {r.o.platformOrderNo && <div className="row" style={{ gap: 5, fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{r.o.platform && <ChannelMark channel={r.o.platform} size={14}/>}<span className="mono">{r.o.platformOrderNo}</span></div>}
                 {waveOf[r.o.id] && <div style={{ fontSize: 10.5, color: "var(--info)", fontWeight: 600, marginTop: 3 }}>กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</div>}
                 {typeof PackAddedBanner === "function" && <PackAddedBanner order={r.o} compact/>}

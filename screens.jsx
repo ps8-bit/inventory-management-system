@@ -6957,6 +6957,7 @@ function PackQueue({ pushToast, goTo, user }) {
                     <td><span className={"check" + (sel[r.o.id] ? " on" : "")} onClick={() => setSel(p => ({ ...p, [r.o.id]: !p[r.o.id] }))}/></td>
                     <td className="mono" style={{ fontSize: 12, cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
                       {r.o.id}
+                      {typeof PackLateBadge === "function" && <div><PackLateBadge order={r.o} compact/></div>}
                       {typeof packOrderTime === "function" && packOrderTime(r.o) && <div style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "inherit" }}>{packOrderTime(r.o)}</div>}
                       {w && <div style={{ fontSize: 10, color: "var(--info)" }}>หยิบรวม · {w.rec.stage === "sort" ? "แยกลงออร์เดอร์" : "เดินหยิบ"}</div>}
                       {typeof PackAddedBanner === "function" && <div style={{ fontFamily: "var(--font-sans, inherit)" }}><PackAddedBanner order={r.o} compact/></div>}

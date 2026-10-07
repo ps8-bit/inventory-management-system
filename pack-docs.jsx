@@ -327,12 +327,31 @@ function _packAge(ms) {
   if (h < 48) return Math.floor(h) + " ชม.";
   return Math.floor(h / 24) + " วัน";
 }
+/* An order still in the pack queue from before today (Bangkok date) is late —
+   it missed its same-day dispatch. Returns days waited (1+) or 0. */
+function packLateDays(o) {
+  const iso = String((o && o.dateIso) || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return 0;
+  const today = new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10);
+  if (iso >= today) return 0;
+  return Math.round((Date.parse(today) - Date.parse(iso)) / 86400000);
+}
+function PackLateBadge({ order, compact }) {
+  const d = packLateDays(order);
+  if (!d) return null;
+  return (
+    <span title="ออร์เดอร์ค้างข้ามวัน — รีบแพ็คส่ง" style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: compact ? "1px 7px" : "2px 8px", borderRadius: 999,
+      background: "var(--danger)", color: "#fff", fontSize: compact ? 10.5 : 11, fontWeight: 700, whiteSpace: "nowrap", fontFamily: "var(--font-sans, inherit)" }}>
+      ⚠ ส่งล่าช้า · ค้าง {d} วัน
+    </span>
+  );
+}
 function packPlatformSummary(rows) {
   const m = new Map();
   (rows || []).forEach(r => {
     const k = packPlatformOf(r.o);
-    const g = m.get(k) || { name: k, orders: 0, pieces: 0, oldest: Infinity };
-    g.orders++; g.pieces += Number((r.totals && r.totals.need) || 0);
+    const g = m.get(k) || { name: k, orders: 0, pieces: 0, oldest: Infinity, late: 0 };
+    g.orders++; if (packLateDays(r.o)) g.late++; g.pieces += Number((r.totals && r.totals.need) || 0);
     const t = _packOrderMs(r.o); if (isFinite(t) && t < g.oldest) g.oldest = t;
     m.set(k, g);
   });
@@ -361,6 +380,7 @@ function PackPlatformBar({ rows, value, onChange, mobile }) {
         </div>
         <div style={{ fontSize: mobile ? 17 : 20, fontWeight: 700 }}>{g.orders} <span style={{ fontSize: 12, fontWeight: 500, color: "var(--muted)" }}>ออร์เดอร์ · {g.pieces} ชิ้น</span></div>
         {isFinite(g.oldest) && <div style={{ fontSize: 11, color: (Date.now() - g.oldest) > 24 * 3600000 ? "var(--danger)" : "var(--muted)" }}>รอนานสุด {_packAge(g.oldest)}</div>}
+        {g.late > 0 && <div style={{ fontSize: 11, fontWeight: 700, color: "var(--danger)" }}>⚠ ส่งล่าช้า {g.late} ออร์เดอร์</div>}
       </>))}
     </div>
   );
@@ -1640,7 +1660,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
+  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });
