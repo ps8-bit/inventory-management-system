@@ -1000,16 +1000,13 @@ function MOutbound({ ctx }) {
         {/* Jump straight to the packer's work list. Wrapped in canOpenPage because
             goTo/Screen refuse a page the role no longer has. */}
         {!selecting && pickingCount > 0 && (typeof canOpenPage !== "function" || canOpenPage("pack")) && (
-          <button className="m-card" onClick={() => ctx.push("pack")}
-            style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left", font: "inherit", cursor: "pointer", border: "1px solid var(--accent)", background: "var(--accent-soft)" }}>
-            <div style={{ width: 38, height: 38, borderRadius: 10, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", flexShrink: 0 }}>
-              <Icons.Box size={18}/>
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600, fontSize: 13.5, color: "var(--accent)" }}>มี {pickingCount} ออร์เดอร์รอแพ็ค</div>
-              <div style={{ fontSize: 11, color: "var(--muted)" }}>เปิดรายการหยิบของตามชั้นวาง</div>
-            </div>
-            <Icons.Chev size={15} style={{ color: "var(--accent)", flexShrink: 0 }}/>
+          <button type="button" className="mo-banner" onClick={() => ctx.push("pack")}>
+            <span className="mo-banner-icon"><Icons.Box size={22}/></span>
+            <span className="mo-banner-main">
+              <span className="mo-banner-title tnum">{pickingCount} ออร์เดอร์รอแพ็ค</span>
+              <span className="mo-banner-sub">เปิดรายการหยิบสินค้าตามชั้นวาง</span>
+            </span>
+            <Icons.Chev size={17} className="mo-banner-chev"/>
           </button>
         )}
         {/* Today's sales by channel — real, and only when there is something to show. */}
@@ -1017,16 +1014,13 @@ function MOutbound({ ctx }) {
           const rows = (typeof channelToday === "function" ? channelToday() : []).filter(c => c.units > 0);
           if (!rows.length) return null;
           return (
-            <div className="m-card">
-              <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 500, marginBottom: 8 }}>ขายวันนี้ตามช่องทาง (ชิ้น)</div>
-              <div style={{ display: "flex", gap: 8, overflowX: "auto", margin: "0 -14px", padding: "0 14px", scrollbarWidth: "none" }}>
+            <div className="mo-panel">
+              <div className="mo-panel-title">ขายวันนี้ตามช่องทาง (ชิ้น)</div>
+              <div className="mo-chan-grid">
                 {rows.map(c => (
-                  <div key={c.id} style={{ flexShrink: 0, padding: "10px 12px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)", minWidth: 96 }}>
-                    <div className="row" style={{ gap: 6, marginBottom: 4 }}>
-                      <ChannelMark channel={c.id} size={14}/>
-                      <span style={{ fontSize: 12, color: "var(--muted)" }}>{c.name}</span>
-                    </div>
-                    <div className="tnum" style={{ fontSize: 20, fontWeight: 600 }}>{c.units}</div>
+                  <div key={c.id} className="mo-chan">
+                    <span className="mo-chan-name"><ChannelMark channel={c.id} size={18}/><span>{c.name}</span></span>
+                    <span className="mo-chan-val tnum">{c.units}</span>
                   </div>
                 ))}
               </div>
@@ -1034,31 +1028,25 @@ function MOutbound({ ctx }) {
           );
         })()}
 
-        <div className="m-search" style={{ marginBottom: 8 }}>
+        <div className="m-search mo-search" style={{ marginBottom: 10 }}>
           <Icons.Search size={14} style={{ color: "var(--muted)" }}/>
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา ออร์เดอร์ หรือชื่อลูกค้า..."/>
-          {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+          {q && <button type="button" className="mo-clear" aria-label="ล้างคำค้นหา" onClick={() => setQ("")}><Icons.X size={15}/></button>}
         </div>
 
-        <div className="m-chips-scroll" style={{ marginBottom: 6 }}>
+        <div className="m-chips-scroll mo-chips" role="tablist" style={{ marginBottom: 10 }}>
           {tabs.map((t, i) => (
-            <button key={t} className={"m-chip" + (tab === i ? " on" : "")} onClick={() => setTab(i)}>{t}</button>
+            <button key={t} role="tab" aria-selected={tab === i} className={"m-chip" + (tab === i ? " on" : "")} onClick={() => setTab(i)}>{t}</button>
           ))}
         </div>
 
         {channels.length > 1 && (
-          <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
-            {channels.map(ch => {
-              const meta = ch !== "all" ? CHANNEL_LIST.find(c => c.name === ch) : null;
-              return (
-                <button key={ch} className={"m-chip" + (chanFilter === ch ? " on" : "")} onClick={() => setChanFilter(ch)}
-                  style={chanFilter === ch && meta ? { background: meta.color, borderColor: meta.color, color: "#fff" } : {}}>
-                  {ch === "all" ? "ทุกช่องทาง" : ch === "ฉลาก" ? "จากฉลาก" : ch}
-                </button>
-              );
-            })}
-          </div>
+          <select className="mo-select" aria-label="กรองตามช่องทาง" value={chanFilter} onChange={e => setChanFilter(e.target.value)} style={{ marginBottom: 12 }}>
+            {channels.map(ch => <option key={ch} value={ch}>{ch === "all" ? "ทุกช่องทาง" : ch === "ฉลาก" ? "จากฉลาก" : ch}</option>)}
+          </select>
         )}
+
+        <div className="mo-list-head">รายการจัดส่ง <span className="tnum">({filtered.length})</span></div>
 
         {selecting && (
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8, padding: "0 4px" }}>
@@ -1079,21 +1067,24 @@ function MOutbound({ ctx }) {
             const isSelected = !!selected[o.id];
             const when = [o.date || o.dateIso || "", o.ts || ""].filter(Boolean).join(" · ");
             return (
-              <button key={o.id} className={"m-row" + (isSelected ? " selected" : "")} onClick={() => selecting ? toggle(o.id) : openLabel(o)}>
+              <button key={o.id} type="button" className={"mo-card" + (isSelected ? " is-sel" : "")} aria-pressed={selecting ? isSelected : undefined} onClick={() => selecting ? toggle(o.id) : openLabel(o)}>
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
-                {chMeta ? <MarkTile m={channelMark(o.channel)} size={36} title={o.channel}/> : <div className="m-row-thumb" style={{ background: "var(--surface-2)", color: "var(--fg-2)", fontSize: 11, fontWeight: 600 }}>{(o.channel || "?").slice(0,2)}</div>}
-                <div className="m-row-main">
+                {chMeta ? <MarkTile m={channelMark(o.channel)} size={44} title={o.channel}/> : <span className="mo-card-thumb">{(o.channel || "?").slice(0,2)}</span>}
+                <span className="mo-card-main">
                   {/* Customer first — a person reads "who", not "LBL-NEW-1781451656731-762". */}
-                  <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ fontSize: 14, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: nm && nm !== "ไม่ระบุชื่อ" ? "var(--fg)" : "var(--muted)" }}>{nm && nm !== "ไม่ระบุชื่อ" ? nm : "ไม่ระบุชื่อผู้รับ"}</span>
+                  <span className="mo-card-top">
+                    <span className={"mo-card-name" + (nm && nm !== "ไม่ระบุชื่อ" ? "" : " is-muted")}>{nm && nm !== "ไม่ระบุชื่อ" ? nm : "ไม่ระบุชื่อผู้รับ"}</span>
                     <span className={"badge " + stCls} style={{ flexShrink: 0 }}><span className="dot"/>{stLab}</span>
-                  </div>
-                  <div className="m-row-sub">
-                    <span className="mono">{typeof orderShortId === "function" ? orderShortId(o) : o.id}</span>
-                    {Number(o.items) > 0 ? ` · ${o.items} ชิ้น` : ""}{o.carrier && <> · <CarrierMark carrier={o.carrier} size={13}/> {o.carrier}</>}{o.tracking ? " · " + o.tracking : ""}
-                  </div>
-                  {when && <div className="m-row-sub" style={{ fontSize: 11, color: "var(--faint)", marginTop: 1 }}>{when}</div>}
-                </div>
+                  </span>
+                  <span className="mo-card-sub">
+                    <span className="mono">{typeof orderShortId === "function" ? orderShortId(o) : o.id}</span>{Number(o.items) > 0 ? ` · ${o.items} ชิ้น` : ""}
+                  </span>
+                  {(o.carrier || o.tracking) && (
+                    <span className="mo-card-sub">{o.carrier && <><CarrierMark carrier={o.carrier} size={16}/> {o.carrier}</>}{o.tracking ? (o.carrier ? " · " : "") + o.tracking : ""}</span>
+                  )}
+                  {when && <span className="mo-card-when">{when}</span>}
+                </span>
+                {!selecting && <Icons.Chev size={16} className="mo-card-chev"/>}
               </button>
             );
           };
@@ -1108,11 +1099,11 @@ function MOutbound({ ctx }) {
               {/* Rendered in pages — drawing all 265 rows at once made the tab slow on phones. */}
               {named.length > 0 && (<>
                 {unnamed.length > 0 && <div className="m-section-label" style={{ padding: "0 4px 6px" }}>มีชื่อผู้รับ ({named.length})</div>}
-                <div className="m-list">{named.slice(0, showN).map(renderRow)}</div>
+                <div className="mo-cards">{named.slice(0, showN).map(renderRow)}</div>
               </>)}
               {unnamed.length > 0 && showN >= named.length && (<>
                 <div className="m-section-label" style={{ padding: "12px 4px 6px" }}>ฉลากไม่ระบุชื่อ ({unnamed.length})</div>
-                <div className="m-list">{unnamed.slice(0, Math.max(0, showN - named.length)).map(renderRow)}</div>
+                <div className="mo-cards">{unnamed.slice(0, Math.max(0, showN - named.length)).map(renderRow)}</div>
               </>)}
               {filtered.length > showN && (
                 <button className="m-btn-big outline" style={{ marginTop: 10 }} onClick={() => setShowN(n => n + 60)}>
@@ -6832,7 +6823,8 @@ function MPack({ ctx }) {
   const [selecting, setSelecting] = useStateM(false);
   const [sel, setSel] = useStateM({});
   const [labelCfg, setLabelCfg] = useStateM(false);   // ⚙ ตั้งค่าใบปะหน้า — shop-wide
-  const [showPacked, setShowPacked] = useStateM(false); // แพ็คเสร็จแล้ว — reopen label/address
+  const [view, setView] = useStateM("open");           // "open" = กำลังแพ็ค · "done" = แพ็คเสร็จแล้ว (reopen label/address)
+  const [showN, setShowN] = useStateM(30);               // long queues render in pages
   const [plat, setPlat] = useStateM("");                // platform filter ("" = all)
 
   useEffectM(() => {
@@ -6890,143 +6882,172 @@ function MPack({ ctx }) {
     ctx.push("pack-wave", { batchId: id });
   };
 
+  const visible = rows.filter(r => !plat || (typeof packPlatformOf === "function" && packPlatformOf(r.o) === plat));
+  const toggleSel = (id) => setSel(prev => { const n = { ...prev }; if (n[id]) delete n[id]; else n[id] = true; return n; });
+
   return (
     <>
       <div className="m-topbar">
-        <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+        <button className="m-back" onClick={ctx.back} aria-label="กลับ"><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub">แพ็คสินค้า</div>
-        <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)} title="หยิบรวมหลายออร์เดอร์">
-          {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
-        </button>
+        {view === "open" && rows.length > 1 && (
+          <button className={"m-action" + (selecting ? " accent" : "")} onClick={() => selecting ? clear() : setSelecting(true)}
+            aria-label={selecting ? "ยกเลิกการเลือก" : "หยิบรวมหลายออร์เดอร์"} title="หยิบรวมหลายออร์เดอร์">
+            {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
+          </button>
+        )}
+        {!selecting && typeof PackLabelSettings === "function" && canEditPackLabel() && (
+          <button className={"m-action" + (labelCfg ? " accent" : "")} onClick={() => setLabelCfg(v => !v)} aria-label="ตั้งค่าใบปะหน้า" title="ตั้งค่าใบปะหน้า (ทุกใบ)">
+            <Icons.Setting size={16}/>
+          </button>
+        )}
       </div>
       <div className="m-content">
-        {canDo("sell") && !selecting && (
-          <button className="m-btn-big" style={{ marginBottom: 12 }} onClick={() => ctx.push("pack-new")}>
-            <Icons.Plus size={18}/> สั่งแพ็คใหม่
-          </button>
-        )}
+        {/* กำลังแพ็ค / แพ็คเสร็จแล้ว */}
         {!selecting && (
-          <button className="btn" style={{ width: "100%", justifyContent: "center", marginBottom: 12 }} onClick={() => setShowPacked(v => !v)}>
-            <Icons.Print size={14}/> {showPacked ? "ซ่อนรายการแพ็คเสร็จ" : `แพ็คเสร็จแล้ว — โหลด/พิมพ์ใบปะหน้าอีกครั้ง (${packed.length})`}
-          </button>
-        )}
-        {!selecting && showPacked && (
-          <div className="m-list" style={{ marginBottom: 12 }}>
-            {packed.map(o => (
-              <button key={o.id} className="m-row" onClick={() => ctx.push("pack-order", { id: o.id })}>
-                <div className="m-row-thumb" style={{ background: "var(--success-soft)", color: "var(--success)" }}><Icons.Check size={16}/></div>
-                <div className="m-row-main">
-                  <div className="m-row-title mono" style={{ fontSize: 13 }}>{o.id}</div>
-                  <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {o.customer || "—"} · แพ็คเสร็จ {new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}{o.packedBy ? " · " + o.packedBy : ""}
-                  </div>
-                </div>
-                <Icons.Chev size={14} className="m-row-chev"/>
-              </button>
-            ))}
-            {packed.length === 0 && <div style={{ padding: 18, textAlign: "center", color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</div>}
+          <div className="mp-tabs" role="tablist">
+            <button type="button" role="tab" aria-selected={view === "open"} className={"mp-tab" + (view === "open" ? " is-on" : "")} onClick={() => setView("open")}>
+              กำลังแพ็ค <span className="mp-tab-n tnum">{rows.length}</span>
+            </button>
+            <button type="button" role="tab" aria-selected={view === "done"} className={"mp-tab" + (view === "done" ? " is-on" : "")} onClick={() => setView("done")}>
+              แพ็คเสร็จแล้ว <span className="mp-tab-n tnum">{packed.length}</span>
+            </button>
           </div>
         )}
 
-        {!selecting && typeof PackLabelSettings === "function" && canEditPackLabel() && (labelCfg
-          ? <PackLabelSettings mobile pushToast={ctx.pushToast} onClose={() => setLabelCfg(false)}/>
-          : <button className="btn" style={{ width: "100%", justifyContent: "center", marginBottom: 12 }} onClick={() => setLabelCfg(true)}>⚙ ตั้งค่าใบปะหน้า (ทุกใบ)</button>)}
-        <div className="m-kpi-row">
-          <div className="m-kpi"><div className="m-kpi-label">รอแพ็ค</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{rows.length}</div></div>
-          <div className="m-kpi"><div className="m-kpi-label">รวมชิ้น</div><div className="m-kpi-value" style={{ fontSize: 18 }}>{totalPieces}</div></div>
-          <div className="m-kpi"><div className="m-kpi-label">กำลังแพ็ค</div><div className="m-kpi-value" style={{ fontSize: 18, color: inProgress ? "var(--info)" : "var(--fg)" }}>{inProgress}</div></div>
-        </div>
+        {labelCfg && !selecting && <PackLabelSettings mobile pushToast={ctx.pushToast} onClose={() => setLabelCfg(false)}/>}
 
-        {waves.length > 0 && !selecting && (
+        {view === "done" && !selecting ? (
           <>
-            <div className="m-section-label" style={{ padding: "8px 4px" }}>หยิบรวมที่ค้างอยู่</div>
-            <div className="m-list" style={{ marginBottom: 12 }}>
-              {waves.map(w => (
-                <button key={w.id} className="m-row" onClick={() => ctx.push("pack-wave", { batchId: w.id })}>
-                  <div className="m-row-thumb" style={{ background: "var(--info-soft)", color: "var(--info)" }}><Icons.Box size={16}/></div>
-                  <div className="m-row-main">
-                    <div className="m-row-title">หยิบรวม {(w.rec.orderIds || []).length} ออร์เดอร์</div>
-                    <div className="m-row-sub">{w.rec.stage === "sort" ? "ขั้นตอน: แยกลงออร์เดอร์" : "ขั้นตอน: เดินหยิบ"}{w.rec.by ? " · " + w.rec.by : ""}</div>
-                  </div>
-                  <Icons.Chev size={14} className="m-row-chev"/>
+            <div className="mp-section-head"><span>แพ็คเสร็จใน 3 วันล่าสุด</span></div>
+            <div className="mp-cards">
+              {packed.map(o => (
+                <button key={o.id} type="button" className="mp-card" onClick={() => ctx.push("pack-order", { id: o.id })}>
+                  <span className="mp-card-top">
+                    <span className="mp-id mono">{o.id}</span>
+                    <span className="mp-status mp-status-ok"><Icons.Check size={13}/> แพ็คเสร็จ</span>
+                  </span>
+                  <span className="mp-cust">{typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(o.customer) ? "ลูกค้า " + o.customer : (o.customer || "—")}</span>
+                  <span className="mp-meta">
+                    {new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}{o.packedBy ? " · " + o.packedBy : ""}
+                  </span>
+                  <span className="mp-hint">แตะเพื่อโหลด / พิมพ์ใบปะหน้าอีกครั้ง</span>
                 </button>
               ))}
+              {packed.length === 0 && <div className="mp-empty">ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</div>}
             </div>
           </>
-        )}
+        ) : (
+          <>
+            {canDo("sell") && !selecting && (
+              <button className="m-btn-big" style={{ marginBottom: 12 }} onClick={() => ctx.push("pack-new")}>
+                <Icons.Plus size={18}/> สั่งแพ็คใหม่
+              </button>
+            )}
 
-        {selecting && (
-          <div style={{ padding: "10px 12px", borderRadius: 10, background: "var(--accent-soft)", color: "var(--accent)", fontSize: 12, marginBottom: 10 }}>
-            เลือกออร์เดอร์ที่จะเดินหยิบรวมรอบเดียว แล้วกดปุ่มด้านล่าง
-          </div>
-        )}
+            <div className="mp-kpis">
+              <div className="mp-kpi"><span className="mp-kpi-label">รอแพ็ค</span><span className="mp-kpi-val tnum">{rows.length}</span></div>
+              <div className="mp-kpi"><span className="mp-kpi-label">รวมชิ้น</span><span className="mp-kpi-val tnum">{totalPieces}</span></div>
+              <div className="mp-kpi"><span className="mp-kpi-label">กำลังหยิบ</span><span className="mp-kpi-val tnum" style={inProgress ? { color: "var(--info)" } : undefined}>{inProgress}</span></div>
+            </div>
 
-        {typeof PackPlatformBar === "function" && rows.length > 0 && <PackPlatformBar rows={rows} value={plat} onChange={setPlat} mobile/>}
+            {waves.length > 0 && !selecting && (
+              <div className="mp-cards" style={{ marginBottom: 12 }}>
+                {waves.map(w => (
+                  <button key={w.id} type="button" className="mp-card mp-card-info" onClick={() => ctx.push("pack-wave", { batchId: w.id })}>
+                    <span className="mp-card-top">
+                      <span className="mp-cust">หยิบรวม {(w.rec.orderIds || []).length} ออร์เดอร์</span>
+                      <Icons.Chev size={15}/>
+                    </span>
+                    <span className="mp-meta">{w.rec.stage === "sort" ? "ขั้นตอน: แยกลงออร์เดอร์" : "ขั้นตอน: เดินหยิบ"}{w.rec.by ? " · " + w.rec.by : ""}</span>
+                  </button>
+                ))}
+              </div>
+            )}
 
-        {rows.length > 1 && typeof PACK_SORTS !== "undefined" && (
-          <div className="m-chips-scroll" style={{ marginBottom: 10 }}>
-            {PACK_SORTS.map(x => (
-              <button key={x.id} className={"m-chip" + (packSortMode() === x.id ? " on" : "")} onClick={() => setPackSortMode(x.id)}>{x.label}</button>
-            ))}
-          </div>
-        )}
+            {selecting && (
+              <div className="mp-note">เลือกออร์เดอร์ที่จะเดินหยิบรวมรอบเดียว แล้วกดปุ่มด้านล่าง</div>
+            )}
 
-        <div className="m-list">
-          {rows.filter(r => !plat || (typeof packPlatformOf === "function" && packPlatformOf(r.o) === plat)).map(r => (
-            <button key={r.o.id} className="m-row" style={selecting && waveOf[r.o.id] ? { opacity: 0.45 } : undefined} onClick={() => {
-              const w = waveOf[r.o.id];
-              if (selecting) {
-                if (w) { ctx.pushToast("ออร์เดอร์นี้อยู่ในรอบหยิบรวมอื่นแล้ว"); return; }
-                setSel(prev => { const n = { ...prev }; if (n[r.o.id]) delete n[r.o.id]; else n[r.o.id] = true; return n; }); return;
-              }
-              if (w) { ctx.push("pack-wave", { batchId: w }); return; }
-              ctx.push("pack-order", { id: r.o.id });
-            }}>
-              {selecting && (
-                <div style={{ width: 22, height: 22, flexShrink: 0, borderRadius: 6, border: "1.5px solid " + (sel[r.o.id] ? "var(--accent)" : "var(--border)"), background: sel[r.o.id] ? "var(--accent)" : "transparent", color: "#fff", display: "grid", placeItems: "center" }}>
-                  {sel[r.o.id] ? <Icons.Check size={13}/> : null}
+            {typeof PackPlatformBar === "function" && rows.length > 0 && !selecting && <PackPlatformBar rows={rows} value={plat} onChange={setPlat} mobile/>}
+
+            <div className="mp-section-head">
+              <span>รายการรอแพ็ค <b className="tnum">{visible.length}</b></span>
+              {rows.length > 1 && typeof PACK_SORTS !== "undefined" && (
+                <select className="mp-sort" aria-label="เรียงออร์เดอร์" value={packSortMode()} onChange={e => setPackSortMode(e.target.value)}>
+                  {PACK_SORTS.map(x => <option key={x.id} value={x.id}>{x.label}</option>)}
+                </select>
+              )}
+            </div>
+
+            <div className="mp-cards">
+              {visible.slice(0, showN).map(r => {
+                const w = waveOf[r.o.id];
+                const t = r.totals || {};
+                const done = !!t.complete && t.need > 0;
+                const pf = typeof packPlatformOf === "function" ? packPlatformOf(r.o) : (r.o.channel || "");
+                const isSel = !!sel[r.o.id];
+                return (
+                  <button key={r.o.id} type="button" className={"mp-card" + (isSel ? " is-sel" : "") + (selecting && w ? " is-dim" : "")} aria-pressed={selecting ? isSel : undefined}
+                    onClick={() => {
+                      if (selecting) { if (w) { ctx.pushToast("ออร์เดอร์นี้อยู่ในรอบหยิบรวมอื่นแล้ว"); return; } toggleSel(r.o.id); return; }
+                      if (w) { ctx.push("pack-wave", { batchId: w }); return; }
+                      ctx.push("pack-order", { id: r.o.id });
+                    }}>
+                    <span className="mp-card-top">
+                      {selecting && <span className={"mp-check" + (isSel ? " on" : "")}>{isSel ? <Icons.Check size={13}/> : null}</span>}
+                      <span className="mp-id mono">{r.o.id}</span>
+                      {typeof packOrderTime === "function" && <span className="mp-time">{packOrderTime(r.o)}</span>}
+                    </span>
+                    <span className="mp-cust">{typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(r.o.customer) ? "ลูกค้า " + r.o.customer : (r.o.customer || "—")}</span>
+                    <span className="mp-meta">
+                      {pf && typeof ChannelMark === "function" && <ChannelMark channel={pf} size={20}/>}
+                      <span className="tnum">{t.lineCount || 0} รายการ · {t.need || 0} ชิ้น · {r.shelves} ตำแหน่ง</span>
+                      {!selecting && <Icons.Chev size={15} className="mp-chev"/>}
+                    </span>
+                    {r.o.platformOrderNo && <span className="mp-orderno mono">{r.o.platform || "คำสั่งซื้อ"} {r.o.platformOrderNo}</span>}
+                    {typeof PackLateBadge === "function" && packLateDays(r.o) > 0 && <span><PackLateBadge order={r.o} compact/></span>}
+                    {w && <span className="mp-wave">กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</span>}
+                    {typeof PackAddedBanner === "function" && <PackAddedBanner order={r.o} compact/>}
+                    {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}
+                    <span className="mp-prog">
+                      <span className={"mp-bar" + (done ? " is-done" : "")}><span style={{ width: (t.pct || 0) + "%" }}/></span>
+                      <span className="mp-prog-row">
+                        <span className={"mp-prog-label" + (done ? " is-done" : "")}>
+                          {done ? <><Icons.Check size={14}/> หยิบครบแล้ว</> : (t.got || 0) > 0 ? "กำลังหยิบ" : "ยังไม่เริ่มหยิบ"}
+                        </span>
+                        <span className="tnum">{t.got || 0}/{t.need || 0}</span>
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+              {visible.length > showN && (
+                <button type="button" className="m-btn-big outline" onClick={() => setShowN(n => n + 30)}>ดูเพิ่ม</button>
+              )}
+              {rows.length > 0 && <div className="mp-count">แสดง {Math.min(showN, visible.length)} จาก {visible.length} ออร์เดอร์</div>}
+              {rows.length === 0 && (
+                <div className="mp-empty">
+                  <Icons.Check size={26} style={{ marginBottom: 8, color: "var(--success)" }}/>
+                  <div>ไม่มีออร์เดอร์รอแพ็ค</div>
+                  <div style={{ fontSize: 13, marginTop: 8, lineHeight: 1.7, textAlign: "left", display: "inline-block" }}>
+                    กดปุ่ม <b>สั่งแพ็คใหม่</b> ด้านบน<br/>
+                    → เลือกสินค้า + แนบใบปะหน้าหรือวางที่อยู่<br/>
+                    → ส่งให้คนแพ็ค
+                  </div>
                 </div>
               )}
-              <div className="m-row-main">
-                <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-                  <div className="m-row-title mono" style={{ fontSize: 13 }}>{r.o.id}</div>
-                  {typeof packOrderTime === "function" && <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>{packOrderTime(r.o)}</span>}
-                </div>
-                <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(r.o.customer) ? "ลูกค้า " + r.o.customer : (r.o.customer || "—")} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
-                </div>
-                {typeof PackLateBadge === "function" && packLateDays(r.o) > 0 && <div style={{ marginTop: 3 }}><PackLateBadge order={r.o} compact/></div>}
-                {r.o.platformOrderNo && <div className="row" style={{ gap: 5, fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{r.o.platform && <ChannelMark channel={r.o.platform} size={14}/>}<span className="mono">{r.o.platformOrderNo}</span></div>}
-                {waveOf[r.o.id] && <div style={{ fontSize: 10.5, color: "var(--info)", fontWeight: 600, marginTop: 3 }}>กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</div>}
-                {typeof PackAddedBanner === "function" && <PackAddedBanner order={r.o} compact/>}
-                {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}
-                {r.started && (
-                  <div className="row" style={{ gap: 6, marginTop: 5 }}>
-                    <div className="prog" style={{ flex: 1, height: 4 }}><span style={{ width: r.totals.pct + "%" }}/></div>
-                    <span className="tnum" style={{ fontSize: 10, color: "var(--muted)", flexShrink: 0 }}>{r.totals.got}/{r.totals.need}</span>
-                  </div>
-                )}
-              </div>
-              {!selecting && <Icons.Chev size={14} className="m-row-chev"/>}
-            </button>
-          ))}
-          {rows.length === 0 && (
-            <div style={{ padding: 28, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-              <Icons.Check size={26} style={{ marginBottom: 8, color: "var(--success)" }}/>
-              <div>ไม่มีออร์เดอร์รอแพ็ค</div>
-              <div style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.7, textAlign: "left", display: "inline-block" }}>
-                กดปุ่ม <b>สั่งแพ็คใหม่</b> ด้านบน<br/>
-                → เลือกสินค้า + แนบใบปะหน้าหรือวางที่อยู่<br/>
-                → ส่งให้คนแพ็ค
-              </div>
+              {rows.length > 0 && visible.length === 0 && <div className="mp-empty">ไม่มีออร์เดอร์ของแพลตฟอร์มนี้</div>}
             </div>
-          )}
-        </div>
 
-        {selecting && selIds.length > 0 && (
-          <button className="m-btn-big dark" style={{ marginTop: 14 }} onClick={startWave}>
-            <Icons.Box size={18}/> เริ่มหยิบรวม {selIds.length} ออร์เดอร์
-          </button>
+            {selecting && selIds.length > 0 && (
+              <div className="mp-sticky">
+                <button className="m-btn-big dark" onClick={startWave}>
+                  <Icons.Box size={18}/> เริ่มหยิบรวม {selIds.length} ออร์เดอร์
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </>
@@ -7250,10 +7271,14 @@ function MPackOrder({ ctx }) {
         <div className="m-section-label" style={{ padding: "18px 4px 0" }}>ใบปะหน้าและที่อยู่</div>
         {typeof PackShipDocs === "function" && <PackShipDocs order={order} lines={lines} pushToast={ctx.pushToast} mobile onCancelled={ctx.back}/>}
 
+        {/* Pinned to the bottom (safe-area aware) so it's always one tap away;
+            .mp-sticky reserves its own height so it never covers the last card. */}
         {lines.length > 0 && !isPacked && (
-          <button className={"m-btn-big " + (totals.complete ? "success" : "outline")} style={{ marginTop: 16 }} onClick={finish}>
-            <Icons.Check size={18}/> {totals.complete ? "แพ็คเสร็จ — พร้อมส่ง" : `แพ็คเสร็จทั้งที่ยังขาด (${totals.remaining} ชิ้น)`}
-          </button>
+          <div className="mp-sticky">
+            <button className={"m-btn-big " + (totals.complete ? "success" : "outline")} onClick={finish}>
+              <Icons.Check size={18}/> {totals.complete ? "แพ็คเสร็จ — พร้อมส่ง" : `แพ็คเสร็จทั้งที่ยังขาด (${totals.remaining} ชิ้น)`}
+            </button>
+          </div>
         )}
       </div>
 

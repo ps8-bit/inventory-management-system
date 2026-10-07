@@ -388,8 +388,41 @@ function PackPlatformBar({ rows, value, onChange, mobile }) {
       </button>
     );
   };
+  // Mobile: a stacked list — one 56px+ row per platform, check mark on the chosen one.
+  if (mobile) {
+    const item = ({ key, name, icon, tint, orders, pieces, oldest, late }) => {
+      const on = key === "" ? !value : value === key;
+      return (
+        <button key={key || "_all"} type="button" className={"pp-item" + (on ? " is-on" : "")} aria-pressed={on}
+          onClick={() => onChange(on || key === "" ? "" : key)} style={{ "--pp-tint": tint }}>
+          {icon}
+          <span className="pp-item-main">
+            <span className="pp-item-name">{name}</span>
+            <span className="pp-item-sub tnum">{orders} ออร์เดอร์ · {pieces} ชิ้น</span>
+          </span>
+          <span className="pp-item-side">
+            {late > 0 && <span className="pp-late">⚠ ล่าช้า {late}</span>}
+            {isFinite(oldest) && <span className="pp-pill"><Clock/> รอนานสุด {_packAge(oldest)}</span>}
+            {on && <span className="pp-check" aria-hidden="true"><Icons.Check size={14}/></span>}
+          </span>
+        </button>
+      );
+    };
+    return (
+      <div className="pp-list" role="group" aria-label="กรองตามแพลตฟอร์ม">
+        {item({ key: "", name: "ทุกแพลตฟอร์ม", icon: <span className="pp-icon pp-icon-all pp-icon-lg"><Icons.Grid size={18}/></span>,
+          tint: "var(--accent)", orders: rows.length, pieces: allPieces, oldest: NaN, late: allLate })}
+        {groups.map(g => {
+          const m = (typeof channelMark === "function") ? channelMark(g.name) : null;
+          return item({ key: g.name, name: g.name,
+            icon: (typeof MarkTile === "function" && m) ? <MarkTile m={m} size={36}/> : <span className="pp-icon pp-icon-lg"/>,
+            tint: (m && m.bg) || "var(--accent)", orders: g.orders, pieces: g.pieces, oldest: g.oldest, late: g.late });
+        })}
+      </div>
+    );
+  }
   return (
-    <div className={"pp-row" + (mobile ? " is-mobile" : "")} role="group" aria-label="กรองตามแพลตฟอร์ม">
+    <div className="pp-row" role="group" aria-label="กรองตามแพลตฟอร์ม">
       {card({ key: "", name: "ทุกแพลตฟอร์ม", icon: <span className="pp-icon pp-icon-all"><Icons.Grid size={15}/></span>,
         tint: "var(--accent)", orders: rows.length, pieces: allPieces, oldest: NaN, late: allLate })}
       {groups.map(g => {
@@ -485,12 +518,13 @@ async function deleteOrderDocs(ids) {
   refreshOrderFileIds().catch(() => {});
 }
 
-function PackAttachments({ orderId, pushToast, card }) {
+function PackAttachments({ orderId, pushToast, card, mobile }) {
   const [list, setList] = useStatePD([]);
   const [state, setState] = useStatePD("loading");   // loading | ok | error
   const [busy, setBusy] = useStatePD("");
   const [rev, setRev] = useStatePD(0);
   const inputRef = useRefPD(null);
+  const camRef = useRefPD(null);     // mobile ถ่ายรูป — opens the camera directly
   const canAdd = canAddOrderAttachment();
 
   useEffectPD(() => {
@@ -524,6 +558,48 @@ function PackAttachments({ orderId, pushToast, card }) {
     setBusy("");
     if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); }
   };
+
+  if (mobile) {
+    return (
+      <section className="sd-card">
+        <div className="sd-head">
+          <span className="sd-head-icon"><Icons.Image size={20}/></span>
+          <span className="sd-title">รูป / ไฟล์แนบ{list.length ? ` (${list.length})` : ""}</span>
+        </div>
+        <div className="sd-hint" style={{ marginTop: -4 }}>แนบภาพสินค้าที่แพ็คแล้ว หรือเอกสารเพิ่มเติม</div>
+        <input ref={inputRef} type="file" multiple accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+        <input ref={camRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={pick}/>
+        {busy && <div className="sd-muted">{busy}</div>}
+        {state === "loading" ? <div className="sd-muted">กำลังโหลด…</div>
+          : state === "error" ? <div className="sd-error">โหลดไฟล์ไม่ได้ <button type="button" className="sd-link" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
+          : !list.length ? <div className="sd-muted">{canAdd ? "ยังไม่มีไฟล์แนบ" : "ไม่มีไฟล์แนบ"}</div>
+          : (
+            <div className="sd-thumbs">
+              {list.map(a => (
+                <div key={a.id} className="sd-thumb">
+                  <button type="button" className="sd-thumb-open" onClick={() => openOrderFile(a)} aria-label={"เปิด " + (a.name || "ไฟล์แนบ")}>
+                    {a.type === "application/pdf"
+                      ? <span className="sd-thumb-pdf"><span className="sd-file-badge">PDF</span><span className="sd-thumb-name">{a.name}</span></span>
+                      : <img src={a.dataUrl} alt={a.name || "ไฟล์แนบ"}/>}
+                  </button>
+                  <div className="sd-thumb-bar">
+                    <span className="sd-thumb-by">{a.createdByName || "—"}</span>
+                    <button type="button" className="sd-thumb-act" aria-label="ดาวน์โหลด" onClick={() => downloadOrderFile(a, "ไฟล์แนบ-" + orderId)}><Icons.Download size={15}/></button>
+                    {canDeleteOrderAttachment(a) && <button type="button" className="sd-thumb-act sd-danger" aria-label="ลบ" disabled={!!busy} onClick={() => remove(a)}><Icons.Trash size={15}/></button>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        {canAdd && (
+          <div className="sd-grid2">
+            <button type="button" className="sd-btn sd-btn-outline" disabled={!!busy} onClick={() => camRef.current && camRef.current.click()}><Icons.Camera size={18}/> ถ่ายรูป</button>
+            <button type="button" className="sd-btn sd-btn-outline" disabled={!!busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={18}/> เพิ่มไฟล์</button>
+          </div>
+        )}
+      </section>
+    );
+  }
 
   return (
     <div {...card} style={{ ...card.style, flexBasis: "100%" }}>
@@ -1195,6 +1271,136 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
 
   const card = mobile ? { className: "m-card", style: { padding: 14, marginTop: 12 } } : { className: "card", style: { padding: 14 } };
   const btn = "btn btn-sm";
+
+  /* Mobile: one column — label file, recipient, attachments — with full-width,
+     44px-tall actions instead of a row of small buttons; cancel sits apart. */
+  if (mobile) {
+    const copyBtn = (text, what) => (
+      <button type="button" className="sd-icon-btn" aria-label={"คัดลอก" + what} onClick={() => copyPackText(text, what, pushToast)}><Icons.Copy size={17}/></button>
+    );
+    return (
+      <div className="sd-stack">
+        {/* ใบปะหน้าที่แนบ */}
+        <section className="sd-card">
+          <div className="sd-head">
+            <span className="sd-head-icon"><Icons.File size={20}/></span>
+            <span className="sd-title">ใบปะหน้าที่แนบ</span>
+          </div>
+          <input ref={inputRef} type="file" accept="image/*,application/pdf" style={{ display: "none" }} onChange={pick}/>
+          {state === "loading" ? <div className="sd-muted">กำลังโหลด…</div>
+            : state === "error" ? <div className="sd-error">โหลดไฟล์ไม่ได้ <button type="button" className="sd-link" onClick={() => setRev(x => x + 1)}>ลองใหม่</button></div>
+            : !file ? (
+              <>
+                <div className="sd-muted">{busy ? "กำลังอัปโหลด…" : "ยังไม่มีไฟล์แนบ"}</div>
+                {!busy && <div className="sd-hint">{canUpload ? "แนบรูปหรือ PDF ใบปะหน้าจากช่องทางขาย" : "ใช้ที่อยู่ด้านล่างแทน"}</div>}
+                {canUpload && <button type="button" className="sd-btn sd-btn-outline" disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Plus size={18}/> แนบใบปะหน้า</button>}
+              </>
+            ) : (
+              <>
+                <div className="sd-file">
+                  {file.type === "application/pdf"
+                    ? <span className="sd-file-badge">PDF</span>
+                    : <img className="sd-file-thumb" src={file.dataUrl} alt="ใบปะหน้า"/>}
+                  <span className="sd-file-name">{file.name || "ใบปะหน้า"}</span>
+                </div>
+                {codes === "reading" && <div className="sd-hint">กำลังอ่านเลขคำสั่งซื้อจากใบปะหน้า…</div>}
+                {codes && typeof codes === "object" && (codes.orderNo || codes.tracking) && (
+                  <div className="sd-codes">
+                    {codes.orderNo && (
+                      <div className="sd-code-row">
+                        <span className="sd-code-label">{codes.platform && typeof ChannelMark === "function" ? <ChannelMark channel={codes.platform} size={18}/> : null}เลขคำสั่งซื้อ</span>
+                        <span className="sd-code-val mono">{codes.orderNo}</span>
+                        {copyBtn(codes.orderNo, "เลขคำสั่งซื้อ")}
+                      </div>
+                    )}
+                    {codes.tracking && (
+                      <div className="sd-code-row">
+                        <span className="sd-code-label"><Icons.Box size={17}/>เลขพัสดุ</span>
+                        <span className="sd-code-val mono">{codes.tracking}</span>
+                        {copyBtn(codes.tracking, "เลขพัสดุ")}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="sd-grid2">
+                  <button type="button" className="sd-btn sd-btn-outline" onClick={() => printOrderFile(file)}><Icons.Print size={17}/> พิมพ์</button>
+                  <button type="button" className="sd-btn sd-btn-outline" onClick={() => openOrderFile(file)}><Icons.Eye size={17}/> เปิดดู</button>
+                  <button type="button" className="sd-btn sd-btn-outline" onClick={() => downloadOrderFile(file, "ใบปะหน้า-" + order.id)}><Icons.Download size={17}/> ดาวน์โหลด</button>
+                  {canUpload && <button type="button" className="sd-btn sd-btn-outline" disabled={busy} onClick={() => inputRef.current && inputRef.current.click()}><Icons.Refresh size={17}/> เปลี่ยนไฟล์</button>}
+                </div>
+                {(shipped || canAttach) ? (
+                  <div className="sd-row-split">
+                    {shipped
+                      ? <span className="sd-status sd-status-ok"><Icons.Check size={15}/> จัดส่งแล้ว</span>
+                      : canAttach ? <button type="button" className="sd-btn sd-btn-ghost-ok" onClick={markShipped}><Icons.Truck size={17}/> ส่งให้ขนส่งแล้ว</button> : <span/>}
+                    {canAttach && <button type="button" className="sd-icon-btn sd-danger" aria-label="ลบไฟล์ใบปะหน้า" disabled={busy} onClick={remove}><Icons.Trash size={17}/></button>}
+                  </div>
+                ) : null}
+              </>
+            )}
+        </section>
+
+        {/* ที่อยู่ผู้รับ */}
+        <section className="sd-card">
+          <div className="sd-head">
+            <span className="sd-head-icon"><Icons.Pin size={20}/></span>
+            <span className="sd-title">ที่อยู่ผู้รับ</span>
+            {canAttach && !edit && <button type="button" className="sd-btn-sm" onClick={startEdit}><Icons.Edit size={15}/> {r.addr ? "แก้ไข" : "เพิ่มที่อยู่"}</button>}
+          </div>
+          {edit ? (
+            <div className="sd-form">
+              <textarea className="sd-input" rows={3} value={edit.paste} onChange={e => setEdit({ ...edit, paste: e.target.value })} placeholder="วางที่อยู่ทั้งก้อนจากแชท/Shopee แล้วกด แยกอัตโนมัติ"/>
+              <button type="button" className="sd-btn sd-btn-outline" disabled={!edit.paste.trim()} onClick={splitPaste}>แยกอัตโนมัติ</button>
+              <input className="sd-input" value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} placeholder="ชื่อผู้รับ"/>
+              <input className="sd-input" value={edit.phone} inputMode="tel" onChange={e => setEdit({ ...edit, phone: e.target.value })} placeholder="เบอร์โทร"/>
+              <textarea className="sd-input" rows={3} value={edit.addr} onChange={e => setEdit({ ...edit, addr: e.target.value })} placeholder="ที่อยู่ ตำบล อำเภอ จังหวัด รหัสไปรษณีย์"/>
+              <div className="sd-grid2">
+                <button type="button" className="sd-btn sd-btn-outline-plain" onClick={() => setEdit(null)}>ยกเลิก</button>
+                <button type="button" className="sd-btn sd-btn-primary" disabled={!edit.name.trim() && !edit.addr.trim()} onClick={saveAddr}>บันทึกที่อยู่</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="sd-field">
+                <span className="sd-name">{r.name || "—"}</span>
+                {r.name && copyBtn(r.name, "ชื่อ")}
+              </div>
+              {r.phone && (
+                <div className="sd-field">
+                  <span className="sd-phone"><Icons.Phone size={17}/><span className="mono">{r.phone}</span></span>
+                  {copyBtn(r.phone, "เบอร์โทร")}
+                </div>
+              )}
+              <div className="sd-field">
+                <span className={"sd-addr" + (r.addr ? "" : " is-empty")}>{r.addr || (canAttach ? "ยังไม่มีที่อยู่ — กด เพิ่มที่อยู่ หรือแนบไฟล์ใบปะหน้า" : "ไม่มีที่อยู่ — ใช้ไฟล์ใบปะหน้าที่แนบ")}</span>
+                {r.addr && copyBtn(r.addr, "ที่อยู่")}
+              </div>
+              {(r.cod > 0 || r.carrier) && <div className="sd-hint">{r.carrier}{r.cod > 0 ? ` · COD ฿${r.cod.toLocaleString()}` : ""}</div>}
+              <button type="button" className="sd-btn sd-btn-outline" disabled={!r.name && !r.addr} onClick={() => copyPackText([r.name, r.phone, r.addr].filter(Boolean).join("\n"), "ที่อยู่ทั้งหมด", pushToast)}>
+                <Icons.Clipboard size={18}/> คัดลอกข้อมูลทั้งหมด
+              </button>
+              <div className="sd-divider"/>
+              <label className="sd-label" htmlFor={"sd-paper-" + order.id}>ขนาดใบปะหน้า</label>
+              <select id={"sd-paper-" + order.id} className="sd-input" value={paper} onChange={e => { setPaper(e.target.value); setPackLabelSize(e.target.value); }}>
+                {PACK_LABEL_SIZES.map(z => <option key={z.id} value={z.id}>{z.label}</option>)}
+              </select>
+              <button type="button" className="sd-btn sd-btn-outline" disabled={!r.addr} onClick={() => printOrderAddress(order, lines, paper)}>
+                <Icons.Print size={18}/> พิมพ์ใบปะหน้า
+              </button>
+            </>
+          )}
+        </section>
+
+        <PackAttachments orderId={order.id} pushToast={pushToast} card={card} mobile/>
+
+        {canCancel && (
+          <button type="button" className="sd-cancel" disabled={busy} onClick={cancel}>
+            <Icons.X size={16}/> ยกเลิกออร์เดอร์และคืนสต็อก
+          </button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: mobile ? "column" : "row", gap: 12, flexWrap: "wrap", marginTop: mobile ? 0 : 12 }}>
