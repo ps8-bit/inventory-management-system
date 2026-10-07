@@ -204,7 +204,7 @@ function Screen({ ctx }) {
   if (!route.view && !mTabAllowed(route.tab, role)) return <MNoAccess ctx={ctx}/>;
   // Selling / issuing stock is a capability, not a page — MSell and MIssue have
   // several entry points, so the guard lives here rather than on each button.
-  if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell" || route.view === "pack-new") && typeof canDo === "function" && !canDo("sell")) {
+  if ((route.view === "sell" || route.view === "issue" || route.view === "quicksell" || route.view === "pack-new" || route.view === "pack-add") && typeof canDo === "function" && !canDo("sell")) {
     return <MNoAccess ctx={ctx}/>;
   }
   if (route.view === "adjust" && typeof canAdjustStock === "function" && !canAdjustStock()) {
@@ -212,7 +212,7 @@ function Screen({ ctx }) {
   }
   // The pack sub-views (one order / one wave) are not nav ids of their own, so the
   // M_GATED_VIEWS loop above can't see them — gate them on the แพ็คสินค้า page.
-  if ((route.view === "pack-order" || route.view === "pack-wave")
+  if ((route.view === "pack-order" || route.view === "pack-wave" || route.view === "pack-add")
       && typeof canOpenPage === "function" && !canOpenPage("pack", role)) {
     return <MNoAccess ctx={ctx}/>;
   }
@@ -226,6 +226,7 @@ function Screen({ ctx }) {
   if (route.view === "sell")      return <MSell ctx={ctx}/>;
   if (route.view === "quicksell") return <MQuickSell ctx={ctx}/>;
   if (route.view === "pack-new" && typeof MPackNew === "function") return <MPackNew ctx={ctx}/>;
+  if (route.view === "pack-add" && typeof MPackAdd === "function") return <MPackAdd ctx={ctx}/>;
   if (route.view === "locations") return <MLocations ctx={ctx}/>;
   if (route.view === "labels")    return <MLabels ctx={ctx}/>;
   if (route.view === "label-view")return <MLabelView ctx={ctx}/>;
@@ -6695,6 +6696,11 @@ function MPackLine({ line, picked, short, onSet, onShort, sub }) {
         <div className="m-row-main" style={{ minWidth: 0 }}>
           <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: tone, textDecoration: full ? "line-through" : "none" }}>{line.name}</div>
           <div className="m-row-sub mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{line.sku}</div>
+          {line.addedQty > 0 && (
+            <span style={{ display: "inline-block", marginTop: 3, fontSize: 10.5, fontWeight: 700, color: "#fff", background: "var(--info)", borderRadius: 999, padding: "1px 8px" }}>
+              ＋ เพิ่มใหม่ {line.addedQty < line.qty ? line.addedQty + " ชิ้น" : ""}
+            </span>
+          )}
         </div>
         <span className="tnum" style={{ fontSize: 15, fontWeight: 700, flexShrink: 0, color: tone }}>{picked}/{line.qty}</span>
       </div>
@@ -6959,6 +6965,7 @@ function MPack({ ctx }) {
                   {r.o.customer || "—"} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
                 </div>
                 {waveOf[r.o.id] && <div style={{ fontSize: 10.5, color: "var(--info)", fontWeight: 600, marginTop: 3 }}>กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</div>}
+                {typeof PackAddedBanner === "function" && <PackAddedBanner order={r.o} compact/>}
                 {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}
                 {r.started && (
                   <div className="row" style={{ gap: 6, marginTop: 5 }}>
@@ -7152,6 +7159,12 @@ function MPackOrder({ ctx }) {
           </div>
           {order.note && <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 11.5 }}>โน้ต: {order.note}</div>}
           <MPackOrderNote orderId={order.id} user={ctx.user}/>
+          {typeof PackAddedBanner === "function" && <PackAddedBanner order={order}/>}
+          {typeof canDo === "function" && canDo("sell") && order.status === "picking" && (
+            <button className="btn" style={{ width: "100%", justifyContent: "center", marginTop: 10 }} onClick={() => ctx.push("pack-add", { id: order.id })}>
+              <Icons.Plus size={14}/> เพิ่มรายการ
+            </button>
+          )}
         </div>
 
         {camOpen && <CameraScanner continuous onScan={onScan} onClose={() => setCamOpen(false)}/>}
@@ -7472,6 +7485,7 @@ function MPackWave({ ctx }) {
                       <div style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {o.customer || "—"} · {oLines.reduce((s, l) => s + l.qty, 0)} ชิ้น
                       </div>
+                      {typeof PackAddedBanner === "function" && <PackAddedBanner order={o} compact/>}
                     </div>
                   </button>
                   {typeof packOrderNote === "function" && (packOrderNote(o.id) || (typeof canEditPackLocNotes === "function" && canEditPackLocNotes())) && (
