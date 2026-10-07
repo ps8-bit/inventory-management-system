@@ -6771,7 +6771,8 @@ function PackQueue({ pushToast, goTo, user }) {
       const totals = (typeof packLineTotals === "function") ? packLineTotals(lines, progress[o.id]) : { need: 0, got: 0, pct: 0, lineCount: 0, lineDone: 0, shortLines: 0, complete: false };
       const shelves = new Set(lines.map(l => l.loc).filter(Boolean));
       const rec = progress[o.id] || null;
-      return { o, lines, totals, shelves: shelves.size, rec };
+      const notes = (typeof packLabelNotes === "function") ? packLabelNotes(o, lines) : [];
+      return { o, lines, totals, shelves: shelves.size, rec, notes };
     });
   }, [tick, progress]);
 
@@ -6902,6 +6903,12 @@ function PackQueue({ pushToast, goTo, user }) {
                     <td style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
                       {r.o.customer || "—"}
                       {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
+                      {/* Same reminders the label prints: order note + shelf notes. */}
+                      {r.notes.length > 0 && (
+                        <div style={{ marginTop: 4, padding: "3px 8px", borderRadius: 6, background: "var(--warning-soft)", color: "var(--warning)", fontSize: 11, lineHeight: 1.5, maxWidth: 320 }}>
+                          📌 {r.notes.join(" · ")}
+                        </div>
+                      )}
                     </td>
                     <td style={{ fontSize: 12, color: "var(--muted)" }}>{r.o.channel || "—"}</td>
                     <td className="t-num tnum">{r.totals.lineCount}</td>
@@ -6962,6 +6969,7 @@ function PackQueue({ pushToast, goTo, user }) {
                                         <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>
                                           {l.parts ? `${l.parts.building}${l.parts.floor ? " · " + l.parts.floor : ""}` : ""}
                                         </div>
+                                        {(() => { const n = (typeof packLocNote === "function") ? packLocNote(l.loc) : null; return n ? <div style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2 }}>📌 {n.text}</div> : null; })()}
                                       </td>
                                       <td className="mono" style={{ fontSize: 11.5 }}>{l.sku}</td>
                                       <td style={{ fontSize: 12.5 }}>{l.name}</td>
