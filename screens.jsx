@@ -6761,10 +6761,13 @@ function ProductFinder({ pushToast, goTo, focus }) {
    ═══════════════════════════════════════════════════════════════════ */
 function PackQueue({ pushToast, goTo, user }) {
   const [newOpen, setNewOpen] = useState(false);   // สั่งแพ็คใหม่ — one-page form (pack-docs.jsx)
+  const [addTo, setAddTo] = useState(null);        // เพิ่มรายการ — same form, bound to one queued order
   const [labelCfg, setLabelCfg] = useState(false);  // ⚙ ตั้งค่าใบปะหน้า — shop-wide, all labels
   const [tick, setTick] = useState(0);
   const [open, setOpen] = useState(null);      // expanded order id
   const [sel, setSel] = useState({});
+  const [showPacked, setShowPacked] = useState(false);  // แพ็คเสร็จแล้ว — reopen label tools
+  const [openPacked, setOpenPacked] = useState(null);
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6786,6 +6789,8 @@ function PackQueue({ pushToast, goTo, user }) {
       return { o, lines, totals, shelves: shelves.size, rec, notes };
     });
   }, [tick, progress]);
+
+  const packed = useMemo(() => (typeof packedRecent === "function") ? packedRecent(3) : [], [tick]);
 
   // Waves in flight, so the table's "why is this order half-picked" is explainable.
   const waves = useMemo(() => Object.keys(progress)
@@ -6852,12 +6857,49 @@ function PackQueue({ pushToast, goTo, user }) {
             </select>
           )}
           {canDo("sell") && <button className="btn btn-primary" onClick={() => setNewOpen(true)}><Icons.Plus size={14}/> สั่งแพ็คใหม่</button>}
+          <button className={"btn" + (showPacked ? " btn-primary" : "")} onClick={() => setShowPacked(v => !v)}><Icons.Print size={14}/> แพ็คเสร็จแล้ว ({packed.length})</button>
           {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
           {typeof PackLabelSettings === "function" && canEditPackLabel() && <button className={"btn" + (labelCfg ? " btn-primary" : "")} onClick={() => setLabelCfg(o => !o)}>⚙ ตั้งค่าใบปะหน้า</button>}
           <span className="badge badge-neutral" title="การหยิบ ติ๊ก และสแกน ทำบนมือถือ"><Icons.Phone size={12}/> หยิบของบนมือถือ: เพิ่มเติม → แพ็คสินค้า</span>
         </div>
       </div>
       {labelCfg && typeof PackLabelSettings === "function" && <PackLabelSettings pushToast={pushToast} onClose={() => setLabelCfg(false)}/>}
+      {/* Packed in the last 3 days — the packer may have hit พร้อมส่ง before
+          downloading / copying / printing the label. Reopens PackShipDocs only. */}
+      <div>
+        {showPacked && (
+          <div className="card card-tight">
+            <table className="t">
+              <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th style={{ width: 1 }}/></tr></thead>
+              <tbody>
+                {packed.map(o => {
+                  const isOpen = openPacked === o.id;
+                  return (
+                    <React.Fragment key={o.id}>
+                      <tr style={{ cursor: "pointer" }} onClick={() => setOpenPacked(isOpen ? null : o.id)}>
+                        <td className="mono" style={{ fontSize: 12 }}>{o.id}</td>
+                        <td>{o.customer || "—"}</td>
+                        <td style={{ fontSize: 12, color: "var(--muted)" }}>{o.channel || "—"}</td>
+                        <td style={{ fontSize: 12 }}>{new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
+                        <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{o.packedBy || "—"}</td>
+                        <td><button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button></td>
+                      </tr>
+                      {isOpen && (
+                        <tr><td colSpan="6" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                          {typeof PackShipDocs === "function" && <PackShipDocs order={o}
+                            lines={(typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []}
+                            pushToast={pushToast} onCancelled={() => setOpenPacked(null)}/>}
+                        </td></tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+                {packed.length === 0 && <tr><td colSpan="6" style={{ textAlign: "center", padding: 24, color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       <div className="grid-3">
         <SmallStat label="รอแพ็ค"    value={rows.length}  tone="warning" hint="ออร์เดอร์ที่ตัดสต็อกแล้วรอหยิบ"/>
@@ -6910,6 +6952,7 @@ function PackQueue({ pushToast, goTo, user }) {
                       {r.o.id}
                       {typeof packOrderTime === "function" && packOrderTime(r.o) && <div style={{ fontSize: 10.5, color: "var(--muted)", fontFamily: "inherit" }}>{packOrderTime(r.o)}</div>}
                       {w && <div style={{ fontSize: 10, color: "var(--info)" }}>หยิบรวม · {w.rec.stage === "sort" ? "แยกลงออร์เดอร์" : "เดินหยิบ"}</div>}
+                      {typeof PackAddedBanner === "function" && <div style={{ fontFamily: "var(--font-sans, inherit)" }}><PackAddedBanner order={r.o} compact/></div>}
                     </td>
                     <td style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
                       {r.o.customer || "—"}
@@ -6948,6 +6991,11 @@ function PackQueue({ pushToast, goTo, user }) {
                     <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{(r.rec && r.rec.by) || "—"}</td>
                     <td>
                       <div className="row" style={{ gap: 4 }}>
+                        {canDo("sell") && (
+                          <button className="btn btn-sm" onClick={() => setAddTo(r.o)} title="เพิ่มรายการเข้าออร์เดอร์นี้" style={{ whiteSpace: "nowrap", color: "var(--accent)", borderColor: "var(--accent)" }}>
+                            <Icons.Plus size={12}/> เพิ่มสินค้า
+                          </button>
+                        )}
                         <button className="btn btn-sm" onClick={() => markPacked([r.o.id])} title="ทำเครื่องหมายพร้อมส่ง">
                           <Icons.Check size={12}/>
                         </button>
@@ -6960,6 +7008,7 @@ function PackQueue({ pushToast, goTo, user }) {
                   {isOpen && (
                     <tr>
                       <td colSpan="10" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                        {typeof PackAddedBanner === "function" && packOrderAdds(r.o) && <div style={{ marginTop: -10, marginBottom: 10, maxWidth: 560 }}><PackAddedBanner order={r.o}/></div>}
                         {r.lines.length === 0 ? (
                           <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
                             ออร์เดอร์นี้ไม่มีรายการที่ระบุ SKU (ออร์เดอร์เก่า หรือฉลากที่พิมพ์ชื่อสินค้าเอง) — หยิบตามฉลากแทน
@@ -6969,6 +7018,7 @@ function PackQueue({ pushToast, goTo, user }) {
                             <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
                               <div className="eyebrow">รายการหยิบ · เรียงตามเส้นทางเดิน</div>
                               <div className="row" style={{ gap: 6 }}>
+                                {canDo("sell") && <button className="btn btn-sm" onClick={() => setAddTo(r.o)}><Icons.Plus size={12}/> เพิ่มรายการ</button>}
                                 {/* Owner-only (RLS enforces it): the per-order work note. */}
                                 {typeof canEditPackLocNotes === "function" && canEditPackLocNotes() && (
                                   <button className="btn btn-sm" onClick={() => editPackOrderNote(r.o.id, (user && user.name) || "")}>
@@ -7008,7 +7058,10 @@ function PackQueue({ pushToast, goTo, user }) {
                                         })()}
                                       </td>
                                       <td className="mono" style={{ fontSize: 11.5 }}>{l.sku}</td>
-                                      <td style={{ fontSize: 12.5 }}>{l.name}</td>
+                                      <td style={{ fontSize: 12.5 }}>
+                                        {l.name}
+                                        {l.addedQty > 0 && <span style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, color: "#fff", background: "var(--info)", borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" }}>＋ เพิ่มใหม่{l.addedQty < l.qty ? " " + l.addedQty + " ชิ้น" : ""}</span>}
+                                      </td>
                                       <td className="t-num tnum" style={{ fontWeight: 600 }}>{l.qty}</td>
                                       <td className="t-num tnum" style={{ color: picked >= l.qty ? "var(--success)" : "var(--muted)" }}>{picked}</td>
                                       <td className="t-num tnum" style={{ color: thin ? "var(--danger)" : "var(--muted)" }}>{l.shelfQty}</td>
@@ -7044,7 +7097,9 @@ function PackQueue({ pushToast, goTo, user }) {
           </tbody>
         </table>
       </div>
+
       {newOpen && typeof PackNewOrder === "function" && <PackNewOrder pushToast={pushToast} onClose={() => setNewOpen(false)}/>}
+      {addTo && typeof PackNewOrder === "function" && <PackNewOrder addTo={addTo} user={user} pushToast={pushToast} onClose={() => setAddTo(null)}/>}
     </div>
   );
 }
