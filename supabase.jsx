@@ -895,6 +895,14 @@ function refreshLiveData() {
   // The activity feeds (กิจกรรมล่าสุด, ประวัติการแก้ไข) read this cache too — a
   // receive made on the phone while this screen slept never appeared here.
   _rtSoon('audit', _rtReloadAudit);
+  // Pack progress + shelf notes (app_state) — a missed push left another
+  // device's notes/ticks invisible until a full reload.
+  _rtSoon('pack', async () => {
+    const [v, n] = await Promise.all([dbLoadState('pack_progress'), dbLoadState('pack_loc_notes')]);
+    if (v != null) window._DB_PACK_PROGRESS = v;
+    if (n != null) window._DB_PACK_LOC_NOTES = n;
+    if (v != null || n != null) window.dispatchEvent(new CustomEvent('ims-pack-change'));
+  });
 }
 let _liveFocusHooked = false;
 function _hookLiveFocusRefresh() {
@@ -911,9 +919,11 @@ function setupRealtimeSync() {
   _hookLiveFocusRefresh();
   let wasSubscribed = false;
   sb.channel('ims-sync')
-    // Not published (see above); kept so it works if products is ever added
-    // behind a cost-safe mechanism. Coalesced either way.
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => _rtStockMoved())
+    // NO `products` listener: that table is deliberately not in the realtime
+    // publication (cost), and a binding to an unpublished table makes the server
+    // silently deliver NOTHING on the whole channel — status still "SUBSCRIBED".
+    // That killed every live update app-wide until 2026-10-07. Stock changes
+    // arrive through stock_adjustments below. Only bind PUBLISHED tables here.
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'stock_adjustments' }, () => { _rtStockMoved(); window.dispatchEvent(new CustomEvent('ims-ledger-change')); })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => _rtSoon('orders', _rtReloadOrders))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'bundles' }, async () => {
@@ -976,6 +986,7 @@ function setupRealtimeSync() {
                     woo_catalog: ['_DB_WOO_CATALOG', 'ims-woo-catalog-change'],
                     role_perms: ['_DB_ROLE_PERMS', 'ims-perms-change'],
                     pack_progress: ['_DB_PACK_PROGRESS', 'ims-pack-change'],
+                    pack_loc_notes: ['_DB_PACK_LOC_NOTES', 'ims-pack-change'],
                     order_overrides: ['_DB_ORDER_OVERRIDES', 'ims-orders-change'] };
       const keys = key && map[key] ? [key] : Object.keys(map).filter(k => map[k]);
       for (const k of keys) {
@@ -1121,7 +1132,7 @@ async function lineBotPreview(command) {
    ═══════════════════════════════════════════ */
 async function dbInit() {
   try {
-    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms, productLocs, packProgress] = await Promise.all([
+    const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms, productLocs, packProgress, packLocNotes] = await Promise.all([
       dbLoadProducts(),
       dbLoadOrders(),
       dbLoadBundles(),
@@ -1135,7 +1146,8 @@ async function dbInit() {
       dbLoadState('woo_catalog'),
       dbLoadState('role_perms'),
       dbLoadProductLocs(),
-      dbLoadState('pack_progress')
+      dbLoadState('pack_progress'),
+      dbLoadState('pack_loc_notes')
     ]);
 
     /* Hydrate global PRODUCTS array (mutated in-place so existing
@@ -1182,6 +1194,13 @@ async function dbInit() {
     if (packProgress && typeof packProgress === 'object') {
       window._DB_PACK_PROGRESS = packProgress;
       try { localStorage.setItem('ims_pack_v1', JSON.stringify(packProgress)); } catch (e) {}
+      window.dispatchEvent(new CustomEvent('ims-pack-change'));
+    }
+    // Owner-only shelf notes (see pack-loc-notes-owner-only.sql). Mirrored so an
+    // offline relaunch still shows them on the pick walk.
+    if (packLocNotes && typeof packLocNotes === 'object') {
+      window._DB_PACK_LOC_NOTES = packLocNotes;
+      try { localStorage.setItem('ims_pack_loc_notes', JSON.stringify(packLocNotes)); } catch (e) {}
       window.dispatchEvent(new CustomEvent('ims-pack-change'));
     }
     if (orderOverrides && typeof orderOverrides === 'object') window._DB_ORDER_OVERRIDES = orderOverrides;

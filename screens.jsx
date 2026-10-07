@@ -6971,7 +6971,11 @@ function PackQueue({ pushToast, goTo, user }) {
                                         </div>
                                         {l.loc && l.loc !== "-" && typeof packLocNote === "function" && (() => {
                                           const n = packLocNote(l.loc);
+                                          // Owner-only (RLS enforces it too).
+                                          const canEdit = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();
                                           const edit = () => editPackLocNote(l.loc, (user && user.name) || "");
+                                          if (n && !canEdit) return <div style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2 }}>📌 {n.text}</div>;
+                                          if (!canEdit) return null;
                                           return n
                                             ? <div onClick={edit} title="แก้ไข / ลบโน้ตช่องนี้" style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2, cursor: "pointer" }}>📌 {n.text} <Icons.Edit size={10}/></div>
                                             : <button className="btn btn-ghost btn-sm" onClick={edit} style={{ fontSize: 10.5, padding: "0 4px", height: 20, marginTop: 2, fontFamily: "var(--font-sans, inherit)", fontWeight: 400 }}>+ โน้ตช่องนี้</button>;
