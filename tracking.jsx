@@ -890,7 +890,7 @@ function OrderPackDetails({ order, mobile }) {
             <div key={l.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderTop: i ? "1px solid var(--border)" : "none" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name}</div>
-                <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{l.sku}{l.loc ? ` · ${l.loc}` : ""}</div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{l.sku}{l.loc && !/^[-—–\s]*$/.test(l.loc) ? ` · ${l.loc}` : " · ยังไม่ระบุช่อง"}</div>
               </div>
               <div className="mono" style={{ fontSize: 14, fontWeight: 700 }}>×{l.qty}</div>
             </div>
