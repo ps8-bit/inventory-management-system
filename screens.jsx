@@ -6771,6 +6771,7 @@ function PackQueue({ pushToast, goTo, user }) {
   const [page, setPage] = useState(0);           // table pages of PQ_PAGE rows
   const [openPacked, setOpenPacked] = useState(null);
   const [plat, setPlat] = useState("");          // platform filter ("" = all)
+  const [stage, setStage] = useState("");        // KPI filter: "" | "ready" | "todo"
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6845,6 +6846,8 @@ function PackQueue({ pushToast, goTo, user }) {
   const PQ_PAGE = 20;
   const filtered = rows.filter(r => {
     if (plat && !(typeof packPlatformOf === "function" && packPlatformOf(r.o) === plat)) return false;
+    if (stage === "ready" && !r.totals.complete) return false;
+    if (stage === "todo" && r.totals.complete) return false;
     const lq = q.trim().toLowerCase();
     if (!lq) return true;
     return [r.o.id, r.o.customer, r.o.platformOrderNo, r.o.tracking].some(v => String(v || "").toLowerCase().includes(lq));
@@ -6852,7 +6855,7 @@ function PackQueue({ pushToast, goTo, user }) {
   const pages = Math.max(1, Math.ceil(filtered.length / PQ_PAGE));
   const pg = Math.min(page, pages - 1);
   const shown = filtered.slice(pg * PQ_PAGE, pg * PQ_PAGE + PQ_PAGE);
-  useEffect(() => { setPage(0); }, [plat, q]);
+  useEffect(() => { setPage(0); }, [plat, q, stage]);
   const initials = (n) => String(n || "").trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 
   const resetProgress = (id) => {
@@ -6924,9 +6927,9 @@ function PackQueue({ pushToast, goTo, user }) {
           </div>
       ) : (<>
       <div className="pq-kpis">
-        <div className="pq-kpi"><span className="pq-kpi-icon is-accent"><Icons.Box size={22}/></span><span><span className="pq-kpi-label">รอแพ็ค</span><span className="pq-kpi-val tnum">{rows.length}</span><span className="pq-kpi-hint">ออร์เดอร์ในคิว{started ? ` · กำลังหยิบ ${started}` : ""}</span></span></div>
-        <div className="pq-kpi"><span className="pq-kpi-icon is-success"><Icons.Check size={22}/></span><span><span className="pq-kpi-label">หยิบครบแล้ว</span><span className="pq-kpi-val tnum">{readyCount}</span><span className="pq-kpi-hint">พร้อมแพ็คและจัดส่ง</span></span></div>
-        <div className="pq-kpi"><span className="pq-kpi-icon is-info"><Icons.Pkg size={22}/></span><span><span className="pq-kpi-label">รวมชิ้นที่ต้องหยิบ</span><span className="pq-kpi-val tnum">{totalPieces}</span><span className="pq-kpi-hint">ชิ้นจากทุกออร์เดอร์</span></span></div>
+        <button type="button" className={"pq-kpi" + (stage === "" ? " is-on" : "")} aria-pressed={stage === ""} onClick={() => setStage("")}><span className="pq-kpi-icon is-accent"><Icons.Box size={22}/></span><span><span className="pq-kpi-label">รอแพ็ค</span><span className="pq-kpi-val tnum">{rows.length}</span><span className="pq-kpi-hint">ออร์เดอร์ในคิว{started ? ` · กำลังหยิบ ${started}` : ""}</span></span></button>
+        <button type="button" className={"pq-kpi" + (stage === "ready" ? " is-on" : "")} aria-pressed={stage === "ready"} onClick={() => setStage(stage === "ready" ? "" : "ready")}><span className="pq-kpi-icon is-success"><Icons.Check size={22}/></span><span><span className="pq-kpi-label">หยิบครบแล้ว</span><span className="pq-kpi-val tnum">{readyCount}</span><span className="pq-kpi-hint">พร้อมแพ็คและจัดส่ง</span></span></button>
+        <button type="button" className={"pq-kpi" + (stage === "todo" ? " is-on" : "")} aria-pressed={stage === "todo"} onClick={() => setStage(stage === "todo" ? "" : "todo")}><span className="pq-kpi-icon is-info"><Icons.Pkg size={22}/></span><span><span className="pq-kpi-label">รวมชิ้นที่ต้องหยิบ</span><span className="pq-kpi-val tnum">{totalPieces}</span><span className="pq-kpi-hint">ชิ้นจากทุกออร์เดอร์</span></span></button>
       </div>
 
       {typeof PackPlatformBar === "function" && rows.length > 0 && <PackPlatformBar rows={rows} value={plat} onChange={setPlat}/>}

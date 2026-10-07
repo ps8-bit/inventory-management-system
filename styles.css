@@ -2366,6 +2366,9 @@ html[data-mobile="1"] .m-content .m-row {
 .pq-tabbar .btn { margin-bottom: 4px; }
 .pq-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .pq-kpi { display: flex; align-items: center; gap: 14px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--elev-1, none); min-width: 0; }
+button.pq-kpi { font: inherit; color: inherit; text-align: left; cursor: pointer; width: 100%; transition: border-color .15s, box-shadow .15s, transform .15s; }
+button.pq-kpi:hover { border-color: var(--accent); transform: translateY(-1px); }
+button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 30%, transparent); }
 .pq-kpi > span:last-child { display: flex; flex-direction: column; min-width: 0; }
 .pq-kpi-icon { width: 48px; height: 48px; border-radius: 999px; display: grid; place-items: center; flex-shrink: 0; }
 .pq-kpi-icon.is-accent { background: var(--accent-soft); color: var(--accent); }
