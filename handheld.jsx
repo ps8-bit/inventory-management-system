@@ -6833,6 +6833,7 @@ function MPack({ ctx }) {
   const [sel, setSel] = useStateM({});
   const [labelCfg, setLabelCfg] = useStateM(false);   // ⚙ ตั้งค่าใบปะหน้า — shop-wide
   const [showPacked, setShowPacked] = useStateM(false); // แพ็คเสร็จแล้ว — reopen label/address
+  const [plat, setPlat] = useStateM("");                // platform filter ("" = all)
 
   useEffectM(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6864,6 +6865,9 @@ function MPack({ ctx }) {
     return m;
   }, [waves]);
 
+  useEffectM(() => {
+    if (typeof backfillLabelCodes === "function") backfillLabelCodes(orders).catch(() => {});
+  }, [orders.length]);
   const rows = useMemoM(() => orders.map(o => {
     const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
     const totals = (typeof packLineTotals === "function") ? packLineTotals(lines, progress[o.id]) : { pct: 0, need: 0, lineCount: 0 };
@@ -6957,6 +6961,8 @@ function MPack({ ctx }) {
           </div>
         )}
 
+        {typeof PackPlatformBar === "function" && rows.length > 0 && <PackPlatformBar rows={rows} value={plat} onChange={setPlat} mobile/>}
+
         {rows.length > 1 && typeof PACK_SORTS !== "undefined" && (
           <div className="m-chips-scroll" style={{ marginBottom: 10 }}>
             {PACK_SORTS.map(x => (
@@ -6966,7 +6972,7 @@ function MPack({ ctx }) {
         )}
 
         <div className="m-list">
-          {rows.map(r => (
+          {rows.filter(r => !plat || (typeof packPlatformOf === "function" && packPlatformOf(r.o) === plat)).map(r => (
             <button key={r.o.id} className="m-row" style={selecting && waveOf[r.o.id] ? { opacity: 0.45 } : undefined} onClick={() => {
               const w = waveOf[r.o.id];
               if (selecting) {
@@ -6987,8 +6993,9 @@ function MPack({ ctx }) {
                   {typeof packOrderTime === "function" && <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>{packOrderTime(r.o)}</span>}
                 </div>
                 <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {r.o.customer || "—"} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
+                  {typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(r.o.customer) ? "ลูกค้า " + r.o.customer : (r.o.customer || "—")} · {r.totals.lineCount} รายการ · {r.totals.need} ชิ้น · {r.shelves} ตำแหน่ง
                 </div>
+                {r.o.platformOrderNo && <div className="row" style={{ gap: 5, fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{r.o.platform && <ChannelMark channel={r.o.platform} size={14}/>}<span className="mono">{r.o.platformOrderNo}</span></div>}
                 {waveOf[r.o.id] && <div style={{ fontSize: 10.5, color: "var(--info)", fontWeight: 600, marginTop: 3 }}>กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</div>}
                 {typeof PackAddedBanner === "function" && <PackAddedBanner order={r.o} compact/>}
                 {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}

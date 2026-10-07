@@ -171,8 +171,21 @@ async function _pdfText(dataUrl) {
   const doc = await lib.getDocument({ data: arr, isEvalSupported: false }).promise;
   let out = "";
   for (let n = 1; n <= Math.min(doc.numPages, 2); n++) {
+    // Rebuild lines from positions: Thai comes back glyph-by-glyph, so items on
+    // one baseline are glued, with a space only where there is a visible gap.
     const tc = await (await doc.getPage(n)).getTextContent();
-    out += tc.items.map(i => i.str + (i.hasEOL ? "\n" : " ")).join("") + "\n";
+    let lastY = null, lastEnd = null;
+    for (const it of tc.items) {
+      if (!it.str || !it.str.trim()) continue;   // pdf.js adds its own zero-width " " items
+      // A lone Thai vowel/tone mark has no width — glue it, keep the base glyph's end.
+      if (lastY !== null && /^[ัิ-ฺ็-๎-]+$/.test(it.str)) { out += it.str; continue; }
+      const x = it.transform[4], y = it.transform[5], size = Math.abs(it.transform[3]) || 8;
+      if (lastY === null || Math.abs(y - lastY) > size * 0.5) out += (lastY === null ? "" : "\n");
+      else if (x - lastEnd > size * 0.25) out += " ";
+      out += it.str;
+      lastY = y; lastEnd = x + (it.width || 0);
+    }
+    out += "\n";
   }
   doc.destroy();
   return out;
@@ -207,8 +220,28 @@ async function _imageCodes(dataUrl) {
 }
 const LABEL_TRACK_RE = /\b(TH[0-9A-Z]{10,16}|SPX[0-9A-Z]{8,}|[A-Z]{2}\d{9}TH|JNT[0-9A-Z]{8,}|LEX[0-9A-Z]{8,}|KER[0-9A-Z]{8,}|\d{12,15})\b/;
 const SHOPEE_ORDER_RE = /\b(\d{6}[0-9A-Z]{8})\b/;
-/* Classify raw text/codes → { orderNo, tracking, platform } (any may be ""). */
+/* Mac-made PDFs store Thai tone marks as private-use glyphs (U+F70A…) — map them
+   back so a name reads "ผู้รับ", not "ผูรับ". */
+const THAI_PUA = { "\uF70A": "\u0E48", "\uF70B": "\u0E49", "\uF70C": "\u0E4A", "\uF70D": "\u0E4B", "\uF70E": "\u0E4C",
+  "\uF705": "\u0E48", "\uF706": "\u0E49", "\uF707": "\u0E4A", "\uF708": "\u0E4B", "\uF709": "\u0E4C",
+  "\uF710": "\u0E31", "\uF711": "\u0E34", "\uF712": "\u0E35", "\uF713": "\u0E47", "\uF701": "\u0E34", "\uF702": "\u0E35", "\uF703": "\u0E36", "\uF704": "\u0E37" };
+function fixThaiPua(s) { return String(s || "").replace(/[\uF700-\uF71F]/g, c => THAI_PUA[c] || "").replace(/ํา/g, "ำ"); }
+/* Shopee: "ผู้รับ (TO)" / "ผู้ส่ง (FROM)" headers, then the recipient's name on the
+   next line. Only a short, address-free line is accepted as a name. */
+function _labelRecipientName(text) {
+  const lines = fixThaiPua(text).split(/\n/).map(l => l.trim()).filter(Boolean);
+  const i = lines.findIndex(l => /\(FROM\)/i.test(l));
+  if (i < 0) return "";
+  const shop = String((window.__storeName || "PS Tactical")).toLowerCase();
+  for (const l of lines.slice(i + 1, i + 3)) {
+    if (l.length > 40 || /\d{3,}|ตำบล|อำเภอ|จังหวัด/.test(l) || l.toLowerCase() === shop || /^(NOTE|SPEED)$/i.test(l)) continue;
+    return l;
+  }
+  return "";
+}
+/* Classify raw text/codes → { orderNo, tracking, platform, name } (any may be ""). */
 function parseLabelCodes(text, codes) {
+  const name = _labelRecipientName(text);
   const t = String(text || "").toUpperCase();
   const all = [t, ...(codes || []).map(c => String(c).toUpperCase().trim())].join("\n");
   let platform = /SHOPEE/.test(t) ? "Shopee" : /LAZADA/.test(t) ? "Lazada" : /TIKTOK/.test(t) ? "TikTok" : "";
@@ -222,7 +255,7 @@ function parseLabelCodes(text, codes) {
     const m = s.match(LABEL_TRACK_RE);
     if (m && m[1] !== orderNo) { tracking = m[1]; break; }
   }
-  return { orderNo, tracking, platform };
+  return { orderNo, tracking, platform, name };
 }
 async function extractLabelCodes(file) {
   const f = safeOrderFile(file);
@@ -235,6 +268,79 @@ async function extractLabelCodes(file) {
   const codes = await _imageCodes(f.dataUrl);
   const r = parseLabelCodes("", codes);
   return (r.orderNo || r.tracking) ? r : null;
+}
+
+function isLabelPlaceholderName(n) { return ["ดูใบปะหน้า", "ลูกค้า", "—", ""].includes(String(n || "").trim()); }
+/* "ลูกค้า <name>" + the marketplace order number, for the pack queue rows. */
+function PackOrderWho({ order }) {
+  const placeholder = isLabelPlaceholderName(order.customer);
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+      <span>{placeholder ? (order.platformOrderNo ? "ลูกค้า —" : (order.customer || "—")) : "ลูกค้า " + order.customer}</span>
+      {order.platformOrderNo && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "var(--muted)" }}>
+        {order.platform && typeof ChannelMark === "function" && <ChannelMark channel={order.platform} size={15}/>}
+        <span className="mono">{order.platformOrderNo}</span>
+      </span>}
+    </span>
+  );
+}
+
+/* Pack queue split by selling platform — Shopee / Lazada / TikTok / Facebook…
+   Each tile: orders, pieces, and how long the oldest one has waited, so staff can
+   see which platform's cut-off is closest. Tapping a tile filters the queue. */
+function packPlatformOf(o) {
+  const v = String((o && (o.platform || o.channel)) || "").trim();
+  return (!v || v === "ฉลาก") ? "อื่นๆ" : v;
+}
+function _packOrderMs(o) {
+  const iso = o.dateIso || "";
+  if (!iso) return NaN;
+  return Date.parse(iso + "T" + (/^\d{1,2}:\d{2}/.test(o.ts || "") ? String(o.ts).slice(0, 5).padStart(5, "0") : "00:00") + ":00+07:00");
+}
+function _packAge(ms) {
+  if (!isFinite(ms)) return "";
+  const h = (Date.now() - ms) / 3600000;
+  if (h < 1) return Math.max(1, Math.round(h * 60)) + " นาที";
+  if (h < 48) return Math.floor(h) + " ชม.";
+  return Math.floor(h / 24) + " วัน";
+}
+function packPlatformSummary(rows) {
+  const m = new Map();
+  (rows || []).forEach(r => {
+    const k = packPlatformOf(r.o);
+    const g = m.get(k) || { name: k, orders: 0, pieces: 0, oldest: Infinity };
+    g.orders++; g.pieces += Number((r.totals && r.totals.need) || 0);
+    const t = _packOrderMs(r.o); if (isFinite(t) && t < g.oldest) g.oldest = t;
+    m.set(k, g);
+  });
+  return [...m.values()].sort((a, b) => (a.oldest - b.oldest) || (b.orders - a.orders));
+}
+function PackPlatformBar({ rows, value, onChange, mobile }) {
+  const groups = packPlatformSummary(rows);
+  if (groups.length < 1) return null;
+  const tile = (key, on, body) => (
+    <button key={key} onClick={() => onChange(on ? "" : key)} className="card"
+      style={{ padding: mobile ? "8px 10px" : "10px 14px", minWidth: mobile ? 128 : 170, textAlign: "left", cursor: "pointer", flexShrink: 0,
+        border: on ? "1.5px solid var(--accent)" : "1px solid var(--line, transparent)", background: on ? "var(--accent-soft)" : undefined, fontFamily: "inherit", color: "inherit" }}>
+      {body}
+    </button>
+  );
+  const allPieces = groups.reduce((n, g) => n + g.pieces, 0);
+  return (
+    <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 2, marginBottom: mobile ? 10 : 0 }}>
+      {tile("", !value, <>
+        <div style={{ fontSize: 12, color: "var(--muted)" }}>ทุกแพลตฟอร์ม</div>
+        <div style={{ fontSize: mobile ? 17 : 20, fontWeight: 700 }}>{rows.length} <span style={{ fontSize: 12, fontWeight: 500, color: "var(--muted)" }}>ออร์เดอร์ · {allPieces} ชิ้น</span></div>
+      </>)}
+      {groups.map(g => tile(g.name, value === g.name, <>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600 }}>
+          {typeof ChannelMark === "function" && <ChannelMark channel={g.name} size={16}/>}{g.name}
+        </div>
+        <div style={{ fontSize: mobile ? 17 : 20, fontWeight: 700 }}>{g.orders} <span style={{ fontSize: 12, fontWeight: 500, color: "var(--muted)" }}>ออร์เดอร์ · {g.pieces} ชิ้น</span></div>
+        {isFinite(g.oldest) && <div style={{ fontSize: 11, color: (Date.now() - g.oldest) > 24 * 3600000 ? "var(--danger)" : "var(--muted)" }}>รอนานสุด {_packAge(g.oldest)}</div>}
+      </>))}
+    </div>
+  );
 }
 
 /* Fill in order number + tracking for every order that has a label attached but
@@ -252,7 +358,7 @@ async function backfillLabelCodes(orders) {
   try {
     if (!_orderFileIds) await refreshOrderFileIds();
     const ids = _orderFileIds || new Set();
-    const todo = (orders || []).filter(o => o && ids.has(o.id) && !o.platformOrderNo && !_codesTried.has(o.id));
+    const todo = (orders || []).filter(o => o && ids.has(o.id) && (!o.platformOrderNo || isLabelPlaceholderName(o.customer)) && !_codesTried.has(o.id));
     for (const o of todo) {
       _codesTried.add(o.id);
       let c = null;
@@ -262,6 +368,7 @@ async function backfillLabelCodes(orders) {
       if (c.orderNo) ch.platformOrderNo = c.orderNo;
       if (c.platform && !o.platform) ch.platform = c.platform;
       if (c.tracking && !o.tracking) ch.tracking = c.tracking;
+      if (c.name && isLabelPlaceholderName(o.customer)) ch.customer = c.name;
       if (Object.keys(ch).length) { setOrderField(o.id, ch); n++; }
     }
   } finally { _codesRunning = false; }
@@ -962,6 +1069,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
         if (c.orderNo && c.orderNo !== order.platformOrderNo) ch.platformOrderNo = c.orderNo;
         if (c.platform && !order.platform) ch.platform = c.platform;
         if (c.tracking && !order.tracking) ch.tracking = c.tracking;
+        if (c.name && isLabelPlaceholderName(order.customer)) ch.customer = c.name;
         if (Object.keys(ch).length) setOrderField(order.id, ch);
       })
       .catch(() => { if (alive) setCodes("none"); });
@@ -1507,7 +1615,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
+  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });

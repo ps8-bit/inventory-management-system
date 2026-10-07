@@ -6768,6 +6768,7 @@ function PackQueue({ pushToast, goTo, user }) {
   const [sel, setSel] = useState({});
   const [showPacked, setShowPacked] = useState(false);  // แพ็คเสร็จแล้ว — reopen label tools
   const [openPacked, setOpenPacked] = useState(null);
+  const [plat, setPlat] = useState("");          // platform filter ("" = all)
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6791,6 +6792,10 @@ function PackQueue({ pushToast, goTo, user }) {
   }, [tick, progress]);
 
   const packed = useMemo(() => (typeof packedRecent === "function") ? packedRecent(3) : [], [tick]);
+  // Name + order no. off attached labels the queue hasn't read yet.
+  useEffect(() => {
+    if (typeof backfillLabelCodes === "function") backfillLabelCodes(rows.map(r => r.o)).catch(() => {});
+  }, [rows.length]);
 
   // Waves in flight, so the table's "why is this order half-picked" is explainable.
   const waves = useMemo(() => Object.keys(progress)
@@ -6907,6 +6912,8 @@ function PackQueue({ pushToast, goTo, user }) {
         <SmallStat label="รวมชิ้นที่ต้องหยิบ" value={totalPieces} tone="info" hint="ทุกออร์เดอร์ในคิว"/>
       </div>
 
+      {typeof PackPlatformBar === "function" && rows.length > 0 && <PackPlatformBar rows={rows} value={plat} onChange={setPlat}/>}
+
       <div style={{ padding: "12px 16px", borderRadius: 12, background: "var(--info-soft)", color: "var(--info)", fontSize: 12.5, lineHeight: 1.7 }}>
         <strong>สต็อกถูกตัดไปแล้วตอนกดตัดสต็อก</strong> — หน้านี้บอกว่าต้องไปหยิบของจากชั้นไหน ไม่ได้ตัดสต็อกซ้ำ
         การติ๊กทีละชิ้น สแกนบาร์โค้ด และแจ้งของขาด ทำบนมือถือ (แพ็คสินค้า ในเมนูเพิ่มเติม)
@@ -6941,7 +6948,7 @@ function PackQueue({ pushToast, goTo, user }) {
             <th style={{ width: 1 }}/>
           </tr></thead>
           <tbody>
-            {rows.map(r => {
+            {rows.filter(r => !plat || (typeof packPlatformOf === "function" && packPlatformOf(r.o) === plat)).map(r => {
               const isOpen = open === r.o.id;
               const w = waveOf[r.o.id];
               return (
@@ -6955,7 +6962,7 @@ function PackQueue({ pushToast, goTo, user }) {
                       {typeof PackAddedBanner === "function" && <div style={{ fontFamily: "var(--font-sans, inherit)" }}><PackAddedBanner order={r.o} compact/></div>}
                     </td>
                     <td style={{ cursor: "pointer" }} onClick={() => setOpen(isOpen ? null : r.o.id)}>
-                      {r.o.customer || "—"}
+                      {typeof PackOrderWho === "function" ? <PackOrderWho order={r.o}/> : (r.o.customer || "—")}
                       {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
                       {/* Same reminders the label prints: order note + shelf notes. */}
                       {r.notes.length > 0 && (
