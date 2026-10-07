@@ -38,7 +38,7 @@ function buildPrompt(pending: unknown) {
 1. สกัดข้อมูลของแต่ละพัสดุ:
    - "courier": ชื่อบริษัทขนส่งของชิ้นนั้น (เช่น Flash Express, J&T Express, EMS/ไปรษณีย์ไทย, Kerry ฯลฯ)
    - "tracking_number": เลขพัสดุของชิ้นนั้น (เอาเฉพาะตัวเลขและตัวอักษรภาษาอังกฤษที่เป็นรหัสพัสดุหลัก ห้ามมีช่องว่างหรือเว้นวรรค เช่น TH10028RX1Z70A หรือ WB340106691TH)
-   - "customer_phone": เบอร์โทรของ "ผู้รับ" ของชิ้นนั้น (เอาเฉพาะตัวเลข 10 หลัก เช่น 0812345678 ห้ามมีขีด)
+   - "customer_phone": เบอร์โทรของ "ผู้รับ" ของชิ้นนั้น (เอาเฉพาะตัวเลข 10 หลัก เช่น 0812345678 ห้ามมีขีด — ถ้าเบอร์บนสลิปถูกปิดบางส่วน เช่น 08x-xxx-5678 ให้ใส่เฉพาะตัวเลขที่มองเห็นตามลำดับ เช่น 085678 ห้ามเดาตัวเลขที่ถูกปิด)
    - หมายเหตุ: ให้ดูเฉพาะข้อมูลของ "ผู้รับ" (ผู้รับ/Recipient/ถึง) เท่านั้น ห้ามเอาข้อมูลของ "ผู้ส่ง" (ผู้ส่ง/Sender/จาก) มาใช้เด็ดขาด
 
 2. การทำ Fuzzy Matching สำหรับชื่อลูกค้า (ทำกับผู้รับของแต่ละชิ้น):
@@ -187,13 +187,20 @@ Deno.serve(async (req) => {
   // Normalise the cleansed fields server-side so the client gets clean data
   // regardless of small model deviations from the schema.
   const digits = (s: unknown) => String(s ?? "").replace(/\D/g, "");
+  // "+66 81 234 5678" → "0812345678". Without this the 10-digit cut kept
+  // "6681234567" — a wrong number that could never match the customer.
+  const thaiPhone = (s: unknown) => {
+    let d = digits(s);
+    if (d.startsWith("66") && d.length >= 11) d = "0" + d.slice(2);
+    return d.slice(0, 10);
+  };
   const normParcel = (p: any) => ({
     courier: String(p?.courier ?? "").trim(),
     tracking_number: String(p?.tracking_number ?? "").replace(/[^A-Za-z0-9]/g, ""),
     extracted_name_from_slip: String(p?.extracted_name_from_slip ?? "").trim(),
     matched_customer_name: p?.matched_customer_name == null ? null : String(p.matched_customer_name).trim(),
     confidence_score: typeof p?.confidence_score === "number" ? Math.max(0, Math.min(1, p.confidence_score)) : 0,
-    customer_phone: digits(p?.customer_phone).slice(0, 10),
+    customer_phone: thaiPhone(p?.customer_phone),
   });
 
   // Accept either the new {parcels:[...]} shape or a single flat object (back-compat).
