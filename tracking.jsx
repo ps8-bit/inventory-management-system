@@ -858,6 +858,61 @@ function BulkPopover({ title, onClose, children }) {
   );
 }
 
+/* ============ PACK DETAILS (read-only) ============
+   What this parcel holds: the same shelf-sorted lines the packer worked from
+   (packLinesForOrder — never re-derived from the product), plus the owner /
+   shelf notes and who marked it packed. Shared by OrderEditDrawer and the
+   mobile MTrackEdit so both forks show the same thing. */
+function OrderPackDetails({ order, mobile }) {
+  const [tick, setTick] = useStateTrk(0);
+  useEffectTrk(() => {
+    const refresh = () => setTick(t => t + 1);
+    const evs = ["ims-orders-change", "ims-labels-change", "ims-products-change", "ims-product-locs-change", "ims-pack-change"];
+    evs.forEach(ev => window.addEventListener(ev, refresh));
+    return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
+  }, []);
+  void tick;
+  const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(order) : [];
+  const notes = (typeof packLabelNotes === "function") ? packLabelNotes(order, lines) : [];
+  const pieces = lines.reduce((n, l) => n + l.qty, 0);
+  const packedAt = order.packedAt ? new Date(order.packedAt) : null;
+  const card = { border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", overflow: "hidden" };
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div className={mobile ? "m-section-label" : "eyebrow"} style={mobile ? { padding: "12px 4px 8px" } : { marginBottom: 8 }}>
+        สินค้าที่แพ็ค{lines.length ? ` · ${lines.length} รายการ / ${pieces} ชิ้น` : ""}
+      </div>
+      {lines.length === 0 ? (
+        <div style={{ ...card, padding: 12, fontSize: 12, color: "var(--muted)" }}>ไม่มีรายการสินค้าในออร์เดอร์นี้</div>
+      ) : (
+        <div style={card}>
+          {lines.map((l, i) => (
+            <div key={l.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderTop: i ? "1px solid var(--border)" : "none" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name}</div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{l.sku}{l.loc ? ` · ${l.loc}` : ""}</div>
+              </div>
+              <div className="mono" style={{ fontSize: 14, fontWeight: 700 }}>×{l.qty}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {notes.length > 0 && (
+        <div style={{ marginTop: 8, padding: 10, borderRadius: 10, background: "var(--warn-soft, var(--surface-2))", fontSize: 12 }}>
+          {notes.map((n, i) => (
+            <div key={i} style={{ marginTop: i ? 6 : 0, whiteSpace: "pre-wrap" }}><strong>{n.tag}:</strong> {n.text}</div>
+          ))}
+        </div>
+      )}
+      {(order.packedBy || packedAt) && (
+        <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>
+          แพ็คโดย {order.packedBy || "—"}{packedAt && !isNaN(packedAt) ? ` · ${packedAt.toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============ ORDER EDIT DRAWER (tracking + carrier) ============ */
 
 function OrderEditDrawer({ order, onClose, pushToast }) {
@@ -917,6 +972,7 @@ function OrderEditDrawer({ order, onClose, pushToast }) {
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
         <div className="drawer-body">
+          <OrderPackDetails order={order}/>
           <div className="eyebrow" style={{ marginBottom: 8 }}>ข้อมูลลูกค้า / ออร์เดอร์</div>
           <div className="stack" style={{ gap: 10, marginBottom: 18 }}>
             <div className="field">
@@ -2130,4 +2186,4 @@ function CustomerOrderDetail({ order, store, onBack }) {
   );
 }
 
-Object.assign(window, { TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });
+Object.assign(window, { OrderPackDetails, TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });

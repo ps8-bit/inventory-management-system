@@ -8505,6 +8505,7 @@ function MTrackEdit({ ctx }) {
         <button className="m-action accent" onClick={save}><Icons.Check size={14}/></button>
       </div>
       <div className="m-content">
+        {typeof OrderPackDetails === "function" && <OrderPackDetails order={o} mobile/>}
         <div className="m-section-label" style={{ padding: "0 4px 6px" }}>ข้อมูลลูกค้า / ออร์เดอร์</div>
         <input className="m-input" value={customer} onChange={e => setCustomer(e.target.value)} placeholder="ชื่อลูกค้า / ผู้รับ" style={{ marginBottom: 8 }}/>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
