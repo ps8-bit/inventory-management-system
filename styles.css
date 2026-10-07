@@ -2161,3 +2161,33 @@ html[data-mobile="1"] .m-content .m-row {
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.08);
 }
 .mark-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-2); min-width: 0; white-space: nowrap; }
+
+/* ── แพ็คสินค้า: platform summary cards (PackPlatformBar in pack-docs.jsx) ── */
+.pp-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 230px)); gap: 12px; }
+.pp-row.is-mobile { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 10px; }
+.pp-card {
+  display: flex; flex-direction: column; gap: 10px; min-width: 0; text-align: left;
+  padding: 12px 14px; border-radius: 16px; cursor: pointer; font: inherit; color: var(--fg);
+  background: var(--surface, #fff); border: 1.5px solid transparent;
+  box-shadow: var(--elev-1, 0 1px 3px rgba(0,0,0,.06)); transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.pp-card:hover { box-shadow: var(--elev-2, 0 4px 12px rgba(0,0,0,.08)); }
+.pp-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pp-card.is-on { background: var(--accent-soft); border-color: var(--accent); }
+.pp-head { display: flex; align-items: center; gap: 9px; min-width: 0; padding-bottom: 9px; border-bottom: 1px solid var(--line, rgba(0,0,0,.07)); }
+.pp-icon { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; flex-shrink: 0; }
+.pp-icon-all { background: color-mix(in oklch, var(--accent) 16%, transparent); color: var(--accent); }
+.pp-name { font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-body { display: flex; align-items: center; gap: 10px; }
+.pp-num { font-size: 34px; font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
+.pp-sub { display: flex; flex-direction: column; font-size: 13px; font-weight: 600; line-height: 1.35; min-width: 0; }
+.pp-pcs { color: var(--muted); font-weight: 500; }
+.pp-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 9px; border-top: 1px solid var(--line, rgba(0,0,0,.07)); }
+.pp-wait { display: inline-flex; align-items: center; gap: 6px; color: var(--pp-tint); min-width: 0; }
+.pp-pill { padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap;
+  background: color-mix(in oklch, var(--pp-tint) 12%, transparent); color: color-mix(in oklch, var(--pp-tint) 80%, var(--fg)); }
+.pp-late { padding: 3px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 700; white-space: nowrap; background: var(--danger); color: #fff; }
+.pp-row.is-mobile .pp-card { padding: 10px 11px; gap: 8px; border-radius: 14px; }
+.pp-row.is-mobile .pp-num { font-size: 26px; }
+.pp-row.is-mobile .pp-name { font-size: 13px; }
+.pp-row.is-mobile .pp-pill { font-size: 11px; padding: 2px 7px; }

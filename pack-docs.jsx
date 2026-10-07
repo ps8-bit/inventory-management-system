@@ -360,28 +360,44 @@ function packPlatformSummary(rows) {
 function PackPlatformBar({ rows, value, onChange, mobile }) {
   const groups = packPlatformSummary(rows);
   if (groups.length < 1) return null;
-  const tile = (key, on, body) => (
-    <button key={key} onClick={() => onChange(on ? "" : key)} className="card"
-      style={{ padding: mobile ? "8px 10px" : "10px 14px", minWidth: mobile ? 128 : 170, textAlign: "left", cursor: "pointer", flexShrink: 0,
-        border: on ? "1.5px solid var(--accent)" : "1px solid var(--line, transparent)", background: on ? "var(--accent-soft)" : undefined, fontFamily: "inherit", color: "inherit" }}>
-      {body}
-    </button>
-  );
   const allPieces = groups.reduce((n, g) => n + g.pieces, 0);
+  const allLate = groups.reduce((n, g) => n + g.late, 0);
+  const Clock = () => (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+    </svg>
+  );
+  // One card: icon + name / big order count + pieces / oldest-wait pill (+ late).
+  const card = ({ key, name, icon, tint, orders, pieces, oldest, late }) => {
+    const on = key === "" ? !value : value === key;
+    return (
+      <button key={key || "_all"} type="button" className={"pp-card" + (on ? " is-on" : "")} aria-pressed={on}
+        aria-label={`${name}: ${orders} ออร์เดอร์ ${pieces} ชิ้น`} onClick={() => onChange(on || key === "" ? "" : key)}
+        style={{ "--pp-tint": tint }}>
+        <span className="pp-head">{icon}<span className="pp-name">{name}</span></span>
+        <span className="pp-body">
+          <span className="pp-num tnum">{orders}</span>
+          <span className="pp-sub"><span>ออร์เดอร์</span><span className="pp-pcs tnum">{pieces} ชิ้น</span></span>
+        </span>
+        {(isFinite(oldest) || late > 0) && (
+          <span className="pp-foot">
+            {isFinite(oldest) && <span className="pp-wait"><Clock/><span className="pp-pill">รอนานสุด {_packAge(oldest)}</span></span>}
+            {late > 0 && <span className="pp-late">⚠ ส่งล่าช้า {late}</span>}
+          </span>
+        )}
+      </button>
+    );
+  };
   return (
-    <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 2, marginBottom: mobile ? 10 : 0 }}>
-      {tile("", !value, <>
-        <div style={{ fontSize: 12, color: "var(--muted)" }}>ทุกแพลตฟอร์ม</div>
-        <div style={{ fontSize: mobile ? 17 : 20, fontWeight: 700 }}>{rows.length} <span style={{ fontSize: 12, fontWeight: 500, color: "var(--muted)" }}>ออร์เดอร์ · {allPieces} ชิ้น</span></div>
-      </>)}
-      {groups.map(g => tile(g.name, value === g.name, <>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 600 }}>
-          {typeof ChannelMark === "function" && <ChannelMark channel={g.name} size={16}/>}{g.name}
-        </div>
-        <div style={{ fontSize: mobile ? 17 : 20, fontWeight: 700 }}>{g.orders} <span style={{ fontSize: 12, fontWeight: 500, color: "var(--muted)" }}>ออร์เดอร์ · {g.pieces} ชิ้น</span></div>
-        {isFinite(g.oldest) && <div style={{ fontSize: 11, color: (Date.now() - g.oldest) > 24 * 3600000 ? "var(--danger)" : "var(--muted)" }}>รอนานสุด {_packAge(g.oldest)}</div>}
-        {g.late > 0 && <div style={{ fontSize: 11, fontWeight: 700, color: "var(--danger)" }}>⚠ ส่งล่าช้า {g.late} ออร์เดอร์</div>}
-      </>))}
+    <div className={"pp-row" + (mobile ? " is-mobile" : "")} role="group" aria-label="กรองตามแพลตฟอร์ม">
+      {card({ key: "", name: "ทุกแพลตฟอร์ม", icon: <span className="pp-icon pp-icon-all"><Icons.Grid size={15}/></span>,
+        tint: "var(--accent)", orders: rows.length, pieces: allPieces, oldest: NaN, late: allLate })}
+      {groups.map(g => {
+        const m = (typeof channelMark === "function") ? channelMark(g.name) : null;
+        return card({ key: g.name, name: g.name,
+          icon: (typeof MarkTile === "function" && m) ? <MarkTile m={m} size={26}/> : <span className="pp-icon"/>,
+          tint: (m && m.bg) || "var(--accent)", orders: g.orders, pieces: g.pieces, oldest: g.oldest, late: g.late });
+      })}
     </div>
   );
 }
