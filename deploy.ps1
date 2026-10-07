@@ -50,6 +50,9 @@ if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: store-info deploy failed" 
 # manage-users - admin user management (invite/role/suspend/delete), verifies admin inside -> keep default verify_jwt
 npx supabase functions deploy manage-users --project-ref $SupabaseRef
 if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: manage-users deploy failed" -ForegroundColor Yellow } else { Write-Host "      manage-users deployed OK" -ForegroundColor Green }
+# redeem-invite is PUBLIC (new employee signs up with an invite code, no login yet) -> --no-verify-jwt
+npx supabase functions deploy redeem-invite --no-verify-jwt --project-ref $SupabaseRef
+if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: redeem-invite deploy failed" -ForegroundColor Yellow } else { Write-Host "      redeem-invite deployed OK" -ForegroundColor Green }
 # line-bot - LINE webhook (X-Line-Signature verified inside) -> --no-verify-jwt or LINE's webhook 401s at the gateway
 npx supabase functions deploy line-bot --no-verify-jwt --project-ref $SupabaseRef
 if ($LASTEXITCODE -ne 0) { Write-Host "      Warning: line-bot deploy failed" -ForegroundColor Yellow } else { Write-Host "      line-bot deployed OK" -ForegroundColor Green }

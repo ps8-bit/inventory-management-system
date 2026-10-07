@@ -440,10 +440,11 @@ const PACK_LABEL_FIELDS = [
   { group: "หัวใบ",  items: [["header", "หมายเลข Label / เลขออร์เดอร์"]] },
   { group: "ผู้ส่ง",  items: [["sender", "แสดงผู้ส่ง"], ["senderName", "ชื่อ"], ["senderAddr", "ที่อยู่"], ["senderPhone", "เบอร์โทร"]] },
   { group: "ผู้รับ",  items: [["recvPhone", "เบอร์โทร"], ["cod", "เก็บเงินปลายทาง (COD)"], ["carrier", "ขนส่ง"]] },
-  { group: "สินค้า", items: [["items", "แสดงรายการสินค้า"], ["itemSku", "รหัส (SKU)"], ["itemName", "ชื่อสินค้า"], ["itemQty", "จำนวน"]] }
+  { group: "สินค้า", items: [["items", "แสดงรายการสินค้า"], ["itemSku", "รหัส (SKU)"], ["itemName", "ชื่อสินค้า"], ["itemQty", "จำนวน"]] },
+  { group: "โน้ต",   items: [["notes", "โน้ตเตือนพนักงาน (ออร์เดอร์ + ช่อง)"]] }
 ];
 const PACK_LABEL_DEFAULT = { header: true, sender: true, senderName: true, senderAddr: true, senderPhone: true,
-  recvPhone: true, cod: true, carrier: true, items: true, itemSku: true, itemName: true, itemQty: true };
+  recvPhone: true, cod: true, carrier: true, items: true, itemSku: true, itemName: true, itemQty: true, notes: true };
 function packLabelConfig() {
   let st = window._DB_STORE;
   if (!st) { try { st = JSON.parse(localStorage.getItem("ims_store") || "null"); } catch (e) {} }
@@ -471,6 +472,21 @@ async function savePackLabelConfig(next) {
     return { error: res.error };
   }
   return { ok: true };
+}
+
+/* Reminders for whoever packs this parcel: the order's own note, then each
+   shelf note (packLocNote) for the shelves this order picks from, once each. */
+function packLabelNotes(order, lines) {
+  const out = [];
+  if (order && order.note) out.push(String(order.note));
+  const seen = new Set();
+  (lines || []).forEach(l => {
+    if (!l || !l.loc || seen.has(l.loc)) return;
+    seen.add(l.loc);
+    const n = (typeof packLocNote === "function") ? packLocNote(l.loc) : null;
+    if (n && n.text) out.push(((l.parts && l.parts.pos) || l.loc) + ": " + n.text);
+  });
+  return out;
 }
 
 /* Layout: หมายเลข Label + order no. │ ผู้ส่ง │ ผู้รับ (big) │ สินค้าที่ต้องแพ็ค.
@@ -501,6 +517,7 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
   const fit = (n) => `calc(${pt(n)} * var(--fit,1))`;
   const showSender = c.sender && ((c.senderName && s.name) || (c.senderAddr && (s.addr1 || s.addr2)) || (c.senderPhone && s.phone));
   const showItems = c.items && (c.itemSku || c.itemName || c.itemQty) && all.length > 0;
+  const notes = c.notes ? packLabelNotes(order, lines) : [];
   // The last visible text column takes the free width; qty stays pinned right.
   const flexCol = c.itemName ? "name" : "sku";
   return (
@@ -534,6 +551,9 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
           (!c.itemSku && !c.itemName ? `<span style="flex:1"></span>` : "") +
           (c.itemQty ? `<span style="font-weight:700;white-space:nowrap">× ${_escPD(l.qty)}</span>` : "") + `</div>`).join("") +
       (shown.length < all.length ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:0.5mm">… และอีก ${all.length - shown.length} รายการ</div>` : "") : "") +
+      // notes — boxed so they read as a warning, not part of the address
+      (notes.length ? `<div style="border:0.45mm solid #000;border-radius:1mm;padding:1mm 1.5mm;margin-top:${small ? 1.5 : 2}mm;font-size:${pt(10)}">` +
+        `<b>โน้ต:</b> ` + notes.map(_escPD).join(" · ") + `</div>` : "") +
     `</div>`);
 }
 /* Phones (iOS Safari, Android Chrome, the installed PWA) ignore @page size:
@@ -620,7 +640,7 @@ function printOrderFile(file) {
    page header (desktop PackQueue + mobile MPack), never per order. Shows a live
    preview with sample data so the owner sees the effect before printing. */
 const PACK_LABEL_SAMPLE = {
-  order: { id: "SO-20261007-001" },
+  order: { id: "SO-20261007-001", note: "ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น" },
   lines: [{ sku: "PST-001", name: "กระเป๋าอเนกประสงค์", qty: 1 }, { sku: "AFG-OT33-BK", name: "เสื้อยืดแทคติคอล สีดำ L", qty: 2 }],
   recip: { name: "คุณสมชาย ใจดี", phone: "080-000-0000", addrLines: ["99/12 หมู่ 3 ซอยสุขใจ ถนนประชาอุทิศ", "แขวงทุ่งครุ เขตทุ่งครุ กรุงเทพมหานคร 10140"], cod: 0, carrier: "Flash Express" }
 };
