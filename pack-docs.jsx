@@ -507,6 +507,13 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
   const all = (lines || []).filter(l => l && (Number(l.qty) || 0) > 0);
   const maxRows = small ? 4 : 9;
   const shown = all.length > maxRows ? all.slice(0, maxRows - 1) : all;
+  // Many item rows = less room: start the notes smaller so they, not the
+  // address, give way (fitPackLabel shrinks them further via --nfit).
+  const busy = shown.length >= (small ? 3 : 5);
+  const noteBase = small ? (busy ? pt(8.5) : pt(9.5)) : (busy ? pt(9.5) : pt(10.5));
+  // Never print a note below 7pt (a 203-dpi thermal head smears anything
+  // smaller) — past that, fitPackLabel cuts lines instead of shrinking.
+  const noteMin = Math.min(1, 7 / parseFloat(noteBase));
   const pcs = all.reduce((n, l) => n + (Number(l.qty) || 0), 0);
   let addrLines = (r.addrLines && r.addrLines.length) ? r.addrLines : [r.addr].filter(Boolean);
   // A typed one-line address: start the locality (แขวง/ตำบล/ต.) on its own line.
@@ -524,7 +531,7 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
   // The last visible text column takes the free width; qty stays pinned right.
   const flexCol = c.itemName ? "name" : "sku";
   return (
-    `<div class="__pdLbl" style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;display:flex;flex-direction:column;overflow:hidden;line-height:1.3;font-weight:500">` +
+    `<div class="__pdLbl" data-nmin="${noteMin.toFixed(2)}" style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;display:flex;flex-direction:column;overflow:hidden;line-height:1.3;font-weight:500">` +
       // header
       (c.header ? `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
         `<span style="font-size:${pt(9)};font-weight:700;white-space:nowrap">หมายเลข Label</span>` +
@@ -561,12 +568,17 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
       // 1.5 line-height keeps stacked Thai tone marks from touching.
       (notes.length ? `<div style="border:0.7mm solid #000;border-radius:1mm;padding:${small ? "0.8mm 1.4mm" : "1.2mm 1.8mm"};margin-top:${small ? 1.2 : 2}mm">` +
         notes.map((n, i) =>
-          `<div style="${i ? `margin-top:${small ? 0.8 : 1.2}mm;padding-top:${small ? 0.8 : 1.2}mm;border-top:0.3mm dashed #000;` : ""}">` +
+          `<div class="__pdNB" style="${i ? `margin-top:${small ? 0.8 : 1.2}mm;padding-top:${small ? 0.8 : 1.2}mm;border-top:0.3mm dashed #000;` : ""}">` +
             `<span style="display:inline-block;background:#000;color:#fff;font-size:${pt(9)};font-weight:700;padding:0.3mm 1.4mm;border-radius:0.8mm;line-height:1.35">${_escPD(n.tag)}</span>` +
             // --nfit shrinks the NOTES first (fitPackLabel) so the address never pays
             // for a long note; blank lines are dropped on paper only.
-            `<div style="font-size:calc(${small ? pt(9.5) : pt(10.5)} * var(--nfit,1));font-weight:700;line-height:1.35;margin-top:${small ? 0.3 : 0.5}mm;white-space:pre-line;word-break:break-word">${_escPD(String(n.text).replace(/\n\s*\n+/g, "\n"))}</div>` +
+            // Each line is its own .__pdNL so fitPackLabel can drop trailing lines
+            // when even a shrunk note won't fit beside a long item list.
+            `<div style="font-size:calc(${noteBase} * var(--nfit,1));font-weight:700;line-height:1.35;margin-top:${small ? 0.3 : 0.5}mm;word-break:break-word">` +
+              String(n.text).replace(/\n\s*\n+/g, "\n").split("\n").map(t => `<div class="__pdNL">${_escPD(t) || "&nbsp;"}</div>`).join("") +
+            `</div>` +
           `</div>`).join("") +
+        `<div class="__pdNMore" style="display:none;font-size:${pt(8.5)};font-weight:700;margin-top:0.6mm">… ดูโน้ตเต็มในแอป</div>` +
       `</div>` : "") +
     `</div>`);
 }
@@ -615,14 +627,37 @@ function fitPackLabel(root) {
   const prev = root.getAttribute("style") || "";
   // Keep the caller's font while measuring — the PDF path lays out in Sarabun.
   root.setAttribute("style", "display:block;position:fixed;left:-10000px;top:0;font-family:" + (root.style.fontFamily || "'IBM Plex Sans Thai','Sarabun',Tahoma,sans-serif"));
-  // 1) Notes give way first (to 70%) — the recipient is what the courier reads.
+  const over = () => lbl.scrollHeight > lbl.clientHeight + 1;
+  // Start from the full note every time (the same node can be re-fitted).
+  const nls = Array.from(lbl.querySelectorAll(".__pdNL"));
+  const more = lbl.querySelector(".__pdNMore");
+  const blocks = Array.from(lbl.querySelectorAll(".__pdNB"));
+  nls.forEach(n => { n.style.display = ""; });
+  blocks.forEach(b => { b.style.display = ""; });
+  if (more) { more.style.display = "none"; more.style.marginTop = "0.6mm"; more.textContent = "… ดูโน้ตเต็มในแอป"; }
+  // 1) Notes give way first (down to the 7pt floor) — the recipient is what the courier reads.
   let nf = 1;
   lbl.style.setProperty("--nfit", "1");
-  while (lbl.scrollHeight > lbl.clientHeight + 1 && nf > 0.7) {
+  const nmin = Math.max(0.6, parseFloat(lbl.getAttribute("data-nmin")) || 0.6);
+  while (over() && nf - 0.05 >= nmin - 0.001) {
     nf = Math.round((nf - 0.05) * 100) / 100;
     lbl.style.setProperty("--nfit", String(nf));
   }
-  // 2) Only then shrink the recipient block.
+  // 2) Still too long (many items + long note): drop the note's last lines and
+  //    say so — the full note is in the app. At least one line always stays.
+  for (let k = nls.length - 1; over() && k >= 1; k--) {
+    nls[k].style.display = "none";
+    if (more) more.style.display = "block";
+  }
+  //    Even one line won't fit: collapse the box to a single pointer line, so the
+  //    packer still knows there IS a note — never at the address's expense.
+  if (over() && blocks.length && more) {
+    blocks.forEach(b => { b.style.display = "none"; });
+    more.style.display = "block";
+    more.style.marginTop = "0";
+    more.textContent = "มีโน้ตถึงคนแพ็ค — ดูในแอป";
+  }
+  // 3) Only then shrink the recipient block.
   let f = 1;
   lbl.style.setProperty("--fit", "1");
   while (lbl.scrollHeight > lbl.clientHeight + 1 && f > 0.55) {
