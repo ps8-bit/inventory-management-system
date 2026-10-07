@@ -2884,15 +2884,23 @@ function canEditPackLocNotes() {
   const u = window.__currentUser;
   return !!u && u.role === "admin";
 }
+/* A note belongs to a REAL shelf. "-", "—", "–" or blank all mean "no shelf yet",
+   and every unshelved line of every order shares that value — a note keyed on
+   it leaked onto all of them (2026-10-07: a one-order POLICE patch text showed
+   on every order with an unshelved item). Such keys are never written, and any
+   already stored are ignored on read. */
+function packNoteLocOk(loc) {
+  return !!loc && !/^[\s\-–—]*$/.test(String(loc));
+}
 function packLocNote(loc) {
-  if (!loc) return null;
+  if (!packNoteLocOk(loc)) return null;
   const e = loadPackLocNotes()[loc];
   return e && e.text ? e : null;
 }
 /* Optimistic write verified against the server: a rejected or failed save rolls
    the mirror back to exactly what it was and says so (same rule as saveLocTree). */
 async function setPackLocNote(loc, text, by) {
-  if (!loc) return { ok: false };
+  if (!packNoteLocOk(loc)) return { ok: false };
   if (!canEditPackLocNotes()) {
     window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เฉพาะเจ้าของร้านเท่านั้นที่แก้ไขโน้ตประจำช่องได้" }));
     return { ok: false };
@@ -2920,11 +2928,11 @@ async function setPackLocNote(loc, text, by) {
    note is removed (askText would block it). askForm lives in screens.jsx, which
    loads later, so it is looked up at call time. */
 async function editPackLocNote(loc, by) {
-  if (!loc || loc === "-" || typeof askForm !== "function" || !canEditPackLocNotes()) return;
+  if (!packNoteLocOk(loc) || typeof askForm !== "function" || !canEditPackLocNotes()) return;
   const note = packLocNote(loc);
   const r = await askForm({
     title: "โน้ตประจำช่อง " + loc,
-    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น\nกด Enter เพื่อขึ้นบรรทัดใหม่", required: false, type: "textarea", rows: 4 }],
+    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น\nกด Enter เพื่อขึ้นบรรทัดใหม่", required: false, type: "textarea", rows: 4, maxLength: 500 }],
     okLabel: note ? "บันทึก / ลบ" : "บันทึก"
   });
   if (!r) return;
@@ -3765,7 +3773,7 @@ Object.assign(window, {
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
-  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, setPackLocNote, editPackLocNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
+  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,

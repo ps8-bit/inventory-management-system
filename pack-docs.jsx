@@ -478,15 +478,15 @@ async function savePackLabelConfig(next) {
    shelf note (packLocNote) for the shelves this order picks from, once each. */
 function packLabelNotes(order, lines) {
   const out = [];
-  if (order && order.note) out.push(String(order.note));
+  if (order && order.note) out.push({ tag: "ออร์เดอร์", text: String(order.note) });
   const seen = new Set();
   (lines || []).forEach(l => {
     if (!l || !l.loc || seen.has(l.loc)) return;
     seen.add(l.loc);
     const n = (typeof packLocNote === "function") ? packLocNote(l.loc) : null;
-    if (n && n.text) out.push(((l.parts && l.parts.pos) || l.loc) + ": " + n.text);
+    if (n && n.text) out.push({ tag: "ช่อง " + ((l.parts && l.parts.pos) || l.loc), text: n.text });
   });
-  return out;
+  return out;   // [{ tag, text }] — text may hold line breaks
 }
 
 /* Layout: หมายเลข Label + order no. │ ผู้ส่ง │ ผู้รับ (big) │ สินค้าที่ต้องแพ็ค.
@@ -552,8 +552,17 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
           (c.itemQty ? `<span style="font-weight:700;white-space:nowrap">× ${_escPD(l.qty)}</span>` : "") + `</div>`).join("") +
       (shown.length < all.length ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:0.5mm">… และอีก ${all.length - shown.length} รายการ</div>` : "") : "") +
       // notes — boxed so they read as a warning, not part of the address
-      (notes.length ? `<div style="border:0.7mm solid #000;border-radius:1mm;padding:1.2mm 1.8mm;margin-top:${small ? 1.5 : 2}mm;font-size:${pt(11.5)};font-weight:700;line-height:1.35">` +
-        `<b>โน้ต:</b> ` + notes.map(n => _escPD(n).replace(/\n/g, "<br>")).join("<br>") + `</div>` : "") +
+      // One block per note: a black tag (ออร์เดอร์ / ช่อง A) on its own line, the
+      // text below at full width with its own line breaks kept. Side-by-side
+      // squeezed long shelf tags and split Thai words on the 75×100 roll; the
+      // 1.5 line-height keeps stacked Thai tone marks from touching.
+      (notes.length ? `<div style="border:0.7mm solid #000;border-radius:1mm;padding:${small ? "0.8mm 1.4mm" : "1.2mm 1.8mm"};margin-top:${small ? 1.2 : 2}mm">` +
+        notes.map((n, i) =>
+          `<div style="${i ? `margin-top:${small ? 0.8 : 1.2}mm;padding-top:${small ? 0.8 : 1.2}mm;border-top:0.3mm dashed #000;` : ""}">` +
+            `<span style="display:inline-block;background:#000;color:#fff;font-size:${pt(9)};font-weight:700;padding:0.3mm 1.4mm;border-radius:0.8mm;line-height:1.35">${_escPD(n.tag)}</span>` +
+            `<div style="font-size:${small ? pt(10) : pt(11.5)};font-weight:700;line-height:${small ? 1.4 : 1.5};margin-top:${small ? 0.3 : 0.6}mm;white-space:pre-line;word-break:break-word">${_escPD(n.text)}</div>` +
+          `</div>`).join("") +
+      `</div>` : "") +
     `</div>`);
 }
 /* Phones (iOS Safari, Android Chrome, the installed PWA) ignore @page size:
