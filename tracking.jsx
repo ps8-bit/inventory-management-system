@@ -381,7 +381,12 @@ function buildOrders() {
     for (const o of src) {
       if (seen.has(o.id)) continue;
       seen.add(o.id);
-      out.push({ ...o, ...(overrides[o.id] || {}) });
+      const ov = overrides[o.id] || {};
+      const merged = { ...o, ...ov };
+      // A blank phone override (e.g. a slip scan that read no number) must not
+      // erase the phone the label/order already carries.
+      if (!ov.phone && o.phone) merged.phone = o.phone;
+      out.push(merged);
     }
   }
   return out.filter(o => !o.deleted);
@@ -436,7 +441,10 @@ function useOrders() {
       for (const o of src) {
         if (seen.has(o.id)) continue;
         seen.add(o.id);
-        out.push({ ...o, ...(overrides[o.id] || {}) });
+        const ov = overrides[o.id] || {};
+        const merged = { ...o, ...ov };
+        if (!ov.phone && o.phone) merged.phone = o.phone; // blank override never erases a known phone
+        out.push(merged);
       }
     }
     return out.filter(o => !o.deleted);
@@ -1340,7 +1348,7 @@ function SlipScanModal({ onClose, pushToast }) {
             tracking,
             cod: 0, weight: "0.5 kg", items: [],
           });
-          setOrderField(soId, { carrier: r.carrier, tracking, status: "shipped", phone });
+          setOrderField(soId, { carrier: r.carrier, tracking, status: "shipped", ...(phone ? { phone } : {}) });
           recordChange({
             entity: "order", entityId: soId, action: "create",
             summary: (r.known ? `สแกนสลิป — ออร์เดอร์ใหม่ของลูกค้าเดิม ${name}` : `สแกนสลิป — สร้างลูกค้าใหม่ ${name}`).trim(),
