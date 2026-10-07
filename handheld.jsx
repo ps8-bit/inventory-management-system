@@ -6620,15 +6620,19 @@ function MPackLoc({ parts, loc }) {
 /* Reminder note pinned to a shelf — shown at that stop of every walk. Tap to
    add/edit; saving blank removes it. Re-renders with the parent's pack tick. */
 function MPackLocNote({ loc, user }) {
-  if (!loc || typeof packLocNote !== "function") return null;
+  // "-" / blank = no shelf; a note there would land on every unshelved item.
+  if (!loc || loc === "-" || typeof packLocNote !== "function") return null;
   const note = packLocNote(loc);
   const edit = async () => {
-    if (typeof askText !== "function") return;
-    const v = await askText("โน้ตประจำช่อง " + loc, note ? note.text : "", {
-      label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", okLabel: "บันทึก"
+    if (typeof askForm !== "function") return;
+    // required:false — askText blocks a blank answer, which is how a note is removed.
+    const r = await askForm({
+      title: "โน้ตประจำช่อง " + loc,
+      fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", required: false }],
+      okLabel: note ? "บันทึก / ลบ" : "บันทึก"
     });
-    if (v == null) return;
-    setPackLocNote(loc, v, (user && user.name) || "");
+    if (!r) return;
+    setPackLocNote(loc, r.v, (user && user.name) || "");
   };
   if (!note) {
     return (
