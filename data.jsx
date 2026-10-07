@@ -2629,6 +2629,118 @@ async function cancelOrdersAndRestock(orders, reasonNote) {
   return out;
 }
 
+/* ── เพิ่มรายการ into an order already waiting in the pack queue ──
+   The customer adds something after the sale ("เอาเพิ่มอีกตัว"). Stock leaves at
+   ตัดสต็อก time, so the ADDED lines are cut here exactly like a sale — same plan
+   builder, same deduction + shelf choke points — and only the added lines move
+   stock; the original lines were already debited.
+   Where the added lines live:
+     • order with an `orders` row (ตัดสต็อก / สั่งแพ็คใหม่ / ขาย) → appended to its
+       lineItems and the row re-upserted, so analytics count the extra units.
+       Not through appendOrder: that wipes the override entry (status, shipTo,
+       packedBy …) and re-fires the "new order" prompt.
+     • label-born order (no row; detail lives on the label) → override
+       `addedItems`, which _packSourceItems reads on top of the label items.
+   Every added row carries `added: <iso>` so the pick list can flag it, and the
+   override `addedLog` keeps who/when/what for the "มีการเพิ่มรายการ" banner.
+   Returns { ok, pieces, lineCount } | { ok:false, error }. */
+function _orderChannelId(order) {
+  const li = (order && Array.isArray(order.lineItems)) ? order.lineItems.find(x => x && x.ch) : null;
+  if (li && CHANNEL_LIST.some(c => c.id === li.ch)) return li.ch;
+  const byName = CHANNEL_LIST.find(c => c.name === (order && order.channel));
+  return byName ? byName.id : "other";
+}
+async function addItemsToPackOrder(order, lines, who) {
+  if (!order || !order.id) return { ok: false, error: "ไม่พบออร์เดอร์" };
+  const ch = _orderChannelId(order);
+  const plan = buildIssuePlan((lines || []).map(l => ({ ...l, ch })));
+  if (!plan.skuDeducts.length) return { ok: false, error: "ยังไม่ได้เลือกสินค้า" };
+  // Whole-cart stock check per sku (bundles expanded) — never drive stock negative.
+  const avail = (sku) => (typeof getEffectiveQty === "function") ? getEffectiveQty(sku) : ((PRODUCTS.find(p => p.sku === sku) || {}).qty || 0);
+  const short = plan.skuDeducts.filter(d => d.qty > avail(d.sku)).map(d => d.sku);
+  if (short.length) return { ok: false, error: "สต็อกไม่พอ: " + short.join(", ") };
+
+  const key = commitFingerprint("pack-add:" + order.id, plan.skuDeducts);
+  if (!claimCommit(key)) { duplicateCommitToast(); return { ok: false, error: "" }; }
+
+  const at = new Date().toISOString();
+  const added = plan.lineItems.map(li => ({ ...li, added: at }));
+  const pieces = plan.skuDeducts.reduce((s, d) => s + d.qty, 0);
+
+  deductManyAndPersist(plan.skuDeducts, `เพิ่มรายการ · ออร์เดอร์ ${order.id} (${plan.channelLabel})`);
+  // Same tick as the qty write, before any other await — applyLocPicks re-reads p.qty.
+  let locError = "";
+  const r = await applyLocPicks(plan.locPicks);
+  if (r && r.errors && r.errors.length) locError = r.errors[0].error;
+
+  const overrides = (typeof loadOrderOverrides === "function") ? loadOrderOverrides() : {};
+  const ov = overrides[order.id] || {};
+  const logEntry = {
+    at, by: who || "", pieces,
+    items: plan.lineItems.map(li => ({ sku: li.sku, name: li.name, qty: li.qty }))
+  };
+  const patch = { addedLog: (Array.isArray(ov.addedLog) ? ov.addedLog : []).concat([logEntry]) };
+
+  const row = loadOrders().find(o => o.id === order.id);
+  if (row) {
+    const deductions = (Array.isArray(row.deductions) ? row.deductions : []).map(d => ({ ...d }));
+    plan.channelSplit.forEach(c => {
+      const hit = deductions.find(d => d.id === c.id);
+      if (hit) hit.qty = (Number(hit.qty) || 0) + c.qty; else deductions.push({ ...c });
+    });
+    const next = {
+      ...row,
+      lineItems: (Array.isArray(row.lineItems) ? row.lineItems : []).concat(added),
+      items: (Number(row.items) || 0) + plan.lineCount,
+      deductions,
+      isBundle: !!(row.isBundle || plan.hasBundle),
+      bundleName: [row.bundleName].concat(plan.bundleNames).filter(Boolean).join(", ") || undefined
+    };
+    const list = [next, ...loadOrders().filter(o => o.id !== order.id)];
+    try { localStorage.setItem("ims_orders", JSON.stringify(list)); } catch (e) {}
+    window._DB_ORDERS = list;
+    if (typeof dbUpsertOrders === "function") {
+      try {
+        const res = await dbUpsertOrders([next]);
+        if (res && res.error && typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("orders", [next]);
+      } catch (e) {
+        if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("orders", [next]);
+      }
+    }
+  } else {
+    patch.addedItems = (Array.isArray(ov.addedItems) ? ov.addedItems : []).concat(added);
+  }
+  // setOrderField fires ims-orders-change, so every screen re-reads both writes.
+  if (typeof setOrderField === "function") setOrderField(order.id, patch);
+
+  if (typeof recordChange === "function") {
+    recordChange({
+      entity: "order", entityId: order.id, action: "update",
+      summary: `เพิ่มรายการเข้าออร์เดอร์ ${order.id} — ${plan.lineCount} รายการ (${pieces} ชิ้น)`,
+      count: plan.lineCount,
+      changes: (lines || []).filter(l => l && l.qty > 0).map(l => ({
+        label: l.type === "bundle" ? `ชุด: ${l.name}` : (l.name || l.sku),
+        to: `+${l.qty} ${l.type === "bundle" ? "ชุด" : "ชิ้น"}`
+      })),
+      note: `ออร์เดอร์ ${order.id} · ${plan.channelLabel}`
+    });
+  }
+  return { ok: true, pieces, lineCount: plan.lineCount, locError };
+}
+/* Summary for the "มีการเพิ่มรายการ" banner: total added pieces + the latest add. */
+function packOrderAdds(order) {
+  const log = (order && Array.isArray(order.addedLog)) ? order.addedLog.filter(Boolean) : [];
+  if (!log.length) return null;
+  const last = log[log.length - 1];
+  const when = last.at ? new Date(last.at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  return {
+    times: log.length,
+    pieces: log.reduce((s, e) => s + (Number(e.pieces) || 0), 0),
+    by: last.by || "", when,
+    names: log.flatMap(e => (e.items || []).map(i => `${i.name || i.sku} ×${i.qty}`))
+  };
+}
+
 /* ── แพ็คสินค้า — pick & pack work lists ────────────────────────────────
    Stock leaves the system at ตัดสต็อก time (commitIssueOrder / MSell / MIssue),
    so by the time an order reaches a packer the pieces are ALREADY debited from
@@ -2679,12 +2791,14 @@ function _packSortLines(lines) {
    have no sku — there is nothing in the warehouse to fetch, so they're dropped. */
 function _packSourceItems(order) {
   if (!order) return [];
+  // เพิ่มรายการ on a label-born order (no orders row) — see addItemsToPackOrder.
+  const extra = Array.isArray(order.addedItems) ? order.addedItems.filter(li => li && li.sku) : [];
   const own = Array.isArray(order.lineItems) ? order.lineItems.filter(li => li && li.sku) : [];
-  if (own.length) return own;
+  if (own.length) return own.concat(extra);
   const labels = (typeof loadLabels === "function") ? loadLabels() : [];
   const idOf = (l) => (typeof orderIdForLabel === "function") ? orderIdForLabel(l) : (l.soId || l.id);
   const hit = labels.find(l => idOf(l) === order.id);
-  return hit ? (hit.items || []).filter(it => it && it.sku) : [];
+  return (hit ? (hit.items || []).filter(it => it && it.sku) : []).concat(extra);
 }
 
 /* Shelf-sorted pick lines for one order. `shelfQty` is what the split says is
@@ -2699,12 +2813,14 @@ function packLinesForOrder(order) {
     const p = PRODUCTS.find(x => x.sku === sku);
     const loc = li.loc || defaultPickLoc(p) || "";
     const key = packKey(sku, loc);
+    // addedQty = pieces that came in through เพิ่มรายการ — flagged on the line.
+    const add = li.added ? qty : 0;
     const prev = merged.get(key);
-    if (prev) { prev.qty += qty; return; }
+    if (prev) { prev.qty += qty; prev.addedQty += add; return; }
     merged.set(key, {
       key, sku, loc,
       name: (p && p.name) || li.name || sku,
-      qty,
+      qty, addedQty: add,
       shelfQty: qtyAtLocation(sku, loc),
       parts: locParts(loc)
     });
@@ -2720,9 +2836,9 @@ function packLinesForOrders(orders) {
   (orders || []).forEach(o => {
     packLinesForOrder(o).forEach(l => {
       const prev = merged.get(l.key);
-      if (prev) { prev.qty += l.qty; prev.per.push({ orderId: o.id, qty: l.qty }); return; }
+      if (prev) { prev.qty += l.qty; prev.addedQty += l.addedQty || 0; prev.per.push({ orderId: o.id, qty: l.qty }); return; }
       merged.set(l.key, {
-        key: l.key, sku: l.sku, loc: l.loc, name: l.name, qty: l.qty,
+        key: l.key, sku: l.sku, loc: l.loc, name: l.name, qty: l.qty, addedQty: l.addedQty || 0,
         shelfQty: l.shelfQty, parts: l.parts,
         per: [{ orderId: o.id, qty: l.qty }]
       });
@@ -3819,7 +3935,7 @@ Object.assign(window, {
   skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem, buildIssuePlan,
-  lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, ISSUE_CARRIERS, issueOrderDate,
+  lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, addItemsToPackOrder, packOrderAdds, ISSUE_CARRIERS, issueOrderDate,
   nowBkkLocal, stockOutStamp, stockOutStampLabel,
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
