@@ -6901,6 +6901,29 @@ function MPack({ ctx }) {
             <Icons.Plus size={18}/> สั่งแพ็คใหม่
           </button>
         )}
+        {!selecting && (
+          <button className="btn" style={{ width: "100%", justifyContent: "center", marginBottom: 12 }} onClick={() => setShowPacked(v => !v)}>
+            <Icons.Print size={14}/> {showPacked ? "ซ่อนรายการแพ็คเสร็จ" : `แพ็คเสร็จแล้ว — โหลด/พิมพ์ใบปะหน้าอีกครั้ง (${packed.length})`}
+          </button>
+        )}
+        {!selecting && showPacked && (
+          <div className="m-list" style={{ marginBottom: 12 }}>
+            {packed.map(o => (
+              <button key={o.id} className="m-row" onClick={() => ctx.push("pack-order", { id: o.id })}>
+                <div className="m-row-thumb" style={{ background: "var(--success-soft)", color: "var(--success)" }}><Icons.Check size={16}/></div>
+                <div className="m-row-main">
+                  <div className="m-row-title mono" style={{ fontSize: 13 }}>{o.id}</div>
+                  <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {o.customer || "—"} · แพ็คเสร็จ {new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}{o.packedBy ? " · " + o.packedBy : ""}
+                  </div>
+                </div>
+                <Icons.Chev size={14} className="m-row-chev"/>
+              </button>
+            ))}
+            {packed.length === 0 && <div style={{ padding: 18, textAlign: "center", color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</div>}
+          </div>
+        )}
+
         {!selecting && typeof PackLabelSettings === "function" && canEditPackLabel() && (labelCfg
           ? <PackLabelSettings mobile pushToast={ctx.pushToast} onClose={() => setLabelCfg(false)}/>
           : <button className="btn" style={{ width: "100%", justifyContent: "center", marginBottom: 12 }} onClick={() => setLabelCfg(true)}>⚙ ตั้งค่าใบปะหน้า (ทุกใบ)</button>)}
@@ -6991,29 +7014,6 @@ function MPack({ ctx }) {
             </div>
           )}
         </div>
-
-        {!selecting && (
-          <button className="btn" style={{ width: "100%", justifyContent: "center", marginTop: 16 }} onClick={() => setShowPacked(v => !v)}>
-            <Icons.Print size={14}/> {showPacked ? "ซ่อนรายการแพ็คเสร็จ" : `แพ็คเสร็จแล้ว — โหลด/พิมพ์ใบปะหน้าอีกครั้ง (${packed.length})`}
-          </button>
-        )}
-        {!selecting && showPacked && (
-          <div className="m-list" style={{ marginTop: 10 }}>
-            {packed.map(o => (
-              <button key={o.id} className="m-row" onClick={() => ctx.push("pack-order", { id: o.id })}>
-                <div className="m-row-thumb" style={{ background: "var(--success-soft)", color: "var(--success)" }}><Icons.Check size={16}/></div>
-                <div className="m-row-main">
-                  <div className="m-row-title mono" style={{ fontSize: 13 }}>{o.id}</div>
-                  <div className="m-row-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {o.customer || "—"} · แพ็คเสร็จ {new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}{o.packedBy ? " · " + o.packedBy : ""}
-                  </div>
-                </div>
-                <Icons.Chev size={14} className="m-row-chev"/>
-              </button>
-            ))}
-            {packed.length === 0 && <div style={{ padding: 18, textAlign: "center", color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</div>}
-          </div>
-        )}
 
         {selecting && selIds.length > 0 && (
           <button className="m-btn-big dark" style={{ marginTop: 14 }} onClick={startWave}>

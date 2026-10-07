@@ -6857,12 +6857,49 @@ function PackQueue({ pushToast, goTo, user }) {
             </select>
           )}
           {canDo("sell") && <button className="btn btn-primary" onClick={() => setNewOpen(true)}><Icons.Plus size={14}/> สั่งแพ็คใหม่</button>}
+          <button className={"btn" + (showPacked ? " btn-primary" : "")} onClick={() => setShowPacked(v => !v)}><Icons.Print size={14}/> แพ็คเสร็จแล้ว ({packed.length})</button>
           {canOpenPage("outbound") && <button className="btn" onClick={() => goTo("outbound")}><Icons.Out size={14}/> จัดส่งสินค้า</button>}
           {typeof PackLabelSettings === "function" && canEditPackLabel() && <button className={"btn" + (labelCfg ? " btn-primary" : "")} onClick={() => setLabelCfg(o => !o)}>⚙ ตั้งค่าใบปะหน้า</button>}
           <span className="badge badge-neutral" title="การหยิบ ติ๊ก และสแกน ทำบนมือถือ"><Icons.Phone size={12}/> หยิบของบนมือถือ: เพิ่มเติม → แพ็คสินค้า</span>
         </div>
       </div>
       {labelCfg && typeof PackLabelSettings === "function" && <PackLabelSettings pushToast={pushToast} onClose={() => setLabelCfg(false)}/>}
+      {/* Packed in the last 3 days — the packer may have hit พร้อมส่ง before
+          downloading / copying / printing the label. Reopens PackShipDocs only. */}
+      <div>
+        {showPacked && (
+          <div className="card card-tight">
+            <table className="t">
+              <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th style={{ width: 1 }}/></tr></thead>
+              <tbody>
+                {packed.map(o => {
+                  const isOpen = openPacked === o.id;
+                  return (
+                    <React.Fragment key={o.id}>
+                      <tr style={{ cursor: "pointer" }} onClick={() => setOpenPacked(isOpen ? null : o.id)}>
+                        <td className="mono" style={{ fontSize: 12 }}>{o.id}</td>
+                        <td>{o.customer || "—"}</td>
+                        <td style={{ fontSize: 12, color: "var(--muted)" }}>{o.channel || "—"}</td>
+                        <td style={{ fontSize: 12 }}>{new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
+                        <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{o.packedBy || "—"}</td>
+                        <td><button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button></td>
+                      </tr>
+                      {isOpen && (
+                        <tr><td colSpan="6" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                          {typeof PackShipDocs === "function" && <PackShipDocs order={o}
+                            lines={(typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []}
+                            pushToast={pushToast} onCancelled={() => setOpenPacked(null)}/>}
+                        </td></tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+                {packed.length === 0 && <tr><td colSpan="6" style={{ textAlign: "center", padding: 24, color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       <div className="grid-3">
         <SmallStat label="รอแพ็ค"    value={rows.length}  tone="warning" hint="ออร์เดอร์ที่ตัดสต็อกแล้วรอหยิบ"/>
@@ -7061,45 +7098,6 @@ function PackQueue({ pushToast, goTo, user }) {
         </table>
       </div>
 
-      {/* Packed in the last 3 days — the packer may have hit พร้อมส่ง before
-          downloading / copying / printing the label. Reopens PackShipDocs only. */}
-      <div>
-        <button className="btn" onClick={() => setShowPacked(v => !v)}>
-          <Icons.Print size={14}/> {showPacked ? "ซ่อนรายการแพ็คเสร็จ" : `แพ็คเสร็จแล้ว — โหลด/พิมพ์ใบปะหน้าอีกครั้ง (${packed.length})`}
-        </button>
-        {showPacked && (
-          <div className="card card-tight" style={{ marginTop: 12 }}>
-            <table className="t">
-              <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th style={{ width: 1 }}/></tr></thead>
-              <tbody>
-                {packed.map(o => {
-                  const isOpen = openPacked === o.id;
-                  return (
-                    <React.Fragment key={o.id}>
-                      <tr style={{ cursor: "pointer" }} onClick={() => setOpenPacked(isOpen ? null : o.id)}>
-                        <td className="mono" style={{ fontSize: 12 }}>{o.id}</td>
-                        <td>{o.customer || "—"}</td>
-                        <td style={{ fontSize: 12, color: "var(--muted)" }}>{o.channel || "—"}</td>
-                        <td style={{ fontSize: 12 }}>{new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
-                        <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{o.packedBy || "—"}</td>
-                        <td><button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button></td>
-                      </tr>
-                      {isOpen && (
-                        <tr><td colSpan="6" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
-                          {typeof PackShipDocs === "function" && <PackShipDocs order={o}
-                            lines={(typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []}
-                            pushToast={pushToast} onCancelled={() => setOpenPacked(null)}/>}
-                        </td></tr>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-                {packed.length === 0 && <tr><td colSpan="6" style={{ textAlign: "center", padding: 24, color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
       {newOpen && typeof PackNewOrder === "function" && <PackNewOrder pushToast={pushToast} onClose={() => setNewOpen(false)}/>}
       {addTo && typeof PackNewOrder === "function" && <PackNewOrder addTo={addTo} user={user} pushToast={pushToast} onClose={() => setAddTo(null)}/>}
     </div>
