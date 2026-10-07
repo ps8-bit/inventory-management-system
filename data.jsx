@@ -2859,21 +2859,74 @@ function clearPackEntry(id) {
 function newPackBatchId() { return "batch:" + Date.now().toString(36).toUpperCase(); }
 
 /* Per-shelf reminder notes ("ช่องนี้ของแตกง่าย", "ดูสีให้ดี") shown at that stop of
-   every pick walk. Stored in the SAME pack_progress blob under a "locnote:<code>"
-   key so packers can write them through the policy they already have, and they
-   ride its realtime subscription. Shape { text, by, at }; clearing tombstones via
-   clearPackEntry like any finished record. Never confused with an order/wave:
-   order ids don't start with "locnote:" and the wave list filters "batch:". */
+   every pick walk, on the desktop queue and on the printed label.
+   OWNER (admin) ONLY to write — enforced by app_state RLS on the dedicated key
+   "pack_loc_notes" (supabase/pack-loc-notes-owner-only.sql); packers/staff only
+   read. They used to live in pack_progress, which packers must be able to write,
+   so the DB could not stop them — don't move them back.
+   Shape { "<loc>": { text, by, at } | null }. merge_app_state can only add keys,
+   so a removed note is a null tombstone, filtered on read. */
+const PACK_NOTES_KEY = "pack_loc_notes";
+const PACK_NOTES_LS = "ims_pack_loc_notes";
+function loadPackLocNotes() {
+  let m = window._DB_PACK_LOC_NOTES;
+  if (!m || typeof m !== "object") {
+    try { m = JSON.parse(localStorage.getItem(PACK_NOTES_LS) || "null"); } catch (e) { m = null; }
+  }
+  return (m && typeof m === "object") ? m : {};
+}
+function _packNotesMirror(map) {
+  window._DB_PACK_LOC_NOTES = map;
+  try { localStorage.setItem(PACK_NOTES_LS, JSON.stringify(map)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-pack-change"));
+}
+function canEditPackLocNotes() {
+  const u = window.__currentUser;
+  return !!u && u.role === "admin";
+}
 function packLocNote(loc) {
   if (!loc) return null;
-  const e = loadPackProgress()["locnote:" + loc];
+  const e = loadPackLocNotes()[loc];
   return e && e.text ? e : null;
 }
-function setPackLocNote(loc, text, by) {
-  if (!loc) return;
+/* Optimistic write verified against the server: a rejected or failed save rolls
+   the mirror back to exactly what it was and says so (same rule as saveLocTree). */
+async function setPackLocNote(loc, text, by) {
+  if (!loc) return { ok: false };
+  if (!canEditPackLocNotes()) {
+    window.dispatchEvent(new CustomEvent("ims-toast", { detail: "เฉพาะเจ้าของร้านเท่านั้นที่แก้ไขโน้ตประจำช่องได้" }));
+    return { ok: false };
+  }
   const t = String(text || "").trim();
-  if (!t) { clearPackEntry("locnote:" + loc); return; }
-  savePackEntry("locnote:" + loc, { text: t.slice(0, 300), by: by || "", at: new Date().toISOString() });
+  const rec = t ? { text: t.slice(0, 300), by: by || "", at: new Date().toISOString() } : null;
+  const prev = loadPackLocNotes();
+  _packNotesMirror({ ...prev, [loc]: rec });
+  let res = null;
+  try {
+    if (typeof dbMergeState === "function") res = await dbMergeState(PACK_NOTES_KEY, { [loc]: rec });
+    if (res === null && typeof dbSaveState === "function") res = await dbSaveState(PACK_NOTES_KEY, { ...prev, [loc]: rec });
+  } catch (e) { res = { error: String((e && e.message) || e) }; }
+  if (!res || res.error) {
+    _packNotesMirror(prev);
+    _blobWriteFailed("โน้ตประจำช่อง", (res && res.error) || "");
+    return { ok: false };
+  }
+  return { ok: true };
+}
+/* The ONE add/edit/remove dialog for a shelf note — mobile MPackLocNote and the
+   desktop PackQueue both call it. required:false because a blank answer is how a
+   note is removed (askText would block it). askForm lives in screens.jsx, which
+   loads later, so it is looked up at call time. */
+async function editPackLocNote(loc, by) {
+  if (!loc || loc === "-" || typeof askForm !== "function" || !canEditPackLocNotes()) return;
+  const note = packLocNote(loc);
+  const r = await askForm({
+    title: "โน้ตประจำช่อง " + loc,
+    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", required: false }],
+    okLabel: note ? "บันทึก / ลบ" : "บันทึก"
+  });
+  if (!r) return;
+  await setPackLocNote(loc, r.v, by || "");
 }
 
 /* Shared progress math so the phone, the wave view and the desktop queue can't
@@ -3710,7 +3763,7 @@ Object.assign(window, {
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
-  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, setPackLocNote, packLineTotals, repointPackLine,
+  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, setPackLocNote, editPackLocNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,

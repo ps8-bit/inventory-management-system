@@ -6623,18 +6623,11 @@ function MPackLocNote({ loc, user }) {
   // "-" / blank = no shelf; a note there would land on every unshelved item.
   if (!loc || loc === "-" || typeof packLocNote !== "function") return null;
   const note = packLocNote(loc);
-  const edit = async () => {
-    if (typeof askForm !== "function") return;
-    // required:false — askText blocks a blank answer, which is how a note is removed.
-    const r = await askForm({
-      title: "โน้ตประจำช่อง " + loc,
-      fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", required: false }],
-      okLabel: note ? "บันทึก / ลบ" : "บันทึก"
-    });
-    if (!r) return;
-    setPackLocNote(loc, r.v, (user && user.name) || "");
-  };
+  // Owner-only (RLS enforces it too): packers see the note, never edit it.
+  const canEdit = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();
+  const edit = () => editPackLocNote(loc, (user && user.name) || "");
   if (!note) {
+    if (!canEdit) return null;
     return (
       <button onClick={edit} style={{ background: "none", border: "none", padding: "0 2px 6px", color: "var(--muted)", fontSize: 11, cursor: "pointer" }}>
         + เพิ่มโน้ตช่องนี้
@@ -6642,7 +6635,7 @@ function MPackLocNote({ loc, user }) {
     );
   }
   return (
-    <div onClick={edit} role="button" style={{ margin: "0 0 6px", padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 12, cursor: "pointer", lineHeight: 1.5 }}>
+    <div onClick={canEdit ? edit : undefined} role={canEdit ? "button" : undefined} style={{ margin: "0 0 6px", padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 12, cursor: canEdit ? "pointer" : "default", lineHeight: 1.5 }}>
       <b>📌 โน้ต:</b> {note.text}
       {note.by && <span style={{ fontSize: 10, opacity: 0.75 }}> — {note.by}</span>}
     </div>
