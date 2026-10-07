@@ -895,6 +895,12 @@ function refreshLiveData() {
   // The activity feeds (กิจกรรมล่าสุด, ประวัติการแก้ไข) read this cache too — a
   // receive made on the phone while this screen slept never appeared here.
   _rtSoon('audit', _rtReloadAudit);
+  // Pack progress + shelf notes (app_state) — a missed push left another
+  // device's notes/ticks invisible until a full reload.
+  _rtSoon('pack', async () => {
+    const v = await dbLoadState('pack_progress');
+    if (v != null) { window._DB_PACK_PROGRESS = v; window.dispatchEvent(new CustomEvent('ims-pack-change')); }
+  });
 }
 let _liveFocusHooked = false;
 function _hookLiveFocusRefresh() {
@@ -911,9 +917,11 @@ function setupRealtimeSync() {
   _hookLiveFocusRefresh();
   let wasSubscribed = false;
   sb.channel('ims-sync')
-    // Not published (see above); kept so it works if products is ever added
-    // behind a cost-safe mechanism. Coalesced either way.
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => _rtStockMoved())
+    // NO `products` listener: that table is deliberately not in the realtime
+    // publication (cost), and a binding to an unpublished table makes the server
+    // silently deliver NOTHING on the whole channel — status still "SUBSCRIBED".
+    // That killed every live update app-wide until 2026-10-07. Stock changes
+    // arrive through stock_adjustments below. Only bind PUBLISHED tables here.
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'stock_adjustments' }, () => { _rtStockMoved(); window.dispatchEvent(new CustomEvent('ims-ledger-change')); })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => _rtSoon('orders', _rtReloadOrders))
     .on('postgres_changes', { event: '*', schema: 'public', table: 'bundles' }, async () => {
