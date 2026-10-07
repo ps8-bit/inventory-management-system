@@ -6951,8 +6951,8 @@ function PackQueue({ pushToast, goTo, user }) {
                     <td>
                       <div className="row" style={{ gap: 4 }}>
                         {canDo("sell") && (
-                          <button className="btn btn-sm" onClick={() => setAddTo(r.o)} title="เพิ่มรายการเข้าออร์เดอร์นี้">
-                            <Icons.Plus size={12}/>
+                          <button className="btn btn-sm" onClick={() => setAddTo(r.o)} title="เพิ่มรายการเข้าออร์เดอร์นี้" style={{ whiteSpace: "nowrap", color: "var(--accent)", borderColor: "var(--accent)" }}>
+                            <Icons.Plus size={12}/> เพิ่มสินค้า
                           </button>
                         )}
                         <button className="btn btn-sm" onClick={() => markPacked([r.o.id])} title="ทำเครื่องหมายพร้อมส่ง">
