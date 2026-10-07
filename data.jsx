@@ -972,7 +972,7 @@ function rememberAdjustReason(id) { try { if (/^sale-/.test(id || "")) localStor
 function quickSaleChannels() {
   return ADJUST_REASONS.filter(r => r.channel).map(r => {
     const ch = CHANNEL_LIST.find(c => c.id === r.channel) || {};
-    return { id: r.id, label: r.id === "sale-offline" ? "หน้าร้าน / ออฟไลน์" : (ch.name || r.label), color: ch.color || "var(--muted)" };
+    return { id: r.id, ch: r.channel, label: r.id === "sale-offline" ? "หน้าร้าน / ออฟไลน์" : (ch.name || r.label), color: ch.color || "var(--muted)" };
   });
 }
 function _saleEffQty(sku) {
@@ -1119,6 +1119,67 @@ const CARRIERS = [
   { id: "shopee",   name: "Shopee Express",   color: "oklch(0.6 0.2 30)" },
   { id: "best",     name: "Best Express",     color: "oklch(0.45 0.05 250)" }
 ];
+
+/* Channel / carrier marks — a small brand-coloured tile with a short code,
+   shown next to every channel or carrier name. Self-drawn (no logo files):
+   the CSP blocks third-party img-src and the stored values are free text
+   ("ไปรษณีย์ไทย", "Kerry Express", "J&T"), so lookup is alias-based. */
+const CARRIER_MARKS = [
+  { short: "KEX", bg: "#F26B21", keys: ["kex", "kerry", "เคอรี่"] },
+  { short: "FL",  bg: "#FFC20E", fg: "#1a1a1a", keys: ["flash", "แฟลช"] },
+  { short: "J&T", bg: "#D71920", keys: ["j&t", "j & t", "jt ", "เจแอนด์ที"] },
+  { short: "TP",  bg: "#E30613", keys: ["thai post", "thaipost", "ไปรษณีย์", "ems"] },
+  { short: "NV",  bg: "#C8102E", keys: ["ninja", "นินจา"] },
+  { short: "SPX", bg: "#EE4D2D", keys: ["shopee", "spx"] },
+  { short: "BE",  bg: "#1F3E8C", keys: ["best"] },
+  { short: "DHL", bg: "#FFCC00", fg: "#D40511", keys: ["dhl"] },
+  { short: "SCG", bg: "#E2231A", keys: ["scg"] },
+  { short: "AF",  bg: "#0B6E4F", keys: ["alpha"] },
+  { short: "LLM", bg: "#F16622", keys: ["lalamove", "ลาล่ามูฟ"] },
+  { short: "LEX", bg: "#0F146D", keys: ["lazada express", "lex "] },
+  { short: "GRB", bg: "#00B14F", keys: ["grab"] },
+];
+const CHANNEL_MARKS = {
+  shopee: "#EE4D2D", lazada: "#0F146D", tiktok: "#111111", line: "#06C755",
+  web: "#2F6FDB", facebook: "#1877F2", other: "#7A7A7A",
+};
+function carrierMark(name) {
+  const n = String(name || "").trim().toLowerCase();
+  if (!n) return null;
+  const padded = n + " ";
+  const hit = CARRIER_MARKS.find(c => c.keys.some(k => padded.includes(k)));
+  return hit ? { short: hit.short, bg: hit.bg, fg: hit.fg || "#fff" }
+             : { short: n.replace(/\s+/g, "").slice(0, 2).toUpperCase() || "?", bg: "#8A8F98", fg: "#fff" };
+}
+function channelMark(ch) {
+  const v = String(ch || "").trim();
+  if (!v) return null;
+  const low = v.toLowerCase();
+  const c = CHANNEL_LIST.find(x => x.id === low || x.name.toLowerCase() === low)
+         || CHANNEL_LIST.find(x => x.id !== "other" && (low.includes(x.id) || low.includes(x.name.toLowerCase())));
+  if (c) return { short: c.short, bg: CHANNEL_MARKS[c.id] || "#7A7A7A", fg: "#fff", name: c.name };
+  return { short: v.replace(/\s+/g, "").slice(0, 2).toUpperCase(), bg: "#8A8F98", fg: "#fff", name: v };
+}
+function MarkTile({ m, size = 18, title }) {
+  if (!m) return null;
+  const fs = Math.max(7, Math.round(size * (m.short.length > 2 ? 0.36 : 0.46)));
+  return (
+    <span className="mark-tile" title={title} style={{ width: size, height: size, background: m.bg, color: m.fg, fontSize: fs, borderRadius: Math.round(size * 0.28) }}>{m.short}</span>
+  );
+}
+/* <ChannelMark channel="Shopee" label/> → tile, plus the name when `label`. */
+function ChannelMark({ channel, size, label }) {
+  const m = channelMark(channel);
+  if (!m) return label ? <span style={{ color: "var(--faint)" }}>—</span> : null;
+  if (!label) return <MarkTile m={m} size={size} title={m.name}/>;
+  return <span className="mark-chip"><MarkTile m={m} size={size}/>{channel}</span>;
+}
+function CarrierMark({ carrier, size, label }) {
+  const m = carrierMark(carrier);
+  if (!m) return label ? <span style={{ color: "var(--faint)" }}>—</span> : null;
+  if (!label) return <MarkTile m={m} size={size} title={carrier}/>;
+  return <span className="mark-chip"><MarkTile m={m} size={size}/>{carrier}</span>;
+}
 
 const ACTIVITY = [];
 
@@ -2837,7 +2898,9 @@ async function setPackLocNote(loc, text, by) {
     return { ok: false };
   }
   const t = String(text || "").trim();
-  const rec = t ? { text: t.slice(0, 300), by: by || "", at: new Date().toISOString() } : null;
+  // Multi-line allowed: normalise line endings, cap blank runs at one empty line.
+  const clean = t.replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").slice(0, 500);
+  const rec = t ? { text: clean, by: by || "", at: new Date().toISOString() } : null;
   const prev = loadPackLocNotes();
   _packNotesMirror({ ...prev, [loc]: rec });
   let res = null;
@@ -2861,7 +2924,7 @@ async function editPackLocNote(loc, by) {
   const note = packLocNote(loc);
   const r = await askForm({
     title: "โน้ตประจำช่อง " + loc,
-    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", required: false }],
+    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น\nกด Enter เพื่อขึ้นบรรทัดใหม่", required: false, type: "textarea", rows: 4 }],
     okLabel: note ? "บันทึก / ลบ" : "บันทึก"
   });
   if (!r) return;
@@ -3695,6 +3758,7 @@ Object.assign(window, {
   storedLocSet, locIsStored, countUnstoredProducts, productHomeLoc, productIsStored,
   refreshSaleMoves, refreshSaleMovesSoon, isAdjustSaleReason, saleChannelOfReason, saleMoveOrders, loadSalesRecords, channelToday,
   isBlankDraftOrder, isPendingOrder, ORDER_STATUS_TH, orderShortId, orderChannelLabel,
+  carrierMark, channelMark, MarkTile, ChannelMark, CarrierMark,
   loadProductLocs, locSplitFor, hasLocSplit, locSplitTotal, productPositions, qtyAtLocation, productsInLocation, saveLocSplit,
   applyLocPicks, defaultPickLoc, moveStockToLocation, applyReceiveLocs,
   receiveLineShelf, receiveLinesWithoutShelf, buildReceiveReport, lastReceiveLoc, rememberReceiveLoc,

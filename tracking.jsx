@@ -714,7 +714,7 @@ function TrackingPage({ pushToast, store, focus }) {
               <BulkPopover onClose={() => setBulkMenu(null)} title="เปลี่ยนขนส่งเป็น">
                 {CARRIERS.map(c => (
                   <button key={c.id} className="popover-item" onClick={() => bulkCarrier(c.name)}>
-                    <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color, flexShrink: 0 }}/>
+                    <CarrierMark carrier={c.name} size={16}/>
                     <span style={{ flex: 1 }}>{c.name}</span>
                   </button>
                 ))}
@@ -762,10 +762,7 @@ function TrackingPage({ pushToast, store, focus }) {
                   </td>
                   <td onClick={() => setEdit(o)}>
                     {o.carrier ? (
-                      <span className="ch-chip">
-                        <span className="swatch" style={{ background: carrierMeta.color || "var(--muted)" }}/>
-                        {o.carrier}
-                      </span>
+                      <CarrierMark carrier={o.carrier} label/>
                     ) : <span style={{ color: "var(--faint)", fontSize: 12 }}>—</span>}
                   </td>
                   <td onClick={() => setEdit(o)}>
@@ -967,7 +964,7 @@ function OrderEditDrawer({ order, onClose, pushToast }) {
                   borderColor: carrier === c.name ? "var(--accent)" : "var(--border)"
                 }}
               >
-                <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color, flexShrink: 0 }}/>
+                <CarrierMark carrier={c.name} size={18}/>
                 <span style={{ fontSize: 12, fontWeight: 500 }}>{c.name}</span>
                 {carrier === c.name && <Icons.Check size={12} style={{ marginLeft: "auto", color: "var(--accent)" }}/>}
               </button>

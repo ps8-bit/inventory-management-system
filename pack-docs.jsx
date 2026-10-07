@@ -552,8 +552,8 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
           (c.itemQty ? `<span style="font-weight:700;white-space:nowrap">× ${_escPD(l.qty)}</span>` : "") + `</div>`).join("") +
       (shown.length < all.length ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:0.5mm">… และอีก ${all.length - shown.length} รายการ</div>` : "") : "") +
       // notes — boxed so they read as a warning, not part of the address
-      (notes.length ? `<div style="border:0.45mm solid #000;border-radius:1mm;padding:1mm 1.5mm;margin-top:${small ? 1.5 : 2}mm;font-size:${pt(10)}">` +
-        `<b>โน้ต:</b> ` + notes.map(_escPD).join(" · ") + `</div>` : "") +
+      (notes.length ? `<div style="border:0.7mm solid #000;border-radius:1mm;padding:1.2mm 1.8mm;margin-top:${small ? 1.5 : 2}mm;font-size:${pt(11.5)};font-weight:700;line-height:1.35">` +
+        `<b>โน้ต:</b> ` + notes.map(n => _escPD(n).replace(/\n/g, "<br>")).join("<br>") + `</div>` : "") +
     `</div>`);
 }
 /* Phones (iOS Safari, Android Chrome, the installed PWA) ignore @page size:

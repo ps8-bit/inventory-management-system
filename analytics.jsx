@@ -308,7 +308,7 @@ function AnalyticsPage({ pushToast }) {
                 return (
                   <div key={c.name} className="row" style={{ gap: 12 }}>
                     <span className="row" style={{ gap: 7, width: 150, flexShrink: 0 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color, flexShrink: 0 }}/>
+                      <ChannelMark channel={c.name} size={16}/>
                       <span style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
                     </span>
                     <div className="prog" style={{ flex: 1 }}><span style={{ width: pct + "%" }}/></div>

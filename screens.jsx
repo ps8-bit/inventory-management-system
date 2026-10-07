@@ -71,11 +71,19 @@ function AskFormDialog({ title, message, fields, okLabel, onDone }) {
             return (
               <div key={f.key} style={{ marginBottom: 14 }}>
                 <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{f.label}</label>
+                {f.type === "textarea" ? (
+                  // Multi-line: Enter is a new line here, so it never submits the form.
+                  <textarea ref={i === 0 ? firstRef : undefined} className="input" rows={f.rows || 4}
+                    value={vals[f.key]} placeholder={f.placeholder || ""}
+                    onChange={e => setVals(v => ({ ...v, [f.key]: e.target.value }))}
+                    style={{ width: "100%", fontSize: 15, padding: "10px 12px", resize: "vertical", lineHeight: 1.5, fontFamily: "inherit" }}/>
+                ) : (
                 <input ref={i === 0 ? firstRef : undefined} className="input" list={listId}
                   type="text" inputMode={f.type === "number" ? "numeric" : undefined}
                   value={vals[f.key]} placeholder={f.placeholder || ""}
                   onChange={e => setVals(v => ({ ...v, [f.key]: f.type === "number" ? e.target.value.replace(/[^\d]/g, "") : e.target.value }))}
                   style={{ width: "100%", fontSize: 15, padding: "10px 12px" }}/>
+                )}
                 {listId && <datalist id={listId}>{opts.map(o => <option key={o} value={o}/>)}</datalist>}
                 {opts.length > 0 && (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
@@ -2029,7 +2037,7 @@ function Outbound({ goTo, pushToast, focus }) {
                 {rows.filter(c => c.units > 0).map(c => (
                   <div key={c.id} style={{ padding: "12px 14px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10 }}>
                     <div className="row" style={{ gap: 6, marginBottom: 6 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+                      <ChannelMark channel={c.id} size={16}/>
                       <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 500 }}>{c.name}</span>
                     </div>
                     <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.02em" }} className="tnum">{c.units} <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 400 }}>ชิ้น</span></div>
@@ -2250,14 +2258,14 @@ function Outbound({ goTo, pushToast, focus }) {
                   </td>
                   <td>
                     {chMeta ? (
-                      <span className="ch-chip"><span className="swatch" style={{ background: chMeta.color }}/>{o.channel}</span>
+                      <ChannelMark channel={o.channel} label/>
                     ) : (
                       <span className="badge badge-neutral">{typeof orderChannelLabel === "function" ? orderChannelLabel(o) : o.channel}</span>
                     )}
                   </td>
                   <td style={!o.customer || o.customer === "ไม่ระบุชื่อ" ? { color: "var(--muted)" } : undefined}>{o.customer || "ไม่ระบุชื่อ"}</td>
                   <td className="t-num tnum">{Number(o.items) > 0 ? o.items : "—"}</td>
-                  <td>{o.carrier}</td>
+                  <td>{o.carrier ? <CarrierMark carrier={o.carrier} label/> : <span style={{ color: "var(--faint)" }}>—</span>}</td>
                   <td className="t-mono">{o.tracking}</td>
                   <td><span className={"badge " + stCls}><span className="dot"/>{stLab}</span></td>
                   <td><button className="btn btn-ghost btn-icon" title="สร้างฉลากจัดส่ง" onClick={() => { queueLabelsAndGo(o, goTo); pushToast(`สร้างฉลาก ${o.id}`); }}><Icons.Tag size={14}/></button></td>
@@ -2627,7 +2635,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
             <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
               {CHANNEL_LIST.map(c => (
                 <button key={c.id} className={"btn btn-sm" + (defCh === c.id ? " btn-accent" : "")} onClick={() => setDefCh(c.id)}>
-                  <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/> {c.name}
+                  <ChannelMark channel={c.id} size={16}/> {c.name}
                 </button>
               ))}
             </div>
@@ -2844,7 +2852,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
               <div className="row" style={{ gap: 6, flexWrap: "wrap", marginTop: 8 }}>
                 {chSummary.map(c => (
                   <span key={c.id} className="ch-chip">
-                    <span className="swatch" style={{ background: c.color }}/>{c.name} <strong className="tnum" style={{ marginLeft: 4 }}>{c.qty}</strong>
+                    <ChannelMark channel={c.id} size={16}/>{c.name} <strong className="tnum" style={{ marginLeft: 4 }}>{c.qty}</strong>
                   </span>
                 ))}
               </div>
@@ -4154,7 +4162,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
                           <div key={c.id}>
                             <div className="row" style={{ justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
                               <span className="row" style={{ gap: 6 }}>
-                                <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+                                <ChannelMark channel={c.id} size={16}/>
                                 {c.name}
                               </span>
                               <span className="tnum" style={{ color: "var(--fg-2)" }}>
@@ -5590,7 +5598,7 @@ function QuickSellModal({ onClose, pushToast }) {
           <div className="adj-reasons" style={{ marginBottom: 16 }}>
             {channels.map(c => (
               <button key={c.id} type="button" className={"adj-reason" + (reasonId === c.id ? " on" : "")} onClick={() => setReasonId(c.id)}>
-                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 999, background: c.color, marginRight: 6 }}/>{c.label}
+                <ChannelMark channel={c.ch} size={16}/> {c.label}
               </button>
             ))}
           </div>
@@ -6905,8 +6913,8 @@ function PackQueue({ pushToast, goTo, user }) {
                       {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
                       {/* Same reminders the label prints: order note + shelf notes. */}
                       {r.notes.length > 0 && (
-                        <div style={{ marginTop: 4, padding: "3px 8px", borderRadius: 6, background: "var(--warning-soft)", color: "var(--warning)", fontSize: 11, lineHeight: 1.5, maxWidth: 320 }}>
-                          📌 {r.notes.join(" · ")}
+                        <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", borderLeft: "4px solid var(--warning)", color: "var(--fg)", fontSize: 13, fontWeight: 700, lineHeight: 1.5, maxWidth: 340 }}>
+                          <span style={{ whiteSpace: "pre-line" }}>📌 {r.notes.join("\n")}</span>
                         </div>
                       )}
                     </td>
@@ -6974,10 +6982,10 @@ function PackQueue({ pushToast, goTo, user }) {
                                           // Owner-only (RLS enforces it too).
                                           const canEdit = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();
                                           const edit = () => editPackLocNote(l.loc, (user && user.name) || "");
-                                          if (n && !canEdit) return <div style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2 }}>📌 {n.text}</div>;
+                                          if (n && !canEdit) return <div style={{ fontSize: 12.5, color: "var(--fg)", fontWeight: 700, fontFamily: "var(--font-sans, inherit)", marginTop: 4, padding: "4px 8px", background: "var(--warning-soft)", borderLeft: "3px solid var(--warning)", borderRadius: 6, whiteSpace: "pre-line" }}>📌 {n.text}</div>;
                                           if (!canEdit) return null;
                                           return n
-                                            ? <div onClick={edit} title="แก้ไข / ลบโน้ตช่องนี้" style={{ fontSize: 10.5, color: "var(--warning)", fontWeight: 500, fontFamily: "var(--font-sans, inherit)", marginTop: 2, cursor: "pointer" }}>📌 {n.text} <Icons.Edit size={10}/></div>
+                                            ? <div onClick={edit} title="แก้ไข / ลบโน้ตช่องนี้" style={{ fontSize: 12.5, color: "var(--fg)", fontWeight: 700, fontFamily: "var(--font-sans, inherit)", marginTop: 4, padding: "4px 8px", background: "var(--warning-soft)", borderLeft: "3px solid var(--warning)", borderRadius: 6, cursor: "pointer", whiteSpace: "pre-line" }}>📌 {n.text} <Icons.Edit size={11}/></div>
                                             : <button className="btn btn-ghost btn-sm" onClick={edit} style={{ fontSize: 10.5, padding: "0 4px", height: 20, marginTop: 2, fontFamily: "var(--font-sans, inherit)", fontWeight: 400 }}>+ โน้ตช่องนี้</button>;
                                         })()}
                                       </td>

@@ -202,7 +202,7 @@ function SellConfirmModal({ bundle, qty, channels, when, onWhenChange, onConfirm
               <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
                 {channels.map(c => (
                   <span key={c.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 999, background: "var(--surface-2)", border: "1px solid var(--border)", fontSize: 12 }}>
-                    <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+                    <ChannelMark channel={c.id} size={16}/>
                     {c.name}: {c.qty} ชุด
                   </span>
                 ))}
@@ -587,7 +587,7 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
                     return (
                       <div key={c.id} className={"ch-row" + (v.on ? " on" : "")} style={{ borderRadius: 8, padding: "8px 10px" }}>
                         <span className={"check" + (v.on ? " on" : "")} onClick={() => toggleCh(c.id)}/>
-                        <span style={{ width: 10, height: 10, borderRadius: 999, background: c.color }}/>
+                        <ChannelMark channel={c.id} size={18}/>
                         <span style={{ flex: 1, fontSize: 13, fontWeight: v.on ? 500 : 400, color: v.on ? "var(--fg)" : "var(--fg-2)" }}>{c.name}</span>
                         <div className="qty-stepper" style={{ opacity: v.on ? 1 : 0.4 }}>
                           <button onClick={() => setChQty(c.id, v.qty - 1)} disabled={v.qty <= 0}>−</button>
