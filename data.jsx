@@ -2814,6 +2814,21 @@ function setPackLocNote(loc, text, by) {
   if (!t) { clearPackEntry("locnote:" + loc); return; }
   savePackEntry("locnote:" + loc, { text: t.slice(0, 300), by: by || "", at: new Date().toISOString() });
 }
+/* The ONE add/edit/remove dialog for a shelf note — mobile MPackLocNote and the
+   desktop PackQueue both call it. required:false because a blank answer is how a
+   note is removed (askText would block it). askForm lives in screens.jsx, which
+   loads later, so it is looked up at call time. */
+async function editPackLocNote(loc, by) {
+  if (!loc || loc === "-" || typeof askForm !== "function") return;
+  const note = packLocNote(loc);
+  const r = await askForm({
+    title: "โน้ตประจำช่อง " + loc,
+    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น", required: false }],
+    okLabel: note ? "บันทึก / ลบ" : "บันทึก"
+  });
+  if (!r) return;
+  setPackLocNote(loc, r.v, by || "");
+}
 
 /* Shared progress math so the phone, the wave view and the desktop queue can't
    report different numbers for the same order. A line counts as settled when the
@@ -3648,7 +3663,7 @@ Object.assign(window, {
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
-  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, setPackLocNote, packLineTotals, repointPackLine,
+  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, setPackLocNote, editPackLocNote, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,
