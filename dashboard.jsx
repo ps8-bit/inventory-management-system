@@ -211,7 +211,7 @@ function ChannelsWidget() {
         <div key={c.id} style={{ padding: "9px 0" }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, fontSize: 13 }}>
             <span className="row" style={{ gap: 7 }}>
-              <span style={{ width: 8, height: 8, borderRadius: 999, background: c.color }}/>
+              <ChannelMark channel={c.id} size={16}/>
               {c.name}
             </span>
             <span>

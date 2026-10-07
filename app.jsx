@@ -191,7 +191,7 @@ function SearchOverlay({ q, setQ, onClose, goToProduct, goToOrder }) {
                       <Icons.Truck size={14} style={{ color:"var(--muted)", flexShrink:0 }}/>
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:13, fontWeight:500 }}>{o.customer || "ไม่ระบุชื่อ"}</div>
-                        <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace" }}>{typeof orderShortId === "function" ? orderShortId(o) : o.id} · {typeof orderChannelLabel === "function" ? orderChannelLabel(o) : o.channel}</div>
+                        <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace" }}>{typeof orderShortId === "function" ? orderShortId(o) : o.id} · {typeof ChannelMark === "function" && <><ChannelMark channel={o.channel} size={12}/> </>}{typeof orderChannelLabel === "function" ? orderChannelLabel(o) : o.channel}</div>
                       </div>
                       <span className={"badge " + stCls} style={{ fontSize:10, flexShrink:0 }}>{stLab}</span>
                     </div>
