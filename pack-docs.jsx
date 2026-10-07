@@ -138,6 +138,136 @@ async function downloadOrderFile(file, fallbackName) {
   window.dispatchEvent(new CustomEvent("ims-toast", { detail: "ดาวน์โหลด " + name + " แล้ว" }));
 }
 
+/* ── codes on the attached label ── order number + tracking, read from the file
+   itself so the order can be found by the marketplace number and marked shipped.
+   A marketplace PDF (Shopee "Order No. 261006VVEJ5G05", tracking TH…) carries a
+   real text layer, so it is read as TEXT — exact, no OCR. A photo falls back to
+   decoding its barcodes / QR (the same codes, printed). pdf.js is loaded lazily,
+   only when a PDF label is opened; both scripts as plain <script> tags so pdf.js
+   runs its "fake worker" on the main thread (CSP only allows blob:/self workers). */
+const PDFJS_BASE = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+let _pdfjsP = null;
+function _loadPdfJs() {
+  if (window.pdfjsLib && window.pdfjsWorker) return Promise.resolve(window.pdfjsLib);
+  if (_pdfjsP) return _pdfjsP;
+  const add = (src) => new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = src; s.crossOrigin = "anonymous";
+    s.onload = res; s.onerror = () => rej(new Error("โหลดตัวอ่าน PDF ไม่ได้"));
+    document.head.appendChild(s);
+  });
+  _pdfjsP = add(PDFJS_BASE + "pdf.min.js")
+    .then(() => add(PDFJS_BASE + "pdf.worker.min.js"))
+    .then(() => window.pdfjsLib)
+    .catch(e => { _pdfjsP = null; throw e; });
+  return _pdfjsP;
+}
+async function _pdfText(dataUrl) {
+  const lib = await _loadPdfJs();
+  lib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + "pdf.worker.min.js";
+  const bin = atob(dataUrl.split(",")[1] || "");
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  const doc = await lib.getDocument({ data: arr, isEvalSupported: false }).promise;
+  let out = "";
+  for (let n = 1; n <= Math.min(doc.numPages, 2); n++) {
+    const tc = await (await doc.getPage(n)).getTextContent();
+    out += tc.items.map(i => i.str + (i.hasEOL ? "\n" : " ")).join("") + "\n";
+  }
+  doc.destroy();
+  return out;
+}
+async function _imageCodes(dataUrl) {
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = dataUrl; });
+  if ("BarcodeDetector" in window) {
+    try { return (await new BarcodeDetector().detect(img)).map(b => b.rawValue); } catch (e) {}
+  }
+  if (window.ZXing && window.ZXing.MultiFormatReader) {
+    // ZXing decodes one code per pass: decode, blank that code's area, repeat.
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+    const reader = new ZXing.MultiFormatReader();
+    const hints = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
+    const found = [];
+    for (let k = 0; k < 4; k++) {
+      try {
+        const src = new ZXing.HTMLCanvasElementLuminanceSource(c);
+        const r = reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(src)), hints);
+        found.push(r.getText());
+        const pts = r.getResultPoints().map(p => [p.getX(), p.getY()]);
+        const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+        g.fillStyle = "#fff";
+        g.fillRect(Math.min(...xs) - 40, Math.min(...ys) - 40, Math.max(...xs) - Math.min(...xs) + 80, Math.max(...ys) - Math.min(...ys) + 80);
+      } catch (e) { break; }
+    }
+    return found;
+  }
+  return [];
+}
+const LABEL_TRACK_RE = /\b(TH[0-9A-Z]{10,16}|SPX[0-9A-Z]{8,}|[A-Z]{2}\d{9}TH|JNT[0-9A-Z]{8,}|LEX[0-9A-Z]{8,}|KER[0-9A-Z]{8,}|\d{12,15})\b/;
+const SHOPEE_ORDER_RE = /\b(\d{6}[0-9A-Z]{8})\b/;
+/* Classify raw text/codes → { orderNo, tracking, platform } (any may be ""). */
+function parseLabelCodes(text, codes) {
+  const t = String(text || "").toUpperCase();
+  const all = [t, ...(codes || []).map(c => String(c).toUpperCase().trim())].join("\n");
+  let platform = /SHOPEE/.test(t) ? "Shopee" : /LAZADA/.test(t) ? "Lazada" : /TIKTOK/.test(t) ? "TikTok" : "";
+  let orderNo = "";
+  const labelled = t.match(/ORDER\s*(?:NO\.?|ID|NUMBER)?\s*[:.]?\s*((?=[0-9A-Z]*\d)[0-9A-Z]{8,20})\b/);
+  if (labelled) orderNo = labelled[1];
+  if (!orderNo) { const m = all.match(SHOPEE_ORDER_RE); if (m) { orderNo = m[1]; platform = platform || "Shopee"; } }
+  let tracking = "";
+  for (const s of [...(codes || []).map(c => String(c).toUpperCase().trim()), ...t.split(/\s+/)]) {
+    if (s === orderNo) continue;
+    const m = s.match(LABEL_TRACK_RE);
+    if (m && m[1] !== orderNo) { tracking = m[1]; break; }
+  }
+  return { orderNo, tracking, platform };
+}
+async function extractLabelCodes(file) {
+  const f = safeOrderFile(file);
+  if (!f) return null;
+  if (f.type === "application/pdf") {
+    const r = parseLabelCodes(await _pdfText(f.dataUrl), []);
+    if (r.orderNo || r.tracking) return r;
+    return null;
+  }
+  const codes = await _imageCodes(f.dataUrl);
+  const r = parseLabelCodes("", codes);
+  return (r.orderNo || r.tracking) ? r : null;
+}
+
+/* Fill in order number + tracking for every order that has a label attached but
+   none recorded yet — so the tracking list shows them without each order being
+   opened in แพ็คสินค้า. One file at a time (each is a ~250 KB fetch + parse); an
+   order is tried once per session, so a label with no readable codes isn't
+   re-downloaded on every orders refresh. Writers only (same gate as attaching). */
+const _codesTried = new Set();
+let _codesRunning = false;
+async function backfillLabelCodes(orders) {
+  if (_codesRunning || !_pdDb() || typeof setOrderField !== "function") return 0;
+  if (typeof canDo === "function" && !canDo("sell")) return 0;
+  _codesRunning = true;
+  let n = 0;
+  try {
+    if (!_orderFileIds) await refreshOrderFileIds();
+    const ids = _orderFileIds || new Set();
+    const todo = (orders || []).filter(o => o && ids.has(o.id) && !o.platformOrderNo && !_codesTried.has(o.id));
+    for (const o of todo) {
+      _codesTried.add(o.id);
+      let c = null;
+      try { c = await extractLabelCodes(await loadOrderFile(o.id)); } catch (e) { continue; }
+      if (!c) continue;
+      const ch = {};
+      if (c.orderNo) ch.platformOrderNo = c.orderNo;
+      if (c.platform && !o.platform) ch.platform = c.platform;
+      if (c.tracking && !o.tracking) ch.tracking = c.tracking;
+      if (Object.keys(ch).length) { setOrderField(o.id, ch); n++; }
+    }
+  } finally { _codesRunning = false; }
+  return n;
+}
+
 /* ── attachments ── many photos/PDFs per order (order_attachments,
    supabase/order-attachments.sql). Unlike the single label slot above, the
    packer may add them too — e.g. a photo of the packed parcel as evidence. */
@@ -195,6 +325,37 @@ function PackAttachments({ orderId, pushToast, card }) {
   const [rev, setRev] = useStatePD(0);
   const inputRef = useRefPD(null);
   const canAdd = canAddOrderAttachment();
+
+  /* Read order number + tracking off the label once it's loaded, and keep them on
+     the order (overrides) so search / tracking / ship-status use the real numbers. */
+  const [codes, setCodes] = useStatePD(null);   // null | "reading" | {orderNo,tracking,platform} | "none"
+  useEffectPD(() => {
+    if (!file) { setCodes(null); return; }
+    let alive = true;
+    setCodes("reading");
+    extractLabelCodes(file)
+      .then(c => {
+        if (!alive) return;
+        setCodes(c || "none");
+        if (!c || !canAttach || typeof setOrderField !== "function") return;
+        const ch = {};
+        if (c.orderNo && c.orderNo !== order.platformOrderNo) ch.platformOrderNo = c.orderNo;
+        if (c.platform && !order.platform) ch.platform = c.platform;
+        if (c.tracking && !order.tracking) ch.tracking = c.tracking;
+        if (Object.keys(ch).length) setOrderField(order.id, ch);
+      })
+      .catch(() => { if (alive) setCodes("none"); });
+    return () => { alive = false; };
+  }, [file]);
+  const shipped = order.status === "shipped" || order.status === "delivered";
+  const markShipped = () => {
+    if (typeof setOrderField !== "function") return;
+    const c = codes && typeof codes === "object" ? codes : {};
+    const ch = { status: "shipped", shippedAt: new Date().toISOString() };
+    if (c.tracking && !order.tracking) ch.tracking = c.tracking;
+    setOrderField(order.id, ch);
+    pushToast("จัดส่งแล้ว — " + (c.orderNo || order.platformOrderNo || order.id));
+  };
 
   useEffectPD(() => {
     let alive = true;
@@ -886,6 +1047,25 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
           : !file ? <div style={{ fontSize: 12, color: "var(--muted)" }}>{busy ? "กำลังอัปโหลด…" : canUpload ? "ยังไม่มีไฟล์ — แนบรูปหรือ PDF ใบปะหน้าจาก Shopee / Lazada / ขนส่ง" : "ไม่มีไฟล์แนบ — ใช้ที่อยู่ด้านล่าง"}</div>
           : file.type === "application/pdf" ? <div style={{ fontSize: 13 }}>📄 {file.name}</div>
           : <img src={file.dataUrl} alt="ใบปะหน้า" style={{ width: "100%", maxHeight: mobile ? 320 : 260, objectFit: "contain", borderRadius: 8, background: "#fff" }}/>}
+        {file && codes === "reading" && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>กำลังอ่านเลขคำสั่งซื้อจากใบปะหน้า…</div>}
+        {file && codes === "none" && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>อ่านเลขคำสั่งซื้อจากไฟล์นี้ไม่ได้</div>}
+        {file && codes && typeof codes === "object" && (
+          <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
+            {codes.orderNo && <div className="row" style={{ gap: 8, fontSize: 13, flexWrap: "wrap" }}>
+              <span style={{ color: "var(--muted)", minWidth: 92, display: "inline-flex", alignItems: "center", gap: 5 }}>{codes.platform && typeof ChannelMark === "function" && <ChannelMark channel={codes.platform} size={16}/>}เลขคำสั่งซื้อ</span>
+              <strong style={{ fontFamily: "var(--mono, monospace)" }}>{codes.orderNo}</strong>
+              <button className="btn btn-ghost btn-sm" onClick={() => copyPackText(codes.orderNo, "เลขคำสั่งซื้อ", pushToast)}><Icons.Copy size={12}/></button>
+            </div>}
+            {codes.tracking && <div className="row" style={{ gap: 8, fontSize: 13, flexWrap: "wrap" }}>
+              <span style={{ color: "var(--muted)", minWidth: 92 }}>เลขพัสดุ</span>
+              <strong style={{ fontFamily: "var(--mono, monospace)" }}>{codes.tracking}</strong>
+              <button className="btn btn-ghost btn-sm" onClick={() => copyPackText(codes.tracking, "เลขพัสดุ", pushToast)}><Icons.Copy size={12}/></button>
+            </div>}
+            {shipped
+              ? <div style={{ fontSize: 12, color: "var(--success, green)" }}>✓ จัดส่งแล้ว</div>
+              : canAttach && <div><button className="btn btn-sm btn-primary" onClick={markShipped}><Icons.Check size={13}/> จัดส่งแล้ว</button></div>}
+          </div>
+        )}
       </div>
 
       {/* recipient */}
@@ -1261,7 +1441,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
+  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });

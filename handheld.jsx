@@ -8330,12 +8330,17 @@ function MTracking({ ctx }) {
   const [bulkMenu, setBulkMenu] = useStateM(null);
   const [slipOpen, setSlipOpen] = useStateM(false);
   const [sortDir, setSortDir] = useStateM("desc"); // วันที่: desc = ใหม่สุดก่อน
+  // Read order no. + tracking off attached labels that haven't been read yet.
+  useEffectM(() => {
+    if (typeof backfillLabelCodes !== "function") return;
+    backfillLabelCodes(orders).then(n => { if (n) ctx.pushToast(`อ่านเลขคำสั่งซื้อจากใบปะหน้าแล้ว ${n} ออร์เดอร์`); }).catch(() => {});
+  }, [orders.length]);
 
   const filtered = orders.filter(o => {
     if (statusFilter !== "all" && o.status !== statusFilter) return false;
     if (q) {
       const ql = q.toLowerCase();
-      const match = (o.id + " " + o.customer + " " + o.phone + " " + o.tracking + " " + o.carrier).toLowerCase().includes(ql);
+      const match = (o.id + " " + o.customer + " " + o.phone + " " + o.tracking + " " + o.carrier + " " + (o.platformOrderNo || "")).toLowerCase().includes(ql);
       if (!match) return false;
     }
     return true;
@@ -8417,7 +8422,8 @@ function MTracking({ ctx }) {
                       <span className="dot"/>{stage.label}
                     </span>
                   </div>
-                  <div className="m-row-sub">{o.customer}</div>
+                  <div className="m-row-sub" style={{ display: "flex", alignItems: "center", gap: 5 }}>{o.platform && <ChannelMark channel={o.platform} size={16}/>}<span>{typeof orderCustomerText === "function" ? orderCustomerText(o) : o.customer}</span></div>
+                  {o.platformOrderNo && !(typeof orderCustomerText === "function" && orderCustomerText(o) !== o.customer) && <div className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>{o.platform || "คำสั่งซื้อ"} {o.platformOrderNo}</div>}
                   <div className="row" style={{ gap: 6, marginTop: 2 }}>
                     <span className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>{o.phone}</span>
                     {o.tracking && <><span style={{ fontSize: 10, color: "var(--muted)" }}>·</span><span className="mono" style={{ fontSize: 10, color: "var(--fg-2)" }}>{o.tracking}</span></>}

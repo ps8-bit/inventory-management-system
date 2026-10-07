@@ -327,6 +327,15 @@ function phoneNSN(s) {
   return d.replace(/^0+/, "");
 }
 
+// Orders made from an attached label have no real name ("ดูใบปะหน้า"); once the
+// marketplace number has been read off that label, show it instead.
+const LABEL_PLACEHOLDER_NAMES = ["ดูใบปะหน้า", "ลูกค้า", ""];
+function orderCustomerText(o) {
+  const name = String((o && o.customer) || "").trim();
+  if (o && o.platformOrderNo && LABEL_PLACEHOLDER_NAMES.includes(name)) return (o.platform ? o.platform + " " : "") + o.platformOrderNo;
+  return name;
+}
+
 // Does an order match a customer's free-text query (phone / name / tracking / id)?
 // Phone is matched format-agnostically; name matches as a full substring OR when
 // every typed word appears in the stored name (handles reversed order, titles,
@@ -504,11 +513,21 @@ function TrackingPage({ pushToast, store, focus }) {
     setQ(focus.orderId);
   }, [focus && focus.n, orders]);
 
+  // Read order no. + tracking off attached labels that haven't been read yet.
+  useEffectTrk(() => {
+    if (typeof backfillLabelCodes !== "function") return;
+    backfillLabelCodes(orders).then(n => { if (n) pushToast(`อ่านเลขคำสั่งซื้อจากใบปะหน้าแล้ว ${n} ออร์เดอร์`); }).catch(() => {});
+  }, [orders.length]);
+  const shipOne = (o) => {
+    setOrderField(o.id, { status: "shipped", shippedAt: new Date().toISOString() });
+    pushToast(`${o.platformOrderNo || o.id} — ส่งให้ขนส่งแล้ว`);
+  };
+
   const filtered = orders.filter(o => {
     if (statusFilter !== "all" && o.status !== statusFilter) return false;
     if (q) {
       const ql = q.toLowerCase();
-      const match = (o.id + " " + o.customer + " " + o.phone + " " + o.tracking + " " + o.carrier).toLowerCase().includes(ql);
+      const match = (o.id + " " + o.customer + " " + o.phone + " " + o.tracking + " " + o.carrier + " " + (o.platformOrderNo || "")).toLowerCase().includes(ql);
       if (!match) return false;
     }
     return true;
@@ -755,9 +774,12 @@ function TrackingPage({ pushToast, store, focus }) {
                   <td onClick={(e) => { e.stopPropagation(); toggleOne(o.id); }}>
                     <span className={"check" + (isSelected ? " on" : "")}/>
                   </td>
-                  <td className="t-mono" style={{ color: "var(--fg)", fontWeight: 500 }} onClick={() => setEdit(o)}>{o.id}</td>
+                  <td className="t-mono" style={{ color: "var(--fg)", fontWeight: 500 }} onClick={() => setEdit(o)}>
+                    {o.id}
+                    {o.platformOrderNo && orderCustomerText(o) === o.customer && <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400, marginTop: 2 }}>{o.platform || "คำสั่งซื้อ"} {o.platformOrderNo}</div>}
+                  </td>
                   <td onClick={() => setEdit(o)}>
-                    <div style={{ fontSize: 13 }}>{o.customer}</div>
+                    <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>{o.platform && <ChannelMark channel={o.platform} size={18}/>}<span>{orderCustomerText(o)}</span></div>
                     <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{o.phone}</div>
                   </td>
                   <td onClick={() => setEdit(o)}>
@@ -778,7 +800,14 @@ function TrackingPage({ pushToast, store, focus }) {
                     </span>
                   </td>
                   <td style={{ fontSize: 12, color: "var(--muted)" }} onClick={() => setEdit(o)}>{o.date} {o.ts}</td>
-                  <td onClick={() => setEdit(o)}><Icons.Edit size={14} style={{ color: "var(--muted)" }}/></td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {(o.status === "picking" || o.status === "packed") && canDo("sell") && (
+                      <button className="btn btn-sm" title="ส่งให้ขนส่งแล้ว" onClick={(e) => { e.stopPropagation(); shipOne(o); }} style={{ marginRight: 6 }}>
+                        <Icons.Truck size={13}/> ส่งแล้ว
+                      </button>
+                    )}
+                    <Icons.Edit size={14} style={{ color: "var(--muted)", cursor: "pointer", verticalAlign: "middle" }} onClick={() => setEdit(o)}/>
+                  </td>
                 </tr>
               );
             })}
@@ -2130,4 +2159,4 @@ function CustomerOrderDetail({ order, store, onBack }) {
   );
 }
 
-Object.assign(window, { TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });
+Object.assign(window, { orderCustomerText, TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });
