@@ -227,21 +227,44 @@ const THAI_PUA = { "\uF70A": "\u0E48", "\uF70B": "\u0E49", "\uF70C": "\u0E4A", "
   "\uF710": "\u0E31", "\uF711": "\u0E34", "\uF712": "\u0E35", "\uF713": "\u0E47", "\uF701": "\u0E34", "\uF702": "\u0E35", "\uF703": "\u0E36", "\uF704": "\u0E37" };
 function fixThaiPua(s) { return String(s || "").replace(/[\uF700-\uF71F]/g, c => THAI_PUA[c] || "").replace(/ํา/g, "ำ"); }
 /* Shopee: "ผู้รับ (TO)" / "ผู้ส่ง (FROM)" headers, then the recipient's name on the
-   next line. Only a short, address-free line is accepted as a name. */
-function _labelRecipientName(text) {
+   next line and their address after it (up to the line with the 5-digit postcode,
+   at most 3 lines, stopping at NOTE / the shop's own block). Only a short,
+   address-free line is accepted as a name. */
+function _labelRecipient(text) {
+  const out = { name: "", addr: "", phone: "" };
   const lines = fixThaiPua(text).split(/\n/).map(l => l.trim()).filter(Boolean);
   const i = lines.findIndex(l => /\(FROM\)/i.test(l));
-  if (i < 0) return "";
+  if (i < 0) return out;
   const shop = String((window.__storeName || "PS Tactical")).toLowerCase();
-  for (const l of lines.slice(i + 1, i + 3)) {
-    if (l.length > 40 || /\d{3,}|ตำบล|อำเภอ|จังหวัด/.test(l) || l.toLowerCase() === shop || /^(NOTE|SPEED)$/i.test(l)) continue;
-    return l;
+  const stop = (l) => l.toLowerCase() === shop || /^(NOTE|SPEED|DROP|PICKUP)/i.test(l) || /\((TO|FROM)\)/i.test(l);
+  for (let j = i + 1; j < Math.min(lines.length, i + 3); j++) {
+    const l = lines[j];
+    if (stop(l)) continue;
+    if (l.length > 40 || /\d{3,}|ตำบล|อำเภอ|จังหวัด/.test(l)) break;
+    out.name = l; break;
   }
-  return "";
+  // Two-column layout, read in mixed order: the line after the name is the
+  // SENDER's (shop's) address; the recipient's address follows "NOTE" and runs
+  // up to the shop-name line. Take that block, ending at its postcode.
+  const n = lines.findIndex((l, k) => k > i && /^NOTE\b/i.test(l));
+  if (n < 0) return out;
+  const parts = [];
+  for (let k = n + 1; k < lines.length && parts.length < 4; k++) {
+    const l = lines[k];
+    if (stop(l)) break;
+    const ph = l.match(/(?:\+?66|0)\d[\d\s-]{7,11}\d/);
+    if (ph && !out.phone && l.replace(ph[0], "").trim().length < 3) { out.phone = ph[0].replace(/[\s-]/g, ""); continue; }
+    parts.push(l);
+  }
+  let last = -1;
+  parts.forEach((l, k) => { if (/\b\d{5}\b/.test(l)) last = k; });
+  if (last >= 0) out.addr = parts.slice(0, last + 1).join(" ").replace(/\s+/g, " ").replace(/,\s*,/g, ",").trim();
+  return out;
 }
 /* Classify raw text/codes → { orderNo, tracking, platform, name } (any may be ""). */
 function parseLabelCodes(text, codes) {
-  const name = _labelRecipientName(text);
+  const who = _labelRecipient(text);
+  const name = who.name;
   const t = String(text || "").toUpperCase();
   const all = [t, ...(codes || []).map(c => String(c).toUpperCase().trim())].join("\n");
   let platform = /SHOPEE/.test(t) ? "Shopee" : /LAZADA/.test(t) ? "Lazada" : /TIKTOK/.test(t) ? "TikTok" : "";
@@ -255,7 +278,7 @@ function parseLabelCodes(text, codes) {
     const m = s.match(LABEL_TRACK_RE);
     if (m && m[1] !== orderNo) { tracking = m[1]; break; }
   }
-  return { orderNo, tracking, platform, name };
+  return { orderNo, tracking, platform, name, addr: who.addr, phone: who.phone };
 }
 async function extractLabelCodes(file) {
   const f = safeOrderFile(file);
@@ -358,7 +381,7 @@ async function backfillLabelCodes(orders) {
   try {
     if (!_orderFileIds) await refreshOrderFileIds();
     const ids = _orderFileIds || new Set();
-    const todo = (orders || []).filter(o => o && ids.has(o.id) && (!o.platformOrderNo || isLabelPlaceholderName(o.customer)) && !_codesTried.has(o.id));
+    const todo = (orders || []).filter(o => o && ids.has(o.id) && (!o.platformOrderNo || isLabelPlaceholderName(o.customer) || !(packRecipientFor(o) || {}).addr) && !_codesTried.has(o.id));
     for (const o of todo) {
       _codesTried.add(o.id);
       let c = null;
@@ -369,6 +392,7 @@ async function backfillLabelCodes(orders) {
       if (c.platform && !o.platform) ch.platform = c.platform;
       if (c.tracking && !o.tracking) ch.tracking = c.tracking;
       if (c.name && isLabelPlaceholderName(o.customer)) ch.customer = c.name;
+      if (c.addr && !(o.shipTo && o.shipTo.addr) && !(packRecipientFor(o) || {}).addr) ch.shipTo = { name: c.name || "", phone: c.phone || "", addr: c.addr };
       if (Object.keys(ch).length) { setOrderField(o.id, ch); n++; }
     }
   } finally { _codesRunning = false; }
@@ -1070,6 +1094,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
         if (c.platform && !order.platform) ch.platform = c.platform;
         if (c.tracking && !order.tracking) ch.tracking = c.tracking;
         if (c.name && isLabelPlaceholderName(order.customer)) ch.customer = c.name;
+        if (c.addr && !(order.shipTo && order.shipTo.addr) && !(packRecipientFor(order) || {}).addr) ch.shipTo = { name: c.name || "", phone: c.phone || "", addr: c.addr };
         if (Object.keys(ch).length) setOrderField(order.id, ch);
       })
       .catch(() => { if (alive) setCodes("none"); });
