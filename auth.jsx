@@ -79,6 +79,7 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
   const [loading,    setLoading]    = useStateAuth(false);
   const [error,      setError]      = useStateAuth("");
   const [forgotSent, setForgotSent] = useStateAuth(false);
+  const [redeemOpen, setRedeemOpen] = useStateAuth(() => /[?&#]invite=/.test(window.location.href));
 
   const submit = async (e) => {
     e?.preventDefault();
@@ -132,7 +133,9 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
           </div>
         )}
 
-        {forgotSent ? (
+        {redeemOpen ? (
+          <RedeemInviteForm onBack={() => setRedeemOpen(false)}/>
+        ) : forgotSent ? (
           <div className="stack" style={{ gap: 14 }}>
             <div style={{ padding: "14px 16px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 10, fontSize: 13, textAlign: "center", lineHeight: 1.6 }}>
               ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่<br/><strong>{email}</strong> แล้ว<br/>
@@ -206,6 +209,10 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
             >
               {loading ? "กำลังเข้าสู่ระบบ…" : <>ลงชื่อเข้าใช้ <Icons.ArrowRight size={14}/></>}
             </button>
+            <button type="button" className="btn" style={{ justifyContent: "center" }}
+              onClick={() => { setRedeemOpen(true); setError(""); }}>
+              พนักงานใหม่? สร้างบัญชีด้วยรหัสเชิญ
+            </button>
         </form>
         )}
 
@@ -213,6 +220,176 @@ function LoginScreen({ notice = "", onDismissNotice } = {}) {
           ระบบนี้เข้ารหัสด้วย TLS 1.3 · ปฏิบัติตาม PDPA
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ============ INVITE CODES ============
+   Admin creates a one-time code (role + expiry) → new employee enters it on the
+   login screen and creates their own email + password. Codes live server-side
+   (public.invite_codes, service-role only); see manage-users + redeem-invite. */
+function fmtInviteCode(raw) {
+  const s = String(raw || "").toUpperCase().replace(/[^0-9A-Z]/g, "").slice(0, 8);
+  return s.length > 4 ? s.slice(0, 4) + "-" + s.slice(4) : s;
+}
+
+function RedeemInviteForm({ onBack }) {
+  const initial = (() => { const m = window.location.href.match(/[?&#]invite=([0-9A-Za-z-]+)/); return m ? fmtInviteCode(m[1]) : ""; })();
+  const [f, setF] = useStateAuth({ code: initial, name: "", email: "", password: "", confirm: "" });
+  const [busy, setBusy] = useStateAuth(false);
+  const [error, setError] = useStateAuth("");
+  const busyRef = useRefAuth(false);
+  const set = (k) => (e) => { const v = k === "code" ? fmtInviteCode(e.target.value) : e.target.value; setF(cur => ({ ...cur, [k]: v })); setError(""); };
+  const ready = f.code.length === 9 && f.name.trim() && f.email && f.password && f.confirm;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (busyRef.current || !ready) return;
+    if (!EMAIL_RE.test(f.email.trim())) { setError("รูปแบบอีเมลไม่ถูกต้อง"); return; }
+    if (f.password.length < 8) { setError("รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร"); return; }
+    if (f.password !== f.confirm) { setError("รหัสผ่านทั้งสองช่องไม่ตรงกัน"); return; }
+    busyRef.current = true; setBusy(true); setError("");
+    const email = f.email.trim().toLowerCase();
+    const { error: err } = await redeemInviteCode({ code: f.code, name: f.name.trim(), email, password: f.password });
+    if (err) { setError(err); busyRef.current = false; setBusy(false); return; }
+    try { history.replaceState(null, "", window.location.pathname); } catch (x) {}
+    // Account exists — sign straight in; authOnChange in Root takes over.
+    const { error: sErr } = await authSignIn(email, f.password);
+    if (sErr) { setError("สร้างบัญชีแล้ว — กรุณาเข้าสู่ระบบด้วยอีเมลและรหัสผ่านที่ตั้งไว้"); busyRef.current = false; setBusy(false); }
+  };
+
+  return (
+    <form onSubmit={submit} className="stack" style={{ gap: 12 }}>
+      <div style={{ fontSize: 13, color: "var(--muted)", textAlign: "center", lineHeight: 1.55 }}>
+        กรอกรหัสเชิญที่ได้รับจากผู้ดูแล แล้วตั้งอีเมลและรหัสผ่านของคุณเอง
+      </div>
+      <div className="field"><label htmlFor="inv-code">รหัสเชิญ</label>
+        <input id="inv-code" className="input input-lg mono" value={f.code} onChange={set("code")} placeholder="XXXX-XXXX"
+          autoCapitalize="characters" autoComplete="off" style={{ letterSpacing: "0.15em", textAlign: "center" }} autoFocus={!initial}/></div>
+      <div className="field"><label htmlFor="inv-name">ชื่อที่แสดง</label>
+        <input id="inv-name" className="input input-lg" value={f.name} onChange={set("name")} placeholder="เช่น สมชาย" autoComplete="name" autoFocus={!!initial}/></div>
+      <div className="field"><label htmlFor="inv-email">อีเมล</label>
+        <input id="inv-email" className="input input-lg" type="email" value={f.email} onChange={set("email")} placeholder="you@example.com" autoComplete="email"/></div>
+      <div className="field"><label htmlFor="inv-pw">ตั้งรหัสผ่าน (อย่างน้อย 8 ตัว)</label>
+        <input id="inv-pw" className="input input-lg" type="password" value={f.password} onChange={set("password")} autoComplete="new-password"/></div>
+      <div className="field"><label htmlFor="inv-pw2">ยืนยันรหัสผ่าน</label>
+        <input id="inv-pw2" className="input input-lg" type="password" value={f.confirm} onChange={set("confirm")} autoComplete="new-password"/></div>
+      {error && <div style={{ padding: "10px 12px", background: "var(--danger-soft)", color: "var(--danger)", borderRadius: 8, fontSize: 12 }}>{error}</div>}
+      <button type="submit" className="btn btn-accent" disabled={busy || !ready}
+        style={{ padding: "13px 16px", fontSize: 15, justifyContent: "center", opacity: ready ? 1 : 0.5 }}>
+        {busy ? "กำลังสร้างบัญชี…" : "สร้างบัญชีและเข้าใช้งาน"}
+      </button>
+      <button type="button" className="btn" style={{ justifyContent: "center" }} onClick={onBack} disabled={busy}>← กลับไปเข้าสู่ระบบ</button>
+    </form>
+  );
+}
+
+/* Shared by desktop UserManagement (modal) and mobile MUsers (sheet). */
+function InviteCodesPanel({ pushToast }) {
+  const [codes, setCodes] = useStateAuth([]);
+  const [loading, setLoading] = useStateAuth(true);
+  const [err, setErr] = useStateAuth("");
+  const [role, setRole] = useStateAuth("staff");
+  const [days, setDays] = useStateAuth(7);
+  const [note, setNote] = useStateAuth("");
+  const [busy, setBusy] = useStateAuth(false);
+  const toast = (m) => pushToast ? pushToast(m) : window.dispatchEvent(new CustomEvent("ims-toast", { detail: m }));
+  const roles = ROLES.filter(r => r.id !== "admin");
+  const roleLabel = (id) => (ROLES.find(r => r.id === id) || {}).label || id;
+
+  useEffectAuth(() => {
+    let alive = true;
+    (async () => {
+      const { data, error } = await manageUsers("codeList");
+      if (!alive) return;
+      setLoading(false);
+      if (error) { setErr(error); return; }
+      setCodes(data.codes || []);
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const statusOf = (c) => c.used_at ? "used" : c.revoked_at ? "revoked" : new Date(c.expires_at) < new Date() ? "expired" : "open";
+  const link = (c) => window.location.origin + "/?invite=" + c.code;
+  const shareText = (c) => `รหัสเชิญเข้าใช้ระบบคลัง PS TACTICAL: ${c.code}\nตำแหน่ง: ${roleLabel(c.role)}\nเปิดลิงก์นี้เพื่อสร้างบัญชี: ${link(c)}`;
+  const copy = async (c) => {
+    try { await navigator.clipboard.writeText(shareText(c)); toast("คัดลอกรหัสและลิงก์แล้ว — ส่งให้พนักงานได้เลย"); }
+    catch (e) { toast("รหัสเชิญคือ " + c.code); }
+  };
+  const share = async (c) => {
+    if (navigator.share) { try { await navigator.share({ text: shareText(c) }); } catch (e) {} return; }
+    copy(c);
+  };
+
+  const create = async () => {
+    if (busy) return;
+    setBusy(true);
+    const { data, error } = await manageUsers("codeCreate", { role, days, note });
+    setBusy(false);
+    if (error) { toast(error); return; }
+    setCodes(cs => [data.code, ...cs]);
+    setNote("");
+    copy(data.code);
+  };
+  const revoke = async (c) => {
+    if (!confirm(`ยกเลิกรหัส ${c.code}?`)) return;
+    const { error } = await manageUsers("codeRevoke", { code: c.code });
+    if (error) { toast(error); return; }
+    setCodes(cs => cs.map(x => x.code === c.code ? { ...x, revoked_at: new Date().toISOString() } : x));
+    toast("ยกเลิกรหัสแล้ว");
+  };
+
+  const badge = { open: ["badge-success", "ใช้ได้"], used: ["badge-info", "ใช้แล้ว"], revoked: ["badge-neutral", "ยกเลิก"], expired: ["badge-neutral", "หมดอายุ"] };
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <div className="stack" style={{ gap: 10, padding: 14, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12 }}>
+        <div style={{ fontWeight: 600, fontSize: 13 }}>สร้างรหัสเชิญใหม่</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+          <div className="field"><label>ตำแหน่ง</label>
+            <select className="input" value={role} onChange={e => setRole(e.target.value)}>
+              {roles.map(r => <option key={r.id} value={r.id}>{r.label}</option>)}
+            </select></div>
+          <div className="field"><label>หมดอายุใน</label>
+            <select className="input" value={days} onChange={e => setDays(Number(e.target.value))}>
+              {[1, 3, 7, 14, 30].map(d => <option key={d} value={d}>{d} วัน</option>)}
+            </select></div>
+          <div className="field"><label>หมายเหตุ (ไม่บังคับ)</label>
+            <input className="input" value={note} maxLength={80} onChange={e => setNote(e.target.value)} placeholder="เช่น ชื่อพนักงาน"/></div>
+        </div>
+        <button className="btn btn-accent" style={{ justifyContent: "center" }} onClick={create} disabled={busy}>
+          <Icons.Plus/> {busy ? "กำลังสร้าง…" : "สร้างรหัส (ใช้ได้ 1 คน)"}
+        </button>
+        <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.5 }}>
+          ส่งรหัสหรือลิงก์ให้พนักงาน → พนักงานกด “พนักงานใหม่? สร้างบัญชีด้วยรหัสเชิญ” ที่หน้าเข้าสู่ระบบ แล้วตั้งอีเมลและรหัสผ่านเอง
+        </div>
+      </div>
+
+      {loading ? <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: 16 }}>กำลังโหลด…</div>
+        : err ? <div style={{ fontSize: 12, color: "var(--danger)" }}>โหลดรหัสไม่สำเร็จ: {err}</div>
+        : codes.length === 0 ? <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", padding: 16 }}>ยังไม่มีรหัสเชิญ</div>
+        : <div className="stack" style={{ gap: 8 }}>
+            {codes.map(c => {
+              const st = statusOf(c);
+              return (
+                <div key={c.code} className="row" style={{ gap: 10, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, opacity: st === "open" ? 1 : 0.6, flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: 150 }}>
+                    <div className="row" style={{ gap: 8 }}>
+                      <span className="mono" style={{ fontWeight: 700, fontSize: 15, letterSpacing: "0.08em" }}>{c.code}</span>
+                      <span className={"badge " + badge[st][0]}>{badge[st][1]}</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                      {roleLabel(c.role)}{c.note ? " · " + c.note : ""}
+                      {st === "used" ? " · " + (c.used_email || "") : st === "open" ? " · หมดอายุ " + new Date(c.expires_at).toLocaleDateString("th-TH") : ""}
+                    </div>
+                  </div>
+                  {st === "open" && <>
+                    <button className="btn" onClick={() => share(c)}>ส่ง/คัดลอก</button>
+                    <button className="btn btn-ghost" style={{ color: "var(--danger)" }} onClick={() => revoke(c)}>ยกเลิก</button>
+                  </>}
+                </div>
+              );
+            })}
+          </div>}
     </div>
   );
 }
@@ -613,6 +790,7 @@ function UserManagement({ currentUser, pushToast, store, setStore, allNav }) {
   const [loadingUsers, setLoadingUsers] = useStateAuth(true);
   const [loadError, setLoadError] = useStateAuth("");
   const [inviteOpen, setInviteOpen] = useStateAuth(false);
+  const [codesOpen, setCodesOpen] = useStateAuth(false);
   const [schedOpen, setSchedOpen] = useStateAuth(false);   // shared schedule editor modal
   const [q, setQ] = useStateAuth("");
   const [roleFilter, setRoleFilter] = useStateAuth("all");
@@ -734,6 +912,7 @@ function UserManagement({ currentUser, pushToast, store, setStore, allNav }) {
         <div className="row">
           {setStore && <button className="btn" onClick={() => setSchedOpen(true)}><Icons.History size={14}/> แก้ไขเวลาทำการ</button>}
           <button className="btn" onClick={() => { const csv = "Name,Email,Role,Status\n" + users.map(u => `${u.name},${u.email},${u.role},${u.active ? "Active" : "Inactive"}`).join("\n"); const blob = new Blob([csv], {type: "text/csv"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "users.csv"; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออกรายชื่อ</button>
+          <button className="btn" onClick={() => setCodesOpen(true)}><Icons.Lock size={14}/> รหัสเชิญพนักงาน</button>
           <button className="btn btn-accent" onClick={() => setInviteOpen(true)}><Icons.Plus/> เชิญสมาชิกใหม่</button>
         </div>
       </div>
@@ -852,6 +1031,23 @@ function UserManagement({ currentUser, pushToast, store, setStore, allNav }) {
       {/* Per-role permission editor */}
       <RolePermissions currentUser={currentUser} pushToast={pushToast} allNav={allNav}/>
 
+      {codesOpen && (
+        <>
+          <div className="drawer-backdrop" onClick={() => setCodesOpen(false)}/>
+          <div className="modal" style={{ maxWidth: 620, width: "92%" }}>
+            <div className="modal-head">
+              <div>
+                <h3>รหัสเชิญพนักงาน</h3>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>พนักงานใช้รหัสนี้สร้างบัญชีของตัวเอง — ไม่ต้องส่งอีเมลเชิญ</div>
+              </div>
+              <button className="btn btn-ghost btn-icon" onClick={() => setCodesOpen(false)}><Icons.X/></button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: "70vh", overflow: "auto" }}>
+              <InviteCodesPanel pushToast={pushToast}/>
+            </div>
+          </div>
+        </>
+      )}
       {inviteOpen && <InviteUserModal onClose={() => setInviteOpen(false)} onSubmit={inviteUser}/>}
       {schedOpen && setStore && (
         <>
@@ -1345,4 +1541,4 @@ const NAV_GROUP_LABELS = {
   system: "ระบบ"
 };
 
-Object.assign(window, { LoginScreen, ResetPasswordScreen, passwordUpdateErrorToThai, ForgotPasswordScreen, UserManagement, LayoutCustomize, RolePermissions, MOBILE_ONLY_NAV, NAV_GROUP_LABELS, recoveryLinkErrorMsg });
+Object.assign(window, { LoginScreen, RedeemInviteForm, InviteCodesPanel, ResetPasswordScreen, passwordUpdateErrorToThai, ForgotPasswordScreen, UserManagement, LayoutCustomize, RolePermissions, MOBILE_ONLY_NAV, NAV_GROUP_LABELS, recoveryLinkErrorMsg });

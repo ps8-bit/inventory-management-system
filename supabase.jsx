@@ -1030,6 +1030,23 @@ async function manageUsers(action, payload = {}) {
   }
 }
 
+// New employee redeems an admin-issued invite code to create their own account
+// (public redeem-invite Edge Function — no session exists yet).
+async function redeemInviteCode(payload) {
+  try {
+    const res = await fetch(SUPABASE_URL + '/functions/v1/redeem-invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) return { error: json.error || 'เกิดข้อผิดพลาด' };
+    return { data: json };
+  } catch (e) {
+    return { error: 'เชื่อมต่อไม่ได้ — ตรวจสอบอินเทอร์เน็ต' };
+  }
+}
+
 // Send a LINE test broadcast via the line-alert Edge Function (admin-only).
 // Confirms the LINE Messaging API wiring once LINE_CHANNEL_ACCESS_TOKEN is set.
 async function lineTest() {
@@ -1398,7 +1415,7 @@ Object.assign(window, {
   dbLoadState,         dbSaveState,          dbLoadProductImages,  dbLoadLocationImages,
   dbServerTimeMs,
   dbInsertAuditEntry,  dbLoadAuditLog,    dbDeleteAuditLog,  dbLoadAuditDay,  dbCountAuditLog,
-  manageUsers,         lineTest,           lineBotPreview,      runCloudBackup,
+  manageUsers,         redeemInviteCode,    lineTest,           lineBotPreview,      runCloudBackup,
   // Auth helpers — thin wrappers so auth.jsx / app.jsx never import sb directly
   authSignIn:        (email, password) => sb.auth.signInWithPassword({ email, password }),
   // scope:'local' clears only this device's persisted session (used by the

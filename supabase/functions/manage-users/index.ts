@@ -24,6 +24,15 @@ function corsFor(req: Request) {
 
 const ALLOWED_ROLES = ["admin", "manager", "staff", "packer", "viewer"];
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// Invite codes never grant admin — an admin account is always created deliberately.
+const CODE_ROLES = ["manager", "staff", "packer", "viewer"];
+// No 0/O/1/I/L — codes are read aloud and typed on phones.
+const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+function genCode() {
+  const b = crypto.getRandomValues(new Uint8Array(8));
+  const c = Array.from(b, (x) => CODE_ALPHABET[x % CODE_ALPHABET.length]).join("");
+  return c.slice(0, 4) + "-" + c.slice(4);
+}
 
 // Shape an auth.users row into what the UI table expects.
 function toClientUser(u: any) {
@@ -132,6 +141,43 @@ Deno.serve(async (req) => {
         if (id === caller.id) return json({ error: "ลบบัญชีของตัวเองไม่ได้" }, 400);
         const { error } = await admin.auth.admin.deleteUser(id);
         if (error) return json({ error: error.message }, 400);
+        return json({ ok: true });
+      }
+
+      /* ---- invite codes: create / list / revoke ---- */
+      case "codeCreate": {
+        const { role } = payload;
+        const note = String(payload.note || "").trim().slice(0, 80);
+        const days = Math.min(30, Math.max(1, Number(payload.days) || 7));
+        if (!CODE_ROLES.includes(role)) return json({ error: "บทบาทไม่ถูกต้อง" }, 400);
+        const expires_at = new Date(Date.now() + days * 86400000).toISOString();
+        for (let i = 0; i < 5; i++) {
+          const code = genCode();
+          const { data, error } = await admin.from("invite_codes")
+            .insert({ code, role, note: note || null, created_by: caller.id, expires_at })
+            .select().single();
+          if (!error) return json({ code: data });
+          if (error.code !== "23505") return json({ error: error.message }, 400);   // retry only on collision
+        }
+        return json({ error: "สร้างรหัสไม่สำเร็จ ลองใหม่" }, 500);
+      }
+
+      case "codeList": {
+        const since = new Date(Date.now() - 30 * 86400000).toISOString();
+        const { data, error } = await admin.from("invite_codes")
+          .select("*").gte("created_at", since).order("created_at", { ascending: false }).limit(100);
+        if (error) return json({ error: error.message }, 400);
+        return json({ codes: data || [] });
+      }
+
+      case "codeRevoke": {
+        const { code } = payload;
+        if (!code) return json({ error: "ข้อมูลไม่ถูกต้อง" }, 400);
+        const { data, error } = await admin.from("invite_codes")
+          .update({ revoked_at: new Date().toISOString() })
+          .eq("code", code).is("used_at", null).is("revoked_at", null).select();
+        if (error) return json({ error: error.message }, 400);
+        if (!data || !data.length) return json({ error: "รหัสนี้ถูกใช้หรือยกเลิกไปแล้ว" }, 400);
         return json({ ok: true });
       }
 

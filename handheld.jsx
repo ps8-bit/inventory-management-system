@@ -7805,6 +7805,7 @@ function MUsers({ ctx }) {
   const [busyId, setBusyId] = useStateM(null);
   const [schedOpen, setSchedOpen] = useStateM(false);   // shared schedule editor sheet
   const [permOpen, setPermOpen] = useStateM(false);     // per-role permission editor sheet
+  const [codesOpen, setCodesOpen] = useStateM(false);   // invite-code sheet
   const isAdmin = ctx.user?.role === "admin";
 
   // ── Working-hours: shared schedule (edited in Settings) + per-user today-only
@@ -7927,6 +7928,17 @@ function MUsers({ ctx }) {
           </button>
         )}
 
+        {isAdmin && typeof InviteCodesPanel === "function" && (
+          <button className="m-row" style={{ cursor: "pointer", width: "100%", textAlign: "left", border: "1px solid var(--border)", borderRadius: 12, background: "var(--surface)", marginBottom: 4 }} onClick={() => setCodesOpen(true)}>
+            <div className="m-row-thumb" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}><Icons.Plus size={16}/></div>
+            <div className="m-row-main">
+              <div className="m-row-title" style={{ fontSize: 13, fontWeight: 500 }}>รหัสเชิญพนักงานใหม่</div>
+              <div className="m-row-sub">สร้างรหัสให้พนักงานสมัครบัญชีของตัวเอง</div>
+            </div>
+            <Icons.Chev size={16} style={{ color: "var(--muted)", flexShrink: 0 }}/>
+          </button>
+        )}
+
         {isAdmin && (
           <button className="m-row" style={{ cursor: "pointer", width: "100%", textAlign: "left", border: "1px solid var(--border)", borderRadius: 12, background: "var(--surface)", marginBottom: 4 }} onClick={() => setPermOpen(true)}>
             <div className="m-row-thumb" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}><Icons.Lock size={16}/></div>
@@ -7999,6 +8011,24 @@ function MUsers({ ctx }) {
       )}
 
       {permOpen && <MRolePerms ctx={ctx} onClose={() => setPermOpen(false)}/>}
+      {codesOpen && (
+        <>
+          <div className="m-sheet-backdrop" onClick={() => setCodesOpen(false)}/>
+          <div className="m-sheet" style={{ maxHeight: "90%" }}>
+            <div className="m-sheet-grabber"/>
+            <div className="m-sheet-head">
+              <div>
+                <h3>รหัสเชิญพนักงานใหม่</h3>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>ใช้ได้ 1 คนต่อรหัส — พนักงานตั้งอีเมลและรหัสผ่านเอง</div>
+              </div>
+              <button className="m-action" onClick={() => setCodesOpen(false)}><Icons.X size={14}/></button>
+            </div>
+            <div className="m-sheet-body">
+              <InviteCodesPanel pushToast={ctx.pushToast}/>
+            </div>
+          </div>
+        </>
+      )}
 
       {schedOpen && (
         <>
