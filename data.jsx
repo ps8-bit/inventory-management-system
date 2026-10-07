@@ -2924,7 +2924,7 @@ async function editPackLocNote(loc, by) {
   const note = packLocNote(loc);
   const r = await askForm({
     title: "โน้ตประจำช่อง " + loc,
-    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น\nกด Enter เพื่อขึ้นบรรทัดใหม่", required: false, type: "textarea", rows: 4 }],
+    fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น\nกด Enter เพื่อขึ้นบรรทัดใหม่", required: false, type: "textarea", rows: 4, maxLength: 500 }],
     okLabel: note ? "บันทึก / ลบ" : "บันทึก"
   });
   if (!r) return;

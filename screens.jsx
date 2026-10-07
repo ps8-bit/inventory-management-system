@@ -73,10 +73,13 @@ function AskFormDialog({ title, message, fields, okLabel, onDone }) {
                 <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{f.label}</label>
                 {f.type === "textarea" ? (
                   // Multi-line: Enter is a new line here, so it never submits the form.
+                  <>
                   <textarea ref={i === 0 ? firstRef : undefined} className="input" rows={f.rows || 4}
-                    value={vals[f.key]} placeholder={f.placeholder || ""}
+                    value={vals[f.key]} placeholder={f.placeholder || ""} maxLength={f.maxLength || undefined}
                     onChange={e => setVals(v => ({ ...v, [f.key]: e.target.value }))}
-                    style={{ width: "100%", fontSize: 15, padding: "10px 12px", resize: "vertical", lineHeight: 1.5, fontFamily: "inherit" }}/>
+                    style={{ width: "100%", fontSize: 15, padding: "10px 12px", resize: "vertical", lineHeight: 1.5, fontFamily: "inherit", minHeight: 96 }}/>
+                  {f.maxLength && <div style={{ textAlign: "right", fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{String(vals[f.key] || "").length}/{f.maxLength}</div>}
+                  </>
                 ) : (
                 <input ref={i === 0 ? firstRef : undefined} className="input" list={listId}
                   type="text" inputMode={f.type === "number" ? "numeric" : undefined}
@@ -6913,8 +6916,13 @@ function PackQueue({ pushToast, goTo, user }) {
                       {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
                       {/* Same reminders the label prints: order note + shelf notes. */}
                       {r.notes.length > 0 && (
-                        <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", borderLeft: "4px solid var(--warning)", color: "var(--fg)", fontSize: 13, fontWeight: 700, lineHeight: 1.5, maxWidth: 340 }}>
-                          <span style={{ whiteSpace: "pre-line" }}>📌 {r.notes.join("\n")}</span>
+                        <div style={{ marginTop: 6, padding: "6px 10px", borderRadius: 8, background: "var(--warning-soft)", borderLeft: "4px solid var(--warning)", maxWidth: 340, display: "flex", flexDirection: "column", gap: 5 }}>
+                          {r.notes.map((n, i) => (
+                            <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                              <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 700, color: "var(--warning)", background: "var(--surface)", border: "1px solid var(--warning)", borderRadius: 5, padding: "0 6px", lineHeight: "18px", whiteSpace: "nowrap" }}>📌 {n.tag}</span>
+                              <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 700, color: "var(--fg)", lineHeight: 1.45, whiteSpace: "pre-line", wordBreak: "break-word" }}>{n.text}</span>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </td>

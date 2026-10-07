@@ -6637,9 +6637,12 @@ function MPackLocNote({ loc, user }) {
   return (
     // Loud on purpose: a reminder the packer must not miss mid-walk.
     <div onClick={canEdit ? edit : undefined} role={canEdit ? "button" : undefined} style={{ margin: "0 0 8px", padding: "10px 12px", background: "var(--warning-soft)", borderLeft: "5px solid var(--warning)", borderRadius: 10, cursor: canEdit ? "pointer" : "default", lineHeight: 1.5 }}>
-      <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--warning)", marginBottom: 2 }}>📌 โน้ตช่องนี้</div>
-      <div style={{ fontSize: 15.5, fontWeight: 700, color: "var(--fg)", whiteSpace: "pre-line" }}>{note.text}</div>
-      {note.by && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>— {note.by}</div>}
+      <div className="row" style={{ justifyContent: "space-between", gap: 8, marginBottom: 3 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--warning)" }}>📌 โน้ตช่องนี้</span>
+        {canEdit && <span style={{ fontSize: 10.5, color: "var(--muted)", flexShrink: 0 }}>แตะเพื่อแก้ไข ✎</span>}
+      </div>
+      <div style={{ fontSize: 15.5, fontWeight: 700, color: "var(--fg)", whiteSpace: "pre-line", wordBreak: "break-word" }}>{note.text}</div>
+      {note.by && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 4 }}>— {note.by}</div>}
     </div>
   );
 }
