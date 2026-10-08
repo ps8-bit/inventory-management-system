@@ -105,6 +105,102 @@ async function driveUpload(token: string, folderId: string, name: string, mime: 
   return j.name as string;
 }
 
+// ── Order-file purge ──
+// Shipping labels (order_files) and pack photos/PDFs (order_attachments) live
+// in the DB as base64 data URLs, so they're the bulk of its growth and the JSON
+// snapshot above deliberately leaves them out. Once an order has been handed
+// to the courier (override status shipped/delivered) for FILE_KEEP_DAYS, each
+// file is copied to the Drive sub-folder "order-files" and only then deleted.
+// A file whose upload failed stays in the DB and is retried the next night.
+const FILE_KEEP_DAYS = 3;
+const FILE_PURGE_MAX = 150;              // per run — keeps the function well inside its time limit
+const ORDER_FILES_FOLDER = "order-files";
+
+async function driveSubfolder(token: string, parentId: string, name: string): Promise<string> {
+  const q = encodeURIComponent(`'${parentId}' in parents and name = '${name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
+  const r = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+    { headers: { "Authorization": "Bearer " + token } });
+  const j = await r.json();
+  if (r.ok && Array.isArray(j.files) && j.files[0]?.id) return j.files[0].id;
+  const c = await fetch("https://www.googleapis.com/drive/v3/files?supportsAllDrives=true", {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ name, parents: [parentId], mimeType: "application/vnd.google-apps.folder" }),
+  });
+  const cj = await c.json();
+  if (!c.ok || !cj.id) throw new Error("Drive folder create failed: " + JSON.stringify(cj).slice(0, 200));
+  return cj.id;
+}
+
+function dataUrlBytes(dataUrl: string): Uint8Array {
+  const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function safeName(s: string): string {
+  return String(s || "").replace(/[\\/:*?"<>|\r\n]+/g, "_").slice(0, 80);
+}
+
+// Order ids handed to the courier at least FILE_KEEP_DAYS ago. Status + the
+// shippedAt stamp live in the order_overrides blob (setOrderField); the orders
+// row carries no ship time, so an order is never purged without that stamp.
+// Only the FILES go — order no., customer, address, tracking stay untouched.
+function shippedOrderIds(stateRows: Array<Record<string, unknown>>): Set<string> {
+  const cutoff = Date.now() - FILE_KEEP_DAYS * 86400000;
+  const done = (s: unknown) => s === "shipped" || s === "delivered";
+  const old = (...ts: unknown[]) => ts.some((t) => { const n = t ? Date.parse(String(t)) : NaN; return !isNaN(n) && n <= cutoff; });
+  const ids = new Set<string>();
+  const ovRow = stateRows.find((r) => r.key === "order_overrides");
+  const ov = (ovRow && ovRow.value && typeof ovRow.value === "object") ? ovRow.value as Record<string, Record<string, unknown> | null> : {};
+  for (const [id, e] of Object.entries(ov)) {
+    if (e && done(e.status) && old(e.shippedAt, e.deliveredAt)) ids.add(id);
+  }
+  return ids;
+}
+
+async function purgeShippedOrderFiles(admin: any, token: string, folderId: string, ids: Set<string>) {
+  const res = { archived: 0, failed: 0, remaining: false, error: null as string | null };
+  if (!ids.size) return res;
+  const list = [...ids];
+  type Job = { kind: "label" | "attach"; key: string; orderId: string; name: string; type: string; dataUrl: string; stamp: string };
+  const jobs: Job[] = [];
+  for (let i = 0; i < list.length && jobs.length < FILE_PURGE_MAX; i += 100) {
+    const chunk = list.slice(i, i + 100);
+    const { data: lf, error: le } = await admin.from("order_files").select("id, name, type, data_url, updated_at").in("id", chunk);
+    if (le) throw new Error(le.message);
+    for (const r of lf || []) jobs.push({ kind: "label", key: r.id, orderId: r.id, name: r.name, type: r.type, dataUrl: r.data_url, stamp: r.updated_at });
+    const { data: af, error: ae } = await admin.from("order_attachments").select("id, order_id, name, type, data_url, created_at").in("order_id", chunk);
+    if (ae) throw new Error(ae.message);
+    for (const r of af || []) jobs.push({ kind: "attach", key: r.id, orderId: r.order_id, name: r.name, type: r.type, dataUrl: r.data_url, stamp: r.created_at });
+  }
+  if (!jobs.length) return res;
+  if (jobs.length > FILE_PURGE_MAX) { jobs.length = FILE_PURGE_MAX; res.remaining = true; }
+  const sub = await driveSubfolder(token, folderId, ORDER_FILES_FOLDER);
+  for (const j of jobs) {
+    try {
+      const ext = j.type === "application/pdf" ? ".pdf" : ".jpg";
+      const base = safeName(j.name).replace(/\.(pdf|jpe?g)$/i, "");
+      const fname = `${safeName(j.orderId)}_${j.kind === "label" ? "ใบปะหน้า" : "แนบ-" + j.key.slice(0, 8)}${base ? "_" + base : ""}${ext}`;
+      await driveUpload(token, sub, fname, j.type, dataUrlBytes(j.dataUrl));
+      // Delete only the exact copy that was archived: a label re-uploaded in the
+      // meantime has a newer updated_at and survives.
+      const q = j.kind === "label"
+        ? admin.from("order_files").delete().eq("id", j.key).eq("updated_at", j.stamp)
+        : admin.from("order_attachments").delete().eq("id", j.key);
+      const { error } = await q;
+      if (error) throw new Error(error.message);
+      res.archived++;
+    } catch (e) {
+      res.failed++;
+      if (!res.error) res.error = String(e).slice(0, 200);
+    }
+  }
+  return res;
+}
+
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-cron-secret",
@@ -362,14 +458,25 @@ Deno.serve(async (req) => {
     } catch (_) { /* retention is best-effort — never fail the backup over it */ }
   }
 
+  // 6) Order files of orders shipped ≥ FILE_KEEP_DAYS ago → Drive, then out of
+  //    the DB. Runs only after the JSON backup uploaded (we returned above if not).
+  let files: Record<string, unknown> | null = null;
+  try {
+    const stateRows = (Array.isArray(tables.app_state) ? tables.app_state : []) as Array<Record<string, unknown>>;
+    if (!errors.app_state) files = await purgeShippedOrderFiles(admin, token, folderId, shippedOrderIds(stateRows));
+  } catch (e) {
+    files = { error: String(e).slice(0, 300) };
+  }
+  if (files && files.error) await alertOwner("⚠️ ย้ายไฟล์แนบออร์เดอร์ไป Drive ไม่สำเร็จบางส่วน (ไฟล์ยังอยู่ในระบบ จะลองใหม่คืนพรุ่งนี้) — " + files.error);
+
   // Record the run + alert on a partial snapshot (some table read failed but we
   // still uploaded, clearly flagged) so a slowly-degrading backup gets noticed.
-  await recordRun(admin, partial ? "partial" : "ok", { file: upJson.name, stockFile, stockError, counts, partial, errors, pruned });
+  await recordRun(admin, partial ? "partial" : "ok", { file: upJson.name, stockFile, stockError, counts, partial, errors, pruned, files });
   if (partial) await alertOwner("⚠️ สำรองข้อมูลบางส่วน: อ่านตารางไม่สำเร็จ — " + Object.keys(errors).join(", "));
   if (stockError) await alertOwner("⚠️ สร้างรายงานสต็อก Excel ไม่สำเร็จ (สำรอง JSON สำเร็จแล้ว) — " + stockError);
   // Success card: daily summary + Drive button. Only when the report actually
   // uploaded (a failed report already alerted above; no double-message).
   if (stockFile && !stockError && stockTotals) await notifyReportReady(stockTotals, dateStr, folderId);
 
-  return json({ success: true, file: upJson.name, id: upJson.id, stockFile, stockError, counts, partial, errors, pruned });
+  return json({ success: true, file: upJson.name, id: upJson.id, stockFile, stockError, counts, partial, errors, pruned, files });
 });
