@@ -1470,6 +1470,14 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
   const sendingRef = useRefPD(false);   // sync latch: this commit moves stock
   const [pnOver, setPnOver] = useStatePD(false);   // desktop drag-and-drop highlight
   const inputRef = useRefPD(null);
+  // Owner's note + extra photos for the packer, saved onto the new order right
+  // after it is created — same stores as the pack screen's โน้ตออร์เดอร์ and
+  // ไฟล์แนบ, so nothing has to be added a second time there.
+  const [note, setNote] = useStatePD("");
+  const [extras, setExtras] = useStatePD([]);         // [{ name, type, dataUrl }]
+  const extraRef = useRefPD(null);
+  const canNote = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();
+  const canExtra = canAddOrderAttachment();
 
   const lq = q.trim().toLowerCase();
   const avail = (sku) => (typeof getEffectiveQty === "function" ? getEffectiveQty(sku) : ((PRODUCTS.find(p => p.sku === sku) || {}).qty || 0));
@@ -1511,6 +1519,54 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
     e.target.value = "";
     if (!f) return;
     try { setFile(await readOrderFile(f)); } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
+  };
+
+  const sec = { fontSize: 13, fontWeight: 700, margin: "4px 0 8px" };
+  const pickExtras = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    for (const f of files) {
+      try { const r = await readOrderFile(f); setExtras(x => [...x, r]); }
+      catch (err) { pushToast(`${f.name}: ${err.message || "แนบไฟล์ไม่สำเร็จ"}`); }
+    }
+  };
+  const extrasBlock = (!addTo && (canNote || canExtra)) ? (
+    <div className="pn-extras" style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: mobile ? 0 : 6 }}>
+      <div className={mobile ? undefined : "pn-label"} style={mobile ? sec : undefined}>{mobile ? "3. " : ""}โน้ตและรูปถึงคนแพ็ค <span style={{ fontWeight: 400, color: "var(--muted)", fontSize: 12 }}>(ไม่บังคับ)</span></div>
+      {canNote && (
+        <textarea className="input" rows={3} value={note} maxLength={500} onChange={e => setNote(e.target.value)}
+          placeholder={"รายละเอียดงานของออร์เดอร์นี้ เช่น ปักชื่อ ATHIP T. / กรุ๊ปเลือด Rh.B\nขึ้นเฉพาะออร์เดอร์นี้ ในหน้าแพ็คและบนใบปะหน้า"}
+          style={{ width: "100%", fontSize: 14, resize: "vertical" }}/>
+      )}
+      {canExtra && (
+        <>
+          <input ref={extraRef} type="file" accept="image/*,application/pdf" multiple style={{ display: "none" }} onChange={pickExtras}/>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {extras.map((f, i) => (
+              <div key={i} style={{ position: "relative", width: 64, height: 64, borderRadius: 10, overflow: "hidden", border: "1px solid var(--border)", background: "var(--surface-2)", display: "grid", placeItems: "center" }}>
+                {f.type === "application/pdf"
+                  ? <span style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)" }}>PDF</span>
+                  : <img src={f.dataUrl} alt={f.name || ""} style={{ width: "100%", height: "100%", objectFit: "cover" }}/>}
+                <button type="button" aria-label="เอารูปออก" onClick={() => setExtras(x => x.filter((_, j) => j !== i))}
+                  style={{ position: "absolute", top: 2, right: 2, width: 22, height: 22, borderRadius: 999, border: "none", background: "rgba(0,0,0,.6)", color: "#fff", cursor: "pointer", display: "grid", placeItems: "center", padding: 0 }}><Icons.X size={12}/></button>
+              </div>
+            ))}
+            <button type="button" className="btn btn-sm" onClick={() => extraRef.current && extraRef.current.click()} style={{ height: 64, padding: "0 14px" }}>
+              <Icons.Plus size={14}/> รูปเพิ่มเติม
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  ) : null;
+
+  // Leaving by mistake (backdrop click, ✕, ยกเลิก, back) must not silently throw
+  // away the cart, label, address, note and photos. Blocked while sending.
+  const requestClose = () => {
+    if (busy || sendingRef.current) return;
+    const dirty = cart.length || file || paste.trim() || note.trim() || extras.length;
+    if (dirty && !confirm("ปิดหน้านี้? ข้อมูลที่เลือก/พิมพ์ไว้ (สินค้า ใบปะหน้า ที่อยู่ โน้ต รูป) จะหายทั้งหมด")) return;
+    onClose();
   };
 
   const sendAdd = async () => {
@@ -1556,12 +1612,21 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
       if (res.error) pushToast("สร้างออร์เดอร์แล้ว แต่แนบไฟล์ไม่สำเร็จ: " + res.error + " — แนบใหม่ได้ที่หน้าแพ็คสินค้า");
       refreshOrderFileIds().catch(() => {});
     }
+    if (note.trim() && canNote && typeof setPackOrderNote === "function") {
+      const r = await setPackOrderNote(id, note, (user && user.name) || (window.__currentUser && window.__currentUser.name) || "");
+      if (!r || !r.ok) pushToast("สร้างออร์เดอร์แล้ว แต่บันทึกโน้ตไม่สำเร็จ — เพิ่มใหม่ได้ที่หน้าแพ็คสินค้า");
+    }
+    let extraFail = 0;
+    for (const f of extras) {
+      const r = await addOrderAttachment(id, f);
+      if (r.error) extraFail++;
+    }
+    if (extraFail) pushToast(`สร้างออร์เดอร์แล้ว แต่แนบรูปไม่สำเร็จ ${extraFail} ไฟล์ — แนบใหม่ได้ที่หน้าแพ็คสินค้า`);
     setBusy(false);
     pushToast(`ส่งให้คนแพ็คแล้ว — ${id}`);
     onClose();
   };
 
-  const sec = { fontSize: 13, fontWeight: 700, margin: "4px 0 8px" };
   const body = (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div>
@@ -1630,6 +1695,8 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
         )}
       </div>}
 
+      {extrasBlock}
+
       {!addTo && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>ช่องทาง:</span>
         {(typeof CHANNEL_LIST !== "undefined" ? CHANNEL_LIST : []).map(c => (
@@ -1652,7 +1719,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
     return (
       <>
         <div className="m-topbar">
-          <button className="m-back" onClick={onClose}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+          <button className="m-back" onClick={requestClose}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
           <div className="m-title-sub">{addTo ? "เพิ่มรายการ " + addTo.id : "สั่งแพ็คใหม่"}</div>
           <span style={{ width: 30 }}/>
         </div>
@@ -1674,7 +1741,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
   const onDrop = (e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) pick({ target: { files: [f], value: "" } }); };
   return (
     <>
-      <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 90 }}/>
+      <div className="drawer-backdrop" onClick={requestClose} style={{ zIndex: 90 }}/>
       <div className="modal pn-modal" role="dialog" aria-modal="true" aria-label={addTo ? "เพิ่มรายการ" : "สั่งแพ็คใหม่"} style={{ zIndex: 91 }}>
         <div className="pn-head">
           <span className="pn-head-icon"><Icons.Box size={24}/></span>
@@ -1682,7 +1749,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
             <div className="pn-title">{addTo ? <>เพิ่มรายการ <span className="mono">{addTo.id}</span></> : "สั่งแพ็คใหม่"}</div>
             <div className="pn-sub">{addTo ? ((addTo.customer ? addTo.customer + " · " : "") + "ระบบจะตัดสต็อกเฉพาะรายการที่เพิ่ม") : "เลือกสินค้าและเพิ่มข้อมูลจัดส่ง"}</div>
           </div>
-          <button type="button" className="pn-close" onClick={onClose} aria-label="ปิด"><Icons.X size={20}/></button>
+          <button type="button" className="pn-close" onClick={requestClose} aria-label="ปิด"><Icons.X size={20}/></button>
         </div>
 
         <div className={"pn-body" + (addTo ? " is-single" : "")}>
@@ -1777,6 +1844,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
                   </button>
                 ))}
               </div>
+              {extrasBlock}
             </section>
           )}
         </div>
@@ -1786,7 +1854,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
             <span className="pn-status-icon">{status.tone === "ok" ? <Icons.Check size={16}/> : status.tone === "danger" || status.tone === "warn" ? <Icons.Warn size={16}/> : "i"}</span>
             <span><b>{status.title}</b><span>{status.sub}</span></span>
           </div>
-          <button type="button" className="btn pn-btn" onClick={onClose}>ยกเลิก</button>
+          <button type="button" className="btn pn-btn" onClick={requestClose} disabled={busy}>ยกเลิก</button>
           <button type="button" className="btn btn-accent pn-btn" disabled={!canSend} onClick={send}>
             {busy ? "กำลังส่ง…" : addTo ? "เพิ่มเข้าออร์เดอร์" : "สร้างรายการแพ็ค"}
           </button>

@@ -3078,6 +3078,8 @@ async function editPackLocNote(loc, by) {
   const note = packLocNote(loc);
   const r = await askForm({
     title: "โน้ตประจำช่อง " + loc,
+    // Shelf notes were mistaken for order notes (2026-10-12) — say the scope up front.
+    message: "⚠️ โน้ตนี้จะขึ้นในทุกออร์เดอร์ที่หยิบจากช่องนี้ (หน้าแพ็คและใบปะหน้า) — ถ้าเป็นรายละเอียดของออร์เดอร์เดียว ให้ใช้ \"โน้ตออร์เดอร์\" แทน",
     fields: [{ key: "v", label: "ข้อความเตือนพนักงาน (เว้นว่าง = ลบโน้ต)", value: note ? note.text : "", placeholder: "เช่น ของแตกง่าย ห่อบับเบิ้ล 2 ชั้น\nกด Enter เพื่อขึ้นบรรทัดใหม่", required: false, type: "textarea", rows: 4, maxLength: 500 }],
     okLabel: note ? "บันทึก / ลบ" : "บันทึก"
   });
