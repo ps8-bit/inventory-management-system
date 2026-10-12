@@ -2805,3 +2805,42 @@ button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft
 .ph-push-link { color: var(--accent); font-weight: 600; }
 .ph-push-later { color: var(--fg); }
 .ph-push-sep { width: 1px; height: 18px; background: var(--border); }
+
+/* ===== พนักงานแพ็ค desktop home (PackHome) — reuses the ph-* pieces; dph-* is layout only ===== */
+.dph { display: flex; flex-direction: column; max-width: 1240px; }
+.dph-head { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.dph-avatar { width: 56px; height: 56px; font-size: 19px; }
+.dph-hello { margin: 2px 0; font-size: 28px; line-height: 1.3; }
+.ph-cta.dph-cta-top { width: auto; margin-top: 0; min-height: 48px; padding: 12px 22px; font-size: 15px; flex-shrink: 0; }
+.ph-hero.dph-hero { padding: 20px 24px; gap: 20px; }
+.dph-hero .ph-hero-art { width: 112px; }
+.ph-link.dph-hero-link { width: auto; margin: 0 0 0 auto; align-self: flex-end; flex-shrink: 0; }
+.ph-grid.dph-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.dph-grid .ph-tile { padding: 18px 16px; }
+.dph-grid .ph-tile:hover:not(:disabled) { border-color: var(--accent); }
+.dph-cols { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+.dph-side { display: flex; flex-direction: column; gap: 12px; margin-top: 20px; }
+.dph-side .ph-push { margin-top: 0; }
+/* No order list (no work / loading) → the side cards share the full width. */
+.dph-cols.is-solo { grid-template-columns: minmax(0, 1fr); }
+.dph-cols.is-solo .dph-main { display: none; }
+.dph-cols.is-solo .dph-side { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-items: start; }
+.dph-table-card { overflow: hidden; }
+.dph-row { cursor: pointer; }
+.dph-table th, .dph-table .dph-id { white-space: nowrap; }
+.dph-row:hover { background: var(--surface-2); }
+.dph-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dph-wave { display: flex; gap: 12px; align-items: center; padding: 14px; border-radius: 16px; background: var(--info-soft); border: 1px solid var(--border); font-size: 13.5px; }
+.dph-wave-ic { flex-shrink: 0; width: 36px; height: 36px; border-radius: 999px; display: grid; place-items: center; background: var(--surface); color: var(--info); }
+.dph-wave-sub { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.dph-tip { display: flex; gap: 8px; align-items: flex-start; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 14px; font-size: 12.5px; line-height: 1.55; color: var(--muted); }
+.dph-tip svg { flex-shrink: 0; margin-top: 2px; }
+@media (max-width: 1100px) {
+  .ph-grid.dph-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dph-cols { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .dph-head { flex-wrap: wrap; }
+  .ph-hero.dph-hero { flex-wrap: wrap; }
+  .ph-link.dph-hero-link { margin: 0; }
+}

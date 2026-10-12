@@ -30,6 +30,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 const CRUMB_MAP = {
   dashboard: "หน้าหลัก",
+  "pack-home": "หน้าหลัก",
   inbound: "รับเข้าสินค้า",
   outbound: "จัดส่งสินค้า",
   pack: "แพ็คสินค้า",
@@ -909,7 +910,9 @@ function App({ user, onLogout, onSwitchUser }) {
        reads as a dead button. Refuse it here and say why instead. Call sites
        that can predict this (the Excel-import / history / analytics buttons)
        hide themselves with canOpenPage() — this catches the rest. */
-    if (typeof canOpenPage === "function" && !canOpenPage(p)) {
+    // "pack-home" is not a nav id — it's the พนักงานแพ็ค's หน้าหลัก (see PACK_HOME below).
+    const packHomeOk = p === "pack-home" && typeof canOpenPage === "function" && canOpenPage("pack") && !canOpenPage("dashboard");
+    if (!packHomeOk && typeof canOpenPage === "function" && !canOpenPage(p)) {
       pushToast("ไม่มีสิทธิ์เข้าถึงหน้านี้ — ติดต่อผู้ดูแลระบบ");
       return;
     }
@@ -927,10 +930,19 @@ function App({ user, onLogout, onSwitchUser }) {
   // Global search + notifications surface products and orders — hide them from a
   // role that can't open any of those pages (the pack-only พนักงานแพ็ค).
   const canLookup = ["inventory", "finder", "outbound", "tracking", "dashboard"].some(id => allowed.has(id));
-  const visibleNav = navItems
-    .filter(i => i.visible)
-    .map(i => ALL_NAV.find(n => n.id === i.id))
-    .filter(n => n && allowed.has(n.id));
+  /* PACK_HOME: a role with แพ็คสินค้า but no dashboard (the พนักงานแพ็ค) gets
+     its own หน้าหลัก — virtual page "pack-home", the desktop twin of the
+     phone's MPackHome. Not a nav id / not in ROLE_NAV, so it can't be granted
+     to anyone else by accident and every other role's home is unchanged. */
+  const packHome = !allowed.has("dashboard") && allowed.has("pack");
+  if (packHome) allowed.add("pack-home");
+  const visibleNav = [
+    ...(packHome ? [{ id: "pack-home", label: "หน้าหลัก", icon: Icons.Dash, group: "main" }] : []),
+    ...navItems
+      .filter(i => i.visible)
+      .map(i => ALL_NAV.find(n => n.id === i.id))
+      .filter(n => n && allowed.has(n.id))
+  ];
 
   // group by group
   const navByGroup = {};
@@ -945,6 +957,7 @@ function App({ user, onLogout, onSwitchUser }) {
      every button that navigates to a page must therefore be nav-gated too. */
   const firstAllowedPage = () => {
     if (allowed.has("dashboard")) return "dashboard";
+    if (packHome) return "pack-home";
     const first = visibleNav[0];
     return first ? first.id : "dashboard";
   };
@@ -1041,7 +1054,8 @@ function App({ user, onLogout, onSwitchUser }) {
           {page === "dashboard" && <Dashboard density={t.density} goTo={goTo}/>}
           {page === "inbound"   && <Inbound goTo={goTo} pushToast={pushToast}/>}
           {page === "outbound"  && <Outbound goTo={goTo} pushToast={pushToast} focus={focusFor("outbound")}/>}
-          {page === "pack"      && <PackQueue pushToast={pushToast} goTo={goTo} user={user}/>}
+          {page === "pack"      && <PackQueue pushToast={pushToast} goTo={goTo} user={user} focus={focusFor("pack")}/>}
+          {page === "pack-home" && typeof PackHome === "function" && <PackHome goTo={goTo} user={user}/>}
           {page === "finder"    && <ProductFinder pushToast={pushToast} goTo={goTo} focus={focusFor("finder")}/>}
           {page === "inventory" && <Inventory pushToast={pushToast} density={t.density} goTo={goTo} focus={focusFor("inventory")}/>}
           {page === "stocktake" && <StockTake pushToast={pushToast}/>}
