@@ -793,7 +793,10 @@ function _auditRowToEntry(row) {
     entityId: row.entity_id,
     action:   row.action,
     summary:  row.summary,
-    note:     row.note
+    note:     row.note,
+    // The login that wrote it (auth.uid() by trigger) — user.name above is only
+    // what the app sent. null on rows written before 2026-10-12.
+    actorId:  row.actor_id || null
   };
 }
 // `before` pages FURTHER BACK than the newest `limit` rows. Pass the oldest
@@ -810,6 +813,17 @@ async function dbLoadAuditLog(limit = 500, before) {
   const { data, error } = await q;
   if (error) { console.error('[DB] load audit_log:', error.message); return null; }
   return data.map(_auditRowToEntry);
+}
+/* Display names for login ids (audit_log / stock_adjustments.actor_id) —
+   { id: name }, or null on error. supabase/actor-names.sql. */
+async function dbActorNames(ids) {
+  const list = [...new Set((ids || []).filter(Boolean))];
+  if (!list.length) return {};
+  const { data, error } = await sb.rpc("actor_names", { ids: list });
+  if (error) { console.error("[DB] actor_names:", error.message); return null; }
+  const out = {};
+  (data || []).forEach(r => { out[r.id] = r.name; });
+  return out;
 }
 // Every activity that touched ONE order — its own entries (entity_id) plus the
 // batch ones that only name it in the text (หยิบรวม wave, desktop multi-pack).
@@ -1487,7 +1501,7 @@ Object.assign(window, {
   dbInit, setupRealtimeSync, refreshLiveData,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,     dbRenameSku,
-  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments, dbLoadLedgerFor, dbLoadAuditForOrder, dbLoadQtys,
+  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments, dbLoadLedgerFor, dbLoadAuditForOrder, dbLoadQtys, dbActorNames,
   dbLoadProductLocs,   dbSaveProductLocs,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,

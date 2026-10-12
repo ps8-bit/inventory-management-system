@@ -170,7 +170,7 @@ function ActivityWidget({ goTo }) {
                 <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{bangkokTimeOf(e.ts)}</div>
                 <ActivityDot type={auditTone(e)}/>
                 <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={e.summary || e.entityId}>{e.summary || e.entityId}</div>
-                <div style={{ fontSize: 11, color: "var(--muted)" }}>{e.user?.name || "ระบบ"}</div>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>{typeof ActorName === "function" ? <ActorName entry={e}/> : (e.user?.name || "ระบบ")}</div>
               </div>
             ))}
           </div>

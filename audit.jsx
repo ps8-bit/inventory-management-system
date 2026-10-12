@@ -90,6 +90,9 @@ function recordChange(entry) {
     id: Math.random().toString(36).slice(2, 11),
     ts: new Date().toISOString(),
     user: { id: user.id, name: user.name, role: user.role, avatar: user.avatar },
+    // The database stamps the same login (auth.uid()) — mirror it so this
+    // device's own new entries show the verified name before the next reload.
+    actorId: /^[0-9a-f-]{36}$/i.test(String(user.id || "")) ? String(user.id) : null,
     ...entry
   };
 
@@ -354,7 +357,7 @@ function HistoryPage({ pushToast, goToProduct, goToOrder }) {
           <div className="page-sub">บันทึกการเปลี่ยนแปลงทั้งหมด — ใครเปลี่ยนอะไร เมื่อไหร่</div>
         </div>
         <div className="row">
-          {canDo("exportData") && <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const csv = "Date,User,Action,Entity,Details\n" + filtered.map(e => [new Date(e.ts).toLocaleString("th-TH"), e.user?.name || "ระบบ", e.action, e.entity, e.summary].map(esc).join(",")).join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "audit.csv"; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
+          {canDo("exportData") && <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const csv = "Date,User,Account,Action,Entity,Details\n" + filtered.map(e => [new Date(e.ts).toLocaleString("th-TH"), e.user?.name || "ระบบ", (e.actorId && _actorNames[e.actorId]) || "", e.action, e.entity, e.summary].map(esc).join(",")).join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = "audit.csv"; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
           {currentRoleId() === "admin" && <button className="btn btn-danger" onClick={clearLog}><Icons.Trash size={14}/> ล้างประวัติ</button>}
         </div>
       </div>
@@ -447,7 +450,7 @@ function HistoryPage({ pushToast, goToProduct, goToOrder }) {
                         <div className="user-avatar" style={{ background: "oklch(0.55 0.15 " + ((e.user?.name?.charCodeAt(0) || 0) * 4 % 360) + ")", width: 32, height: 32, fontSize: 11, flexShrink: 0 }}>{e.user?.avatar || "?"}</div>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div className="row" style={{ gap: 8, marginBottom: 2 }}>
-                            <span style={{ fontSize: 13, fontWeight: 500 }}>{e.user?.name || "ระบบ"}</span>
+                            <ActorName entry={e} style={{ fontSize: 13, fontWeight: 500 }}/>
                             <span className={"badge " + (ACTION_TONES[e.action] || "badge-neutral")} style={{ fontSize: 10 }}>
                               {ACTION_LABELS[e.action] || e.action}
                             </span>
@@ -513,6 +516,56 @@ function canOpenAny(ids) {
    before/after and show only the current stock.
    How an entry is matched to its ledger rows: see loadAuditEntryMoves.
    ════════════════════════════════════════════════════════════════════════ */
+/* ── Who REALLY wrote an entry ──
+   entry.user.name is whatever the writing device sent; entry.actorId is the
+   login the database stamped (auth.uid(), supabase/ledger-before-after.sql).
+   Names for those ids are fetched once per id through actor_names() and kept
+   for the session. Rows from before 2026-10-12 have no actorId and simply show
+   the sent name. */
+const _actorNames = {};            // id → name, or null = no such account
+let _actorAsk = new Set();
+let _actorTimer = null;
+function _requestActorNames(ids) {
+  let added = false;
+  (ids || []).forEach(id => { if (id && !(id in _actorNames) && !_actorAsk.has(id)) { _actorAsk.add(id); added = true; } });
+  if (!added || _actorTimer || typeof dbActorNames !== "function") return;
+  _actorTimer = setTimeout(async () => {
+    _actorTimer = null;
+    const batch = [..._actorAsk];
+    _actorAsk = new Set();
+    const got = await dbActorNames(batch).catch(() => null);
+    if (!got) return;                                // error: leave unknown, retry on next render
+    batch.forEach(id => { _actorNames[id] = (id in got) ? got[id] : null; });
+    window.dispatchEvent(new CustomEvent("ims-actors-change"));
+  }, 60);
+}
+function useActorNames(ids) {
+  const [, setTick] = useStateAud(0);
+  const key = (ids || []).filter(Boolean).join(",");
+  useEffectAud(() => {
+    const on = () => setTick(n => n + 1);
+    window.addEventListener("ims-actors-change", on);
+    return () => window.removeEventListener("ims-actors-change", on);
+  }, []);
+  useEffectAud(() => { _requestActorNames(key ? key.split(",") : []); }, [key]);
+  return _actorNames;
+}
+/* The author line for one entry: the account's real name (✓ when it matches
+   what the device sent), or both names, flagged, when they disagree. */
+function ActorName({ entry: e, style }) {
+  const names = useActorNames(e && e.actorId ? [e.actorId] : []);
+  const sent = (e && e.user && e.user.name) || "ระบบ";
+  if (!e || !e.actorId || !(e.actorId in names)) return <span style={style}>{sent}</span>;
+  const real = names[e.actorId];
+  if (real == null) return <span style={style} title="บัญชีนี้ไม่มีในระบบแล้ว">{sent} <span style={{ color: "var(--muted)" }}>(บัญชีถูกลบ)</span></span>;
+  if (real === sent) return <span style={style} title="ยืนยันจากบัญชีที่ล็อกอินบันทึก">{real} <span style={{ color: "var(--success)" }}>✓</span></span>;
+  return (
+    <span style={style} title="ชื่อที่แอปส่งมาไม่ตรงกับบัญชีที่ล็อกอินบันทึกจริง">
+      {real} <span style={{ color: "var(--danger)" }}>(ชื่อที่ส่งมา: {sent})</span>
+    </span>
+  );
+}
+
 /* What kind of stock movement an entry stands for — null when it moved none.
    Drives both the matcher and whether the detail shows a movement section. */
 function auditMoveKind(e) {
@@ -743,7 +796,7 @@ function AuditEntryDetail({ entry: e, onOpenOrder, onOpenProduct, compact, neste
             )}
           </div>
           <div style={{ ...lab, marginTop: 4 }}>
-            {new Date(e.ts).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "medium", timeStyle: "short" })} · {e.user?.name || "ระบบ"}
+            {new Date(e.ts).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "medium", timeStyle: "short" })} · <ActorName entry={e}/>
           </div>
           {noteText && <div style={{ fontSize: 12, color: "var(--fg-2)", marginTop: 6, whiteSpace: "pre-wrap" }}>{noteText}</div>}
         </div>
@@ -943,7 +996,7 @@ function OrderHistory({ order, compact, nested }) {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
                       <span className={"badge " + (ACTION_TONES[e.action] || "badge-neutral")} style={{ fontSize: 10 }}>{ACTION_LABELS[e.action] || e.action}</span>
-                      <span style={lab}>{fmt(e.ts)} · {e.user?.name || "ระบบ"}</span>
+                      <span style={lab}>{fmt(e.ts)} · <ActorName entry={e}/></span>
                       {expandable && <span style={{ ...lab, color: "var(--accent)" }}>{isOpen ? "ซ่อนรายการ" : "ดูรายการสินค้า"}</span>}
                     </div>
                     <div style={{ fontSize: fs, marginTop: 2 }}>{e.summary}</div>
@@ -1028,6 +1081,6 @@ function AuditDetailDrawer({ entry, onClose, onOpenOrder, onOpenProduct }) {
 }
 
 Object.assign(window, {
-  ConfirmDialog, recordChange, useAuditLog, HistoryPage, AuditEntryDetail, AuditDetailDrawer, auditEntryMovesStock, OrderHistory, OrderHistoryDrawer, auditMoveKind, auditOrderIds, loadAuditEntryMoves, loadAuditLog, formatTime: formatTime,
+  ConfirmDialog, recordChange, useAuditLog, HistoryPage, AuditEntryDetail, AuditDetailDrawer, auditEntryMovesStock, ActorName, useActorNames, OrderHistory, OrderHistoryDrawer, auditMoveKind, auditOrderIds, loadAuditEntryMoves, loadAuditLog, formatTime: formatTime,
   loadMoreAuditLog, loadAuditDay, auditHasMore, refreshAuditTotal, auditTotal, AUDIT_PAGE
 });
