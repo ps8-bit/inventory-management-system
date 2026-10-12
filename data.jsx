@@ -2596,6 +2596,18 @@ function issueShipFields(ship) {
    stock back while the sale stayed on the books. An override `restockedAt`
    stamp plus the commit latch make a second tap / second device a no-op.
    Returns { ok, restocked:[ids], skipped:[ids], blocked?, pieces }. */
+/* What a cancel may put back: only lines a sale really debited — the order's own
+   lineItems (each carries the shelf it left) plus เพิ่มรายการ lines. A label-only
+   order (typed in the label editor) never moved stock, so restocking its label
+   items would create stock out of nothing; it gets no lines and is skipped. */
+function restockLinesForOrder(order) {
+  if (!order) return [];
+  const own = Array.isArray(order.lineItems) ? order.lineItems.filter(li => li && li.sku) : [];
+  const extra = Array.isArray(order.addedItems) ? order.addedItems.filter(li => li && li.sku) : [];
+  if (!own.length && !extra.length) return [];
+  return packLinesForOrder(order);
+}
+
 async function cancelOrdersAndRestock(orders, reasonNote) {
   const list = (Array.isArray(orders) ? orders : []).filter(Boolean);
   const out = { ok: true, restocked: [], skipped: [], pieces: 0 };
@@ -2607,7 +2619,7 @@ async function cancelOrdersAndRestock(orders, reasonNote) {
   const todo = [];
   list.forEach(o => {
     if (overrides[o.id] && overrides[o.id].restockedAt) { out.skipped.push(o.id); return; }
-    const got = packLinesForOrder(o);
+    const got = restockLinesForOrder(o);
     if (!got.length) { out.skipped.push(o.id); return; }
     got.forEach(l => lines.push({ sku: l.sku, qty: l.qty, loc: l.loc }));
     todo.push(o);
@@ -3054,15 +3066,49 @@ function savePackEntry(id, entry) {
     delete _packSyncTimers[id];
     const cur = loadPackProgress()[id];
     if (!cur) return;
-    if (typeof dbMergeState === "function") {
-      dbMergeState(PACK_STATE_KEY, { [id]: cur }).then(res => {
-        if (res === null && typeof dbSaveState === "function") dbSaveState(PACK_STATE_KEY, loadPackProgress()).catch(() => {});
-      }).catch(() => {});
-    } else if (typeof dbSaveState === "function") {
-      dbSaveState(PACK_STATE_KEY, loadPackProgress()).catch(() => {});
-    }
+    _packPush(id, cur);
   }, 800);
 }
+/* Cloud write for one pack record (null = finished tombstone). dbMergeState
+   resolves {error} rather than throwing, so failures used to vanish: the ticks
+   reverted at the next reload and on every other device. A failed id is kept in
+   ims_pack_unsynced and re-sent on reconnect / foreground with its CURRENT value. */
+const PACK_UNSYNCED_KEY = "ims_pack_unsynced";
+function _packUnsynced() { try { return JSON.parse(localStorage.getItem(PACK_UNSYNCED_KEY) || "{}") || {}; } catch (e) { return {}; } }
+function _packMarkUnsynced(id, on) {
+  const u = _packUnsynced();
+  if (on) u[id] = 1; else delete u[id];
+  try { Object.keys(u).length ? localStorage.setItem(PACK_UNSYNCED_KEY, JSON.stringify(u)) : localStorage.removeItem(PACK_UNSYNCED_KEY); } catch (e) {}
+}
+async function _packPush(id, value) {
+  let res;
+  try {
+    if (typeof dbMergeState === "function") res = await dbMergeState(PACK_STATE_KEY, { [id]: value });
+    if ((res === null || res === undefined) && typeof dbSaveState === "function") {
+      const full = { ...loadPackProgress() };
+      if (value === null) full[id] = null; else full[id] = value;
+      res = await dbSaveState(PACK_STATE_KEY, full);
+    }
+  } catch (e) { res = { error: String(e) }; }
+  const failed = !res || !!res.error;
+  _packMarkUnsynced(id, failed);
+  if (failed && typeof cloudWriteFailed === "function") cloudWriteFailed(res, "ความคืบหน้าการแพ็ค");
+  return !failed;
+}
+let _packRetrying = false;
+async function _packRetryUnsynced() {
+  if (_packRetrying || (typeof navigator !== "undefined" && navigator.onLine === false)) return;
+  const ids = Object.keys(_packUnsynced());
+  if (!ids.length) return;
+  _packRetrying = true;
+  try {
+    const map = loadPackProgress();
+    for (const id of ids) await _packPush(id, map[id] || null);
+  } finally { _packRetrying = false; }
+}
+window.addEventListener("online", () => { _packRetryUnsynced(); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") _packRetryUnsynced(); });
+setTimeout(() => { _packRetryUnsynced(); }, 9000);
 /* Finish with a null tombstone rather than a delete: merge_app_state can only add
    keys, so deleting locally then merging would let the stale record come straight
    back from another device. loadPackProgress filters nulls out on read. */
@@ -3072,13 +3118,7 @@ function clearPackEntry(id) {
   const map = { ...loadPackProgress() };
   delete map[id];
   _packMirror(map);
-  if (typeof dbMergeState === "function") {
-    dbMergeState(PACK_STATE_KEY, { [id]: null }).then(res => {
-      if (res === null && typeof dbSaveState === "function") dbSaveState(PACK_STATE_KEY, map).catch(() => {});
-    }).catch(() => {});
-  } else if (typeof dbSaveState === "function") {
-    dbSaveState(PACK_STATE_KEY, map).catch(() => {});
-  }
+  _packPush(id, null);
 }
 function newPackBatchId() { return "batch:" + Date.now().toString(36).toUpperCase(); }
 
@@ -4177,7 +4217,24 @@ function savePdf(pdf, filename) {
   return deliverFile(blob, filename);
 }
 
+/* dbSaveState / dbMergeState RESOLVE with {error} instead of throwing, so a
+   `.catch(() => {})` never sees a failure — the save looked done and was gone at
+   the next reload. Writers check the result and call this: one toast per kind
+   per minute, so a dead connection doesn't flood the screen. Returns true when
+   the write failed. */
+const _cloudFailAt = {};
+function cloudWriteFailed(res, what) {
+  if (res && !res.error) return false;
+  const now = Date.now();
+  if (!_cloudFailAt[what] || now - _cloudFailAt[what] > 60000) {
+    _cloudFailAt[what] = now;
+    window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: "⚠️ บันทึก" + what + "ขึ้นระบบไม่สำเร็จ — ตรวจสอบอินเทอร์เน็ตแล้วลองใหม่", type: "error" } }));
+  }
+  return true;
+}
+
 Object.assign(window, {
+  cloudWriteFailed,
   isIOSDevice, deliverFile, savePdf,
   STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,
   skuBrandPrefix, guessBrandFromSku,
@@ -4208,7 +4265,7 @@ Object.assign(window, {
   receiveLineShelf, receiveLinesWithoutShelf, buildReceiveReport, lastReceiveLoc, rememberReceiveLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
-  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packedRecent, packedOnDay, usePackHomeStats, packHomeThaiDate, packHomeInitials, packHomeLoadState, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
+  packKey, packLocRank, packLinesForOrder, restockLinesForOrder, packLinesForOrders, packQueue, packedRecent, packedOnDay, usePackHomeStats, packHomeThaiDate, packHomeInitials, packHomeLoadState, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
   loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, loadPackOrderNotes, packOrderNote, setPackOrderNote, markOrderTouched, orderTouchedRecently, editPackOrderNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,

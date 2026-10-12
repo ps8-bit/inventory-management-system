@@ -161,6 +161,52 @@ function shippedOrderIds(stateRows: Array<Record<string, unknown>>): Set<string>
   return ids;
 }
 
+// Orders that are shipped but carry NO ship time never qualify above, so their
+// files stayed forever: 287 overrides marked shipped before setOrderField began
+// stamping (2026-10-12), plus label-born orders that read "shipped" only because
+// their label has a tracking number (no override at all). Stamp the ones that
+// still hold files with "now" — the real ship time is unknown, so they leave
+// FILE_KEEP_DAYS from tonight, never sooner. Uses the same shallow merge the app
+// uses (merge_app_state), sending each COMPLETE entry. Returns how many.
+async function stampUnstampedShipped(admin: any, stateRows: Array<Record<string, unknown>>, labelRows: Array<Record<string, unknown>>): Promise<number> {
+  const done = (s: unknown) => s === "shipped" || s === "delivered";
+  const ovRow = stateRows.find((r) => r.key === "order_overrides");
+  const ov = (ovRow && ovRow.value && typeof ovRow.value === "object") ? ovRow.value as Record<string, Record<string, unknown> | null> : {};
+  const cand: Record<string, Record<string, unknown>> = {};
+  for (const [id, e] of Object.entries(ov)) {
+    if (e && !e.deleted && done(e.status) && !e.shippedAt && !e.deliveredAt) cand[id] = { ...e };
+  }
+  for (const r of labelRows) {
+    const l = (r && r.data && typeof r.data === "object") ? r.data as Record<string, unknown> : null;
+    if (!l || !String(l.tracking || "").trim()) continue;
+    const so = String(l.soId || "");
+    const id = (so && !/^ฉลากใหม่/.test(so)) ? so : String(r.id || "");   // tracking.jsx orderIdForLabel
+    const e = ov[id];
+    if (!id || cand[id] || (e && (e.deleted || e.status || e.shippedAt))) continue;
+    cand[id] = { ...(e || {}), status: "shipped" };
+  }
+  const ids = Object.keys(cand);
+  if (!ids.length) return 0;
+  // Only orders that still have a label file / attachment need a stamp.
+  const withFiles = new Set<string>();
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const { data: lf, error: le } = await admin.from("order_files").select("id").in("id", chunk);
+    if (le) throw new Error(le.message);
+    (lf || []).forEach((x: any) => withFiles.add(x.id));
+    const { data: af, error: ae } = await admin.from("order_attachments").select("order_id").in("order_id", chunk);
+    if (ae) throw new Error(ae.message);
+    (af || []).forEach((x: any) => withFiles.add(x.order_id));
+  }
+  if (!withFiles.size) return 0;
+  const now = new Date().toISOString();
+  const patch: Record<string, Record<string, unknown>> = {};
+  withFiles.forEach((id) => { patch[id] = { ...cand[id], shippedAt: now }; });
+  const { error } = await admin.rpc("merge_app_state", { k: "order_overrides", patch });
+  if (error) throw new Error("stamp shippedAt: " + error.message);
+  return withFiles.size;
+}
+
 async function purgeShippedOrderFiles(admin: any, token: string, folderId: string, ids: Set<string>) {
   const res = { archived: 0, failed: 0, remaining: false, error: null as string | null };
   if (!ids.size) return res;
@@ -463,7 +509,14 @@ Deno.serve(async (req) => {
   let files: Record<string, unknown> | null = null;
   try {
     const stateRows = (Array.isArray(tables.app_state) ? tables.app_state : []) as Array<Record<string, unknown>>;
-    if (!errors.app_state) files = await purgeShippedOrderFiles(admin, token, folderId, shippedOrderIds(stateRows));
+    if (!errors.app_state) {
+      files = await purgeShippedOrderFiles(admin, token, folderId, shippedOrderIds(stateRows));
+      // After the purge: tonight's stamps start their FILE_KEEP_DAYS from now.
+      if (!errors.labels) {
+        const labelRows = (Array.isArray(tables.labels) ? tables.labels : []) as Array<Record<string, unknown>>;
+        files = { ...(files || {}), stamped: await stampUnstampedShipped(admin, stateRows, labelRows) };
+      }
+    }
   } catch (e) {
     files = { error: String(e).slice(0, 300) };
   }

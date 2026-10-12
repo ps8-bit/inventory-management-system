@@ -18,10 +18,20 @@ function loadSenders() {
   return [];
 }
 function saveSenders(list) {
-  window._DB_SENDERS = list;
-  try { localStorage.setItem("ims_senders", JSON.stringify(list)); } catch (e) {}
-  if (window.dbSaveState) dbSaveState("senders", list).catch(() => {});
-  window.dispatchEvent(new CustomEvent("ims-senders-change"));
+  const prev = loadSenders();
+  const mirror = (l) => {
+    window._DB_SENDERS = l;
+    try { localStorage.setItem("ims_senders", JSON.stringify(l)); } catch (e) {}
+    window.dispatchEvent(new CustomEvent("ims-senders-change"));
+  };
+  mirror(list);
+  if (!window.dbSaveState) return;
+  // A rejected save rolls the local copy back, or it would revert at the next reload.
+  const fail = (res) => {
+    if (typeof cloudWriteFailed === "function") cloudWriteFailed(res, "ผู้ส่ง");
+    if (window._DB_SENDERS === list) mirror(prev);
+  };
+  dbSaveState("senders", list).then(res => { if (res && res.error) fail(res); }).catch(e => fail({ error: String(e) }));
 }
 
 /* Chips to pick a saved sender (store = primary), or save the current one.
@@ -731,6 +741,11 @@ function loadLabels() {
 }
 function saveLabels(labels) {
   const prev = window._DB_LABELS;
+  // Only the labels this save really changed go to the cloud. Upserting the whole
+  // queue wrote this device's copy of EVERY label, so a phone that had missed a
+  // live update overwrote other devices' newer edits (a tracking number entered
+  // elsewhere vanished). Unchanged labels are never re-sent.
+  const changedLabels = [];
   // Stamp `updatedAt` (inside the label, persisted in the data jsonb) on labels
   // that are new or whose content changed, so dbInit can merge local↔cloud by
   // recency instead of blindly letting the cloud copy win. Only changed labels
@@ -747,7 +762,10 @@ function saveLabels(labels) {
       // This device edited that order → the alert watcher pushes the change to
       // the others instead of alerting here (tracking.jsx startOrderAlertWatch).
       if (changed && typeof markOrderTouched === "function") markOrderTouched(typeof orderIdForLabel === "function" ? orderIdForLabel(l) : l.id);
-      return changed ? { ...l, updatedAt: now } : l;
+      if (!changed) return l;
+      const next = { ...l, updatedAt: now };
+      changedLabels.push(next);
+      return next;
     });
   }
   /* ── Self-feeding write loop guard (2026-09-19) ──
@@ -787,7 +805,11 @@ function saveLabels(labels) {
   try { localStorage.setItem("ims_labels", JSON.stringify(labels)); } catch (e) {}
   window._DB_LABELS = labels;
   window.dispatchEvent(new CustomEvent("ims-labels-change"));
-  if (window.dbUpsertLabels) dbUpsertLabels(labels).catch(() => {});
+  if (window.dbUpsertLabels && changedLabels.length) {
+    dbUpsertLabels(changedLabels).then(res => {
+      if (res && res.error && res.error !== "PERMISSION_OR_MISSING" && typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("labels", changedLabels);
+    }).catch(() => { if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("labels", changedLabels); });
+  }
 }
 
 /* ── Date filter for the label queue ───────────────────────────────────────

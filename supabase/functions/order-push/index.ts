@@ -39,6 +39,8 @@ function corsFor(req: Request) {
 }
 
 const SENDER_ROLES = ["admin", "manager", "staff", "packer"];
+// Who may RECEIVE alerts — checked against the live account on every send.
+const RECEIVER_ROLES = ["admin", "manager", "staff", "packer"];
 const MAX_ALERTS = 5;
 // Web Push payloads are capped at 4096 bytes after encryption overhead;
 // stay well under it.
@@ -149,7 +151,23 @@ Deno.serve(async (req) => {
   else if (self) q = q.neq("endpoint", self);
   const { data: subs, error } = await q;
   if (error) return json({ ok: false, error: error.message }, 500);
-  const targets = (subs || []).filter((s: any) => s.role !== "viewer");
+  // Decide by each owner's CURRENT account, never the role the browser stored
+  // when push was turned on: a suspended, deleted or demoted employee's phone
+  // must stop showing customer names / phones / addresses. Their rows go too.
+  const ids = [...new Set((subs || []).map((s: any) => s.user_id))];
+  const okUser: Record<string, boolean> = {};
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const { data, error: e } = await admin.auth.admin.getUserById(id);
+      if (e) { okUser[id] = !/not.?found/i.test(e.message || ""); return; }   // transient → keep
+      const u: any = data && data.user;
+      const banned = u && u.banned_until && new Date(u.banned_until).getTime() > Date.now();
+      okUser[id] = !!u && !banned && RECEIVER_ROLES.includes((u.app_metadata || {}).role);
+    } catch { okUser[id] = true; }
+  }));
+  const stale = (subs || []).filter((s: any) => !okUser[s.user_id]).map((s: any) => s.endpoint);
+  if (stale.length) await admin.from("push_subscriptions").delete().in("endpoint", stale);
+  const targets = (subs || []).filter((s: any) => okUser[s.user_id]);
 
   const by = test ? "" : str((user.user_metadata as any)?.name || (user.user_metadata as any)?.full_name || "", 30);
   const payloads = alerts.map((a: any) => buildPayload(a, by)).filter(Boolean);

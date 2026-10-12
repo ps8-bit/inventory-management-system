@@ -119,6 +119,8 @@ Deno.serve(async (req) => {
           user_metadata: { role },   // keep display copy in sync
         });
         if (error) return json({ error: error.message }, 400);
+        // A role with no order pages stops getting order alerts on its devices.
+        if (role === "viewer") await admin.from("push_subscriptions").delete().eq("user_id", id);
         return json({ user: toClientUser(data.user) });
       }
 
@@ -131,6 +133,8 @@ Deno.serve(async (req) => {
           ban_duration: active ? "none" : "876000h",   // ~100 years = suspended
         });
         if (error) return json({ error: error.message }, 400);
+        // Suspended → their phones stop getting order alerts (customer data).
+        if (!active) await admin.from("push_subscriptions").delete().eq("user_id", id);
         return json({ user: toClientUser(data.user) });
       }
 
