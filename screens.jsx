@@ -6755,6 +6755,179 @@ function ProductFinder({ pushToast, goTo, focus }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   หน้าหลัก for a role with แพ็คสินค้า but no dashboard (พนักงานแพ็ค) —
+   the desktop twin of MPackHome (handheld.jsx). Same numbers from the same
+   hook (usePackHomeStats in data.jsx); read-only, opens the pack queue for
+   everything else. It is a virtual page ("pack-home"), not a nav id: app.jsx
+   only offers it when the role lacks "dashboard" and has "pack", so no other
+   role's home changes. Styles are the shared ph-* set plus dph-* layout.
+   ═══════════════════════════════════════════════════════════════════ */
+function PackHome({ goTo, user }) {
+  const { load, known, now, orders, progress, packedToday, pieces, late, waves, waveOf } = usePackHomeStats();
+  const name = (user && user.name) || "";
+  const firstName = name.split(" ")[0];
+  const canPack = typeof canOpenPage !== "function" || canOpenPage("pack");
+  const openPack = (focus) => canPack && goTo("pack", focus);
+  const empty = known && orders.length === 0;
+  const next = orders.slice(0, 8);   // the queue's own order (packSortMode), untouched
+  const custOf = (o) => typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(o.customer) ? o.customer : (o.customer || "—");
+
+  const tiles = [
+    { label: "รอแพ็ค",            val: orders.length, unit: "ออร์เดอร์", icon: <Icons.Box size={22}/>,     tone: "accent" },
+    { label: "รวมชิ้นที่ต้องหยิบ", val: pieces,        unit: "ชิ้น",      icon: <Icons.Pkg size={22}/>,     tone: "info" },
+    { label: "แพ็คเสร็จวันนี้",     val: packedToday,   unit: "ออร์เดอร์", icon: <Icons.Check size={22}/>,   tone: "success" },
+    { label: "ค้างเกินกำหนด",      val: late,          unit: "ออร์เดอร์", icon: <Icons.History size={22}/>, tone: late ? "danger" : "muted" }
+  ];
+
+  return (
+    <div className="dph">
+      <div className="dph-head">
+        <div className="ph-avatar dph-avatar" aria-hidden="true">{typeof packHomeInitials === "function" ? packHomeInitials(name) : "?"}</div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div className="ph-eyebrow">ภาพรวมวันนี้</div>
+          <h1 className="page-title dph-hello">สวัสดี{firstName ? ", " + firstName : ""}</h1>
+          <div className="ph-date">{typeof packHomeThaiDate === "function" ? packHomeThaiDate(now) : ""}</div>
+        </div>
+        {canPack && (
+          <button type="button" className="ph-cta dph-cta-top" onClick={() => openPack()}>
+            <Icons.Box size={20}/><span>เปิดหน้าแพ็คสินค้า</span><Icons.Chev size={16}/>
+          </button>
+        )}
+      </div>
+
+      {load === "loading" && (
+        <div className="ph-hero is-loading" aria-busy="true" aria-live="polite">
+          <span className="ph-spinner" aria-hidden="true"/>
+          <span className="ph-hero-text">
+            <span className="ph-hero-title">กำลังโหลดงานแพ็ค…</span>
+            <span className="ph-hero-sub">รอสักครู่</span>
+          </span>
+        </div>
+      )}
+      {load === "failed" && (
+        <div className="ph-hero is-error" role="alert">
+          <span className="ph-hero-ic"><Icons.Warn size={26}/></span>
+          <span className="ph-hero-text">
+            <span className="ph-hero-title">โหลดข้อมูลออร์เดอร์ไม่สำเร็จ</span>
+            <span className="ph-hero-sub">ตรวจสอบอินเทอร์เน็ต แล้วลองใหม่อีกครั้ง</span>
+            <button type="button" className="ph-pill-btn" onClick={() => { if (typeof retryOrdersLoad === "function") retryOrdersLoad(); }}>
+              <Icons.Refresh size={15}/> ลองใหม่
+            </button>
+          </span>
+        </div>
+      )}
+      {known && (
+        <div className={"ph-hero dph-hero" + (empty ? " is-done" : " is-work")}>
+          <svg className="ph-hero-art" viewBox="0 0 120 110" aria-hidden="true">
+            <ellipse cx="60" cy="58" rx="56" ry="48" className="ph-blob"/>
+            <path d="M22 18l5 7M33 12l1 9M14 30l8 3" className="ph-spark"/>
+            <path d="M30 44l32-14 32 14v36l-32 16-32-16z" className="ph-box"/>
+            <path d="M30 44l32 15 32-15M62 59v37" className="ph-box-line"/>
+            <path d="M46 37l32 14v10" className="ph-tape"/>
+            <circle cx="88" cy="80" r="16" className="ph-badge"/>
+            {empty
+              ? <path d="M80 80l6 6 10-11" className="ph-badge-mark"/>
+              : <text x="88" y="86" textAnchor="middle" className="ph-badge-num">{orders.length > 99 ? "99+" : orders.length}</text>}
+          </svg>
+          <span className="ph-hero-text">
+            <span className="ph-hero-title">{empty ? <span className="ph-nw">ไม่มีออร์เดอร์รอแพ็ค</span> : <>มี {orders.length} <span className="ph-nw">ออร์เดอร์รอแพ็ค</span></>}</span>
+            <span className="ph-hero-sub">
+              {empty
+                ? <>วันนี้แพ็คเสร็จแล้ว <b className="tnum">{packedToday}</b> ออร์เดอร์</>
+                : <>เหลือ <b className="tnum">{pieces}</b> ชิ้นที่ต้องหยิบ{late ? <> · <span className="ph-nw">ค้างเกินกำหนด <b className="tnum ph-late">{late}</b></span></> : null}</>}
+            </span>
+            {empty
+              ? <span className="ph-hero-pill"><Icons.Check size={13}/> ไม่มีงานค้าง</span>
+              : canPack && <button type="button" className="ph-pill-btn" onClick={() => openPack()}>ทำงานต่อ <Icons.Chev size={14}/></button>}
+          </span>
+          {canPack && known && packedToday > 0 && (
+            <button type="button" className="ph-link dph-hero-link" onClick={() => openPack({ view: "done", day: "today" })}>
+              ดูรายการแพ็คเสร็จวันนี้ <Icons.Chev size={13}/>
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="ph-section">สรุปงานวันนี้</div>
+      <div className="ph-grid dph-grid">
+        {tiles.map(t => (
+          <button key={t.label} type="button" className={"ph-tile tone-" + (known ? t.tone : "muted")} onClick={() => openPack()} disabled={!canPack}>
+            <span className="ph-tile-icon">{t.icon}</span>
+            <span className="ph-tile-body">
+              <span className="ph-tile-label">{t.label}</span>
+              {known
+                ? <span className="ph-tile-val tnum">{t.val}</span>
+                : <span className="ph-tile-val ph-dash" aria-label={load === "failed" ? "ไม่ทราบ" : "กำลังโหลด"}>–</span>}
+              <span className="ph-tile-unit">{t.unit}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <div className={"dph-cols" + (known && next.length > 0 ? "" : " is-solo")}>
+        <div className="dph-main">
+          {known && next.length > 0 && (
+            <>
+              <div className="ph-section">ออร์เดอร์ถัดไป</div>
+              <div className="card card-tight dph-table-card">
+                <table className="t dph-table">
+                  <thead><tr><th>ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th className="num">ชิ้น</th><th>สถานะ</th><th style={{ width: 1 }}/></tr></thead>
+                  <tbody>
+                    {next.map(o => {
+                      const t = (typeof packLineTotals === "function" && typeof packLinesForOrder === "function") ? packLineTotals(packLinesForOrder(o), progress[o.id]) : { need: 0 };
+                      const pf = typeof packPlatformOf === "function" ? packPlatformOf(o) : (o.channel || "");
+                      const isLate = typeof packLateDays === "function" && packLateDays(o) > 0;
+                      return (
+                        <tr key={o.id} className="dph-row" tabIndex={0} onClick={() => openPack({ orderId: o.id })}
+                          onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPack({ orderId: o.id }); } }}>
+                          <td>
+                            <div className="mono dph-id" style={{ fontSize: 12.5, fontWeight: 600 }}>{o.id}</div>
+                            {typeof packOrderTime === "function" && <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{packOrderTime(o)}</div>}
+                          </td>
+                          <td>{custOf(o)}</td>
+                          <td>{pf && typeof ChannelMark === "function" ? <ChannelMark channel={pf} size={20}/> : (o.channel || "—")}</td>
+                          <td className="num tnum">{t.need || 0}</td>
+                          <td>
+                            {waveOf[o.id] ? <span className="badge badge-info">กำลังหยิบรวม</span>
+                              : progress[o.id] ? <span className="badge badge-info">กำลังแพ็ค</span>
+                              : <span className="badge">รอแพ็ค</span>}
+                            {isLate && typeof PackLateBadge === "function" && <span style={{ marginLeft: 6 }}><PackLateBadge order={o} compact/></span>}
+                          </td>
+                          <td><Icons.Chev size={14} style={{ color: "var(--muted)" }}/></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {orders.length > next.length && canPack && (
+                  <button type="button" className="ph-link" onClick={() => openPack()}>ดูทั้งหมด {orders.length} ออร์เดอร์ <Icons.Chev size={13}/></button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+        <div className="dph-side">
+          {known && waves.length > 0 && (
+            <div className="dph-wave">
+              <span className="dph-wave-ic"><Icons.Grid size={18}/></span>
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <b>หยิบรวม {waves.length} รอบ กำลังดำเนินการ</b>
+                <span className="dph-wave-sub">{waves.reduce((n, id) => n + (((progress[id] || {}).orderIds || []).length), 0)} ออร์เดอร์ · หยิบต่อบนมือถือ</span>
+              </span>
+            </div>
+          )}
+          {typeof MPackPushCard === "function" && <MPackPushCard/>}
+          <div className="dph-tip">
+            <Icons.Phone size={15}/>
+            <span>การติ๊กทีละชิ้น สแกนบาร์โค้ด และแจ้งของขาด ทำบนมือถือ: เปิดแอป → หน้าหลัก → เปิดหน้าแพ็คสินค้า</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    แพ็คสินค้า — desktop queue / supervisor view
 
    The packer's working screen is the MOBILE fork (MPack / MPackOrder /
@@ -6765,7 +6938,7 @@ function ProductFinder({ pushToast, goTo, focus }) {
    lines, and close orders out from the packing table. It reads the same
    pack helpers, so the two views can never disagree.
    ═══════════════════════════════════════════════════════════════════ */
-function PackQueue({ pushToast, goTo, user }) {
+function PackQueue({ pushToast, goTo, user, focus }) {
   const [newOpen, setNewOpen] = useState(false);   // สั่งแพ็คใหม่ — one-page form (pack-docs.jsx)
   const [addTo, setAddTo] = useState(null);        // เพิ่มรายการ — same form, bound to one queued order
   const [labelCfg, setLabelCfg] = useState(false);  // ⚙ ตั้งค่าใบปะหน้า — shop-wide, all labels
@@ -6779,6 +6952,17 @@ function PackQueue({ pushToast, goTo, user }) {
   const [plat, setPlat] = useState("");          // platform filter ("" = all)
   const [histOf, setHistOf] = useState(null);    // order whose ประวัติ drawer is open
   const [stage, setStage] = useState("");        // KPI filter: "" | "ready" | "todo"
+  // "packed today" only — set when opened from หน้าหลัก's ดูรายการแพ็คเสร็จวันนี้.
+  const [dayOnly, setDayOnly] = useState(false);
+
+  /* Opened from the pack home (goTo("pack", focus)): either one order — found
+     by search so it is on the visible page, and expanded — or the packed-today
+     list, which uses the SAME rule as the home's count (packedOnDay). */
+  useEffect(() => {
+    if (!focus) return;
+    if (focus.view === "done") { setView("done"); setDayOnly(focus.day === "today"); }
+    if (focus.orderId) { setView("open"); setStage(""); setPlat(""); setQ(String(focus.orderId)); setOpen(focus.orderId); }
+  }, [focus && focus.n]);
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6801,7 +6985,9 @@ function PackQueue({ pushToast, goTo, user }) {
     });
   }, [tick, progress]);
 
-  const packed = useMemo(() => (typeof packedRecent === "function") ? packedRecent(3) : [], [tick]);
+  const packedRecentList = useMemo(() => (typeof packedRecent === "function") ? packedRecent(3) : [], [tick]);
+  const packedTodayList = useMemo(() => (dayOnly && typeof packedOnDay === "function") ? packedOnDay() : [], [tick, dayOnly]);
+  const packed = dayOnly ? packedTodayList : packedRecentList;
   // Name + order no. off attached labels the queue hasn't read yet.
   useEffect(() => {
     if (typeof backfillLabelCodes === "function") backfillLabelCodes(rows.map(r => r.o)).catch(() => {});
@@ -6913,13 +7099,17 @@ function PackQueue({ pushToast, goTo, user }) {
           downloading / copying / printing the label. Reopens PackShipDocs only. */}
       {view === "done" ? (
           <div className="card card-tight">
-            {packed.length > 0 && typeof openPackChecklist === "function" && (
-              <div className="row" style={{ justifyContent: "flex-end", padding: "10px 12px 0" }}>
-                <button className="btn" onClick={() => openPackChecklist(packed, pushToast)}><Icons.Print size={15}/> พิมพ์ใบรายการทั้งหมด ({packed.length})</button>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8, padding: "10px 12px 0", flexWrap: "wrap" }}>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <strong style={{ fontSize: 13.5 }}>{dayOnly ? "แพ็คเสร็จวันนี้" : "แพ็คเสร็จใน 3 วันล่าสุด"}</strong>
+                {dayOnly && <button className="btn btn-sm" onClick={() => setDayOnly(false)}>ดู 3 วันล่าสุด</button>}
               </div>
-            )}
+              {packed.length > 0 && typeof openPackChecklist === "function" && (
+                <button className="btn" onClick={() => openPackChecklist(packed, pushToast)}><Icons.Print size={15}/> พิมพ์ใบรายการทั้งหมด ({packed.length})</button>
+              )}
+            </div>
             <table className="t">
-              <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th style={{ width: 1 }}/></tr></thead>
+              <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th>สถานะ</th><th style={{ width: 1 }}/></tr></thead>
               <tbody>
                 {packed.map(o => {
                   const isOpen = openPacked === o.id;
@@ -6931,6 +7121,8 @@ function PackQueue({ pushToast, goTo, user }) {
                         <td style={{ fontSize: 12, color: "var(--muted)" }}>{o.channel || "—"}</td>
                         <td style={{ fontSize: 12 }}>{new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
                         <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{o.packedBy || "—"}</td>
+                        {/* packed ≠ shipped: an order packed today that has left since keeps its real status */}
+                        <td>{o.status === "packed" ? <span className="badge badge-success">พร้อมส่ง</span> : <span className="badge">{(typeof ORDER_STATUS_TH !== "undefined" && ORDER_STATUS_TH[o.status]) || o.status}</span>}</td>
                         <td style={{ whiteSpace: "nowrap" }}>
                           {typeof openPackChecklist === "function" && <button className="btn btn-sm btn-ghost" style={{ marginRight: 6 }} title="ใบรายการสินค้า" aria-label="ใบรายการสินค้า" onClick={e => { e.stopPropagation(); openPackChecklist([o], pushToast); }}><Icons.Print size={14}/></button>}
                           <button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button>{" "}
@@ -6938,7 +7130,7 @@ function PackQueue({ pushToast, goTo, user }) {
                         </td>
                       </tr>
                       {isOpen && (
-                        <tr><td colSpan="6" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
+                        <tr><td colSpan="7" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
                           {typeof PackShipDocs === "function" && <PackShipDocs order={o}
                             lines={(typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []}
                             pushToast={pushToast} onCancelled={() => setOpenPacked(null)}/>}
@@ -6947,7 +7139,7 @@ function PackQueue({ pushToast, goTo, user }) {
                     </React.Fragment>
                   );
                 })}
-                {packed.length === 0 && <tr><td colSpan="6" style={{ textAlign: "center", padding: 24, color: "var(--muted)", fontSize: 12.5 }}>ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด</td></tr>}
+                {packed.length === 0 && <tr><td colSpan="7" style={{ textAlign: "center", padding: 24, color: "var(--muted)", fontSize: 12.5 }}>{dayOnly ? "ยังไม่มีออร์เดอร์ที่แพ็คเสร็จวันนี้" : "ไม่มีออร์เดอร์ที่แพ็คเสร็จใน 3 วันล่าสุด"}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -7206,4 +7398,4 @@ function PackQueue({ pushToast, goTo, user }) {
 }
 
 Object.assign(window, { QuickSellModal });
-Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel, LocationSelect, PackQueue, QtyStepper });
+Object.assign(window, { Inbound, Outbound, Inventory, Locations, Kpi, ActivityDot, Legend, MiniWarehouse, BulkField, SellProductModal, CameraScanner, StockTake, OcrNameButton, ProductFinder, ProductNameSearchField, LocationSplitPanel, LocationSelect, PackQueue, PackHome, QtyStepper });
