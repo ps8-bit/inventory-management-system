@@ -82,6 +82,13 @@ function setOrderField(id, changes) {
   if (typeof markOrderTouched === "function") markOrderTouched(id);
   const prev = loadOrderOverrides();
   const entry = { ...prev[id], ...changes };
+  // Every way an order becomes shipped/delivered (bulk status, slip scan, …)
+  // gets its time stamped HERE: the nightly backup purges an order's files 3
+  // days after shippedAt, so a "shipped" without it kept them forever (287
+  // orders on 2026-10-12). An existing stamp is never moved.
+  const nowIso = new Date().toISOString();
+  if ((entry.status === "shipped" || entry.status === "delivered") && !entry.shippedAt) entry.shippedAt = nowIso;
+  if (entry.status === "delivered" && !entry.deliveredAt) entry.deliveredAt = nowIso;
   // Fresh object reference so React state setters (setO/setOverrides) re-render.
   const m = { ...prev, [id]: entry };
   window._DB_ORDER_OVERRIDES = m;
