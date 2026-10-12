@@ -744,6 +744,9 @@ function saveLabels(labels) {
       const lRest = omit(l, "updatedAt");
       const beforeRest = omit(before || {}, "updatedAt");
       const changed = !before || JSON.stringify(lRest) !== JSON.stringify(beforeRest);
+      // This device edited that order → the alert watcher pushes the change to
+      // the others instead of alerting here (tracking.jsx startOrderAlertWatch).
+      if (changed && typeof markOrderTouched === "function") markOrderTouched(typeof orderIdForLabel === "function" ? orderIdForLabel(l) : l.id);
       return changed ? { ...l, updatedAt: now } : l;
     });
   }

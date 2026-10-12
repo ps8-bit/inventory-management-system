@@ -367,6 +367,7 @@ function MHome({ ctx }) {
         </div>
 
         {/* Quick actions */}
+        {typeof OrderPushNudge === "function" && <OrderPushNudge/>}
         <div className="m-section-label" style={{ padding: "8px 4px 8px" }}>ทางลัด</div>
         {/* Each shortcut is dropped when its capability/page is revoked — the
             Screen guard would otherwise bounce the tap to "ไม่มีสิทธิ์เข้าถึง". */}
@@ -476,6 +477,7 @@ function MNotifSheet({ ctx, onClose }) {
           <button className="m-action" onClick={onClose}><Icons.X size={14}/></button>
         </div>
         <div className="m-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {typeof OrderPushToggle === "function" && <OrderPushToggle/>}
           {nothing && <div style={{ padding: "28px 8px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>✅ ไม่มีการแจ้งเตือนใหม่</div>}
           {outOfStock.length > 0 && <div className="m-section-label" style={{ color: "var(--danger)", padding: "4px 2px" }}>หมดสต็อก ({outOfStock.length})</div>}
           {outOfStock.slice(0, 6).map(p => <Row key={"o" + p.sku} color="var(--danger)" title={p.name} sub={p.sku} onClick={() => goProduct(p.sku)}/>)}

@@ -1159,6 +1159,42 @@ async function lineTest() {
   }
 }
 
+/* ── Web push for order alerts (supabase/push-subscriptions.sql + order-push) ── */
+// Save/refresh THIS browser's push subscription for the signed-in user. Goes
+// through a SECURITY DEFINER RPC so a shared phone's row moves to whoever is
+// signed in now.
+async function dbRegisterPush(sub, role) {
+  const j = sub && sub.toJSON ? sub.toJSON() : sub;
+  if (!j || !j.endpoint || !j.keys) return { error: 'no subscription' };
+  const { error } = await sb.rpc('register_push_subscription', {
+    p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth,
+    p_role: role || null, p_ua: (navigator.userAgent || '').slice(0, 200),
+  });
+  return error ? { error: error.message } : { ok: true };
+}
+async function dbUnregisterPush(endpoint) {
+  if (!endpoint) return { ok: true };
+  const { error } = await sb.from('push_subscriptions').delete().eq('endpoint', endpoint);
+  return error ? { error: error.message } : { ok: true };
+}
+// Fan an order change out to every OTHER device ({alerts}), or {mode:"test"} to
+// the caller's own devices. Never throws; a failed push must not block a save.
+async function sendOrderPush(body) {
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) return { error: 'no session' };
+    const res = await fetch(SUPABASE_URL + '/functions/v1/order-push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + session.access_token },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    return res.ok ? { data: json } : { error: json.error || ('HTTP ' + res.status) };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
+
 // Trigger the backup-to-drive Edge Function manually (admin-only — the function
 // verifies the role server-side). Uploads the JSON snapshot + today's stock
 // Excel to Drive, same as the nightly cron. Can take ~10-30s on a big catalog.
@@ -1519,7 +1555,7 @@ Object.assign(window, {
   dbLoadState,         dbSaveState,          dbLoadProductImages,  dbLoadLocationImages,
   dbServerTimeMs,
   dbInsertAuditEntry,  dbLoadAuditLog,    dbDeleteAuditLog,  dbLoadAuditDay,  dbCountAuditLog,
-  manageUsers,         redeemInviteCode,    lineTest,           lineBotPreview,      runCloudBackup,
+  manageUsers,         redeemInviteCode,    lineTest,  dbRegisterPush, dbUnregisterPush, sendOrderPush,           lineBotPreview,      runCloudBackup,
   // Auth helpers — thin wrappers so auth.jsx / app.jsx never import sb directly
   authSignIn:        (email, password) => sb.auth.signInWithPassword({ email, password }),
   // scope:'local' clears only this device's persisted session (used by the

@@ -2400,11 +2400,15 @@ const ORDER_ALERT_FIELDS = [
   { k: "pnote",   label: "โน้ตออร์เดอร์" },
 ];
 
-/* prev → next snapshot → alert records. */
-function _orderAlertDiff(prev, next) {
+/* prev → next snapshot → alert records.
+   mode "remote" (default): changes made elsewhere — ids THIS device just wrote are skipped.
+   mode "local": the opposite — ONLY those ids, i.e. this device's own edit, which
+   is what gets pushed to every other device (order-push). */
+function _orderAlertDiff(prev, next, mode) {
   const out = [];
   const now = Date.now();
-  const touched = (id) => typeof orderTouchedRecently === "function" && orderTouchedRecently(id);
+  const mine = (id) => typeof orderTouchedRecently === "function" && orderTouchedRecently(id);
+  const touched = (id) => mode === "local" ? !mine(id) : mine(id);
   const base = (id, s) => ({ id, at: now, short: s.short, customer: s.customer, channel: s.channel, status: s.status });
   Object.keys(next.pend).forEach(id => {
     if (touched(id)) return;
@@ -2533,6 +2537,21 @@ function _orderAlertSystemNotify(fresh) {
   } catch (e) {}
 }
 
+/* Outgoing pushes, coalesced: one save fires several change events (order row,
+   label, overrides), and an edit right after creating an order should stay ONE
+   "new" notification. Sent ~2.5 s after the last change. */
+let _oaPushQueue = [];
+let _oaPushTimer = null;
+function _queueOrderPush(alerts) {
+  _oaPushQueue = _mergeOrderAlerts(_oaPushQueue, alerts);
+  clearTimeout(_oaPushTimer);
+  _oaPushTimer = setTimeout(() => {
+    const batch = _oaPushQueue.slice(0, 5);
+    _oaPushQueue = [];
+    if (batch.length && typeof sendOrderPush === "function") sendOrderPush({ alerts: batch });
+  }, 2500);
+}
+
 function _orderAlertLiveIds() {
   return (typeof buildOrders === "function" ? buildOrders() : []).map(o => o.id);
 }
@@ -2542,6 +2561,7 @@ let _oaStarted = false;
 function startOrderAlertWatch() {
   if (_oaStarted) return;
   _oaStarted = true;
+  _hookOrderPush();
   let snap = _orderAlertSnap();
   let timer = null;
   const publish = (fresh) => {
@@ -2597,9 +2617,13 @@ function startOrderAlertWatch() {
       return;
     }
     // Our own write: anything remote still waiting is diffed first (ids we just
-    // touched are skipped there), then the baseline absorbs the local change.
+    // touched are skipped there), then the baseline absorbs the local change —
+    // and that change, with its exact before/after, is pushed to the others.
     if (timer) { clearTimeout(timer); runDiff(); }
-    snap = _orderAlertSnap();
+    const next = _orderAlertSnap();
+    const own = _orderAlertDiff(snap, next, "local");
+    snap = next;
+    if (own.length) _queueOrderPush(own);
   };
   ["ims-orders-change", "ims-labels-change", "ims-pack-change"].forEach(ev => window.addEventListener(ev, onChange));
 }
@@ -2788,6 +2812,227 @@ function OrderChangeBanner({ orderId }) {
   );
 }
 
+/* ============ WEB PUSH — order alerts on a locked / closed phone ============
+   Opt-in per device. The device that edits an order pushes its alert through
+   the order-push Edge Function to every OTHER subscribed device; sw.js shows it
+   in the notification tray and keeps the alert in IndexedDB ("ims-push" inbox),
+   which pullPushInbox() folds into the alert list when the app opens.
+   iPhone/iPad: web push only exists for a Home-Screen app (iOS 16.4+). */
+const ORDER_PUSH_VAPID_PUBLIC = "BHiVkynApe2Nsr-R-EOiX2J4PLzfKFYXOfvpdH56PrhieyorKOjatWUs6TCFO23_VnNnl4gvN3L9Qe4NJSL9V7w";
+const ORDER_PUSH_ON_KEY = "ims_push_on";
+
+function _isIOS() {
+  const ua = navigator.userAgent || "";
+  return /iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+function _isStandalone() {
+  try { return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true; }
+  catch (e) { return false; }
+}
+function orderPushSupported() {
+  return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+/* "on" | "off" | "denied" | "install" (iPhone in Safari) | "unsupported" */
+function orderPushState() {
+  if (_isIOS() && !_isStandalone()) return "install";
+  if (!orderPushSupported()) return "unsupported";
+  if (Notification.permission === "denied") return "denied";
+  let on = false;
+  try { on = localStorage.getItem(ORDER_PUSH_ON_KEY) === "1"; } catch (e) {}
+  return (on && Notification.permission === "granted") ? "on" : "off";
+}
+function _pushStateChanged() { window.dispatchEvent(new CustomEvent("ims-push-state")); }
+function _b64urlBytes(s) {
+  const pad = "=".repeat((4 - (s.length % 4)) % 4);
+  const raw = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
+}
+async function _pushSubscription(create) {
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub && create) {
+    const opts = { userVisibleOnly: true, applicationServerKey: _b64urlBytes(ORDER_PUSH_VAPID_PUBLIC) };
+    try { sub = await reg.pushManager.subscribe(opts); }
+    catch (e) {
+      // A subscription made with an older key blocks a new one — drop it and retry.
+      const old = await reg.pushManager.getSubscription();
+      if (old) { await old.unsubscribe().catch(() => {}); sub = await reg.pushManager.subscribe(opts); }
+      else throw e;
+    }
+  }
+  return sub;
+}
+async function enableOrderPush() {
+  const st = orderPushState();
+  if (st === "install" || st === "unsupported") return { error: st };
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") { _pushStateChanged(); return { error: perm === "denied" ? "denied" : "dismissed" }; }
+    const sub = await _pushSubscription(true);
+    const role = window.__currentUser && window.__currentUser.role;
+    const r = (typeof dbRegisterPush === "function") ? await dbRegisterPush(sub, role) : { error: "no db" };
+    if (r.error) return r;
+    try { localStorage.setItem(ORDER_PUSH_ON_KEY, "1"); } catch (e) {}
+    _pushStateChanged();
+    return { ok: true };
+  } catch (e) {
+    return { error: String((e && e.message) || e) };
+  }
+}
+async function disableOrderPush() {
+  try {
+    const sub = await _pushSubscription(false);
+    if (sub) {
+      if (typeof dbUnregisterPush === "function") await dbUnregisterPush(sub.endpoint);
+      await sub.unsubscribe().catch(() => {});
+    }
+  } catch (e) {}
+  try { localStorage.removeItem(ORDER_PUSH_ON_KEY); } catch (e) {}
+  _pushStateChanged();
+}
+// On every start: keep this device's row current (the browser may have rotated
+// the subscription, or a different person signed in on this phone).
+async function refreshOrderPush() {
+  if (orderPushState() !== "on") return;
+  try {
+    const sub = await _pushSubscription(true);
+    const role = window.__currentUser && window.__currentUser.role;
+    if (sub && typeof dbRegisterPush === "function") await dbRegisterPush(sub, role);
+  } catch (e) {}
+}
+
+// Read + clear what sw.js stored from pushes (alerts from the last 24 h only).
+function _pushInboxDrain() {
+  return new Promise((resolve) => {
+    if (!("indexedDB" in window)) return resolve([]);
+    let req;
+    try { req = indexedDB.open("ims-push", 1); } catch (e) { return resolve([]); }
+    req.onupgradeneeded = () => req.result.createObjectStore("inbox", { autoIncrement: true });
+    req.onerror = () => resolve([]);
+    req.onsuccess = () => {
+      const db = req.result;
+      let rows = [];
+      try {
+        const tx = db.transaction("inbox", "readwrite");
+        const store = tx.objectStore("inbox");
+        const all = store.getAll();
+        all.onsuccess = () => { rows = all.result || []; store.clear(); };
+        tx.oncomplete = () => { db.close(); resolve(rows); };
+        tx.onerror = () => { db.close(); resolve([]); };
+      } catch (e) { db.close(); resolve([]); }
+    };
+  });
+}
+async function pullPushInbox() {
+  const rows = await _pushInboxDrain();
+  const day = Date.now() - 24 * 3600 * 1000;
+  const alerts = rows.filter(r => r && r.alert && r.alert.id && (r.at || 0) > day).map(r => r.alert);
+  if (alerts.length && orderAlertsAllowed()) _saveOrderAlerts(_mergeOrderAlerts(loadOrderAlerts(), alerts));
+  return alerts.length;
+}
+function _openOrderAlert(id) {
+  if (id) window.dispatchEvent(new CustomEvent("ims-order-alert-open", { detail: { id } }));
+}
+let _pushHooked = false;
+function _hookOrderPush() {
+  if (_pushHooked) return;
+  _pushHooked = true;
+  // Opened by tapping a notification while the app was closed (sw.js → /?oa=<id>).
+  let openId = null;
+  try {
+    const init = (window.__IMS_INIT && window.__IMS_INIT.search) || window.location.search || "";
+    openId = new URLSearchParams(init).get("oa");
+    if (openId && window.history && window.history.replaceState) {
+      const u = new URL(window.location.href); u.searchParams.delete("oa");
+      window.history.replaceState(null, "", u.pathname + u.search + u.hash);
+    }
+  } catch (e) {}
+  pullPushInbox().then(() => _openOrderAlert(openId));
+  refreshOrderPush();
+  if (navigator.serviceWorker && navigator.serviceWorker.addEventListener) {
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      const d = e.data || {};
+      if (d.type === "ims-push-inbox") pullPushInbox();
+      if (d.type === "ims-push-open") pullPushInbox().then(() => _openOrderAlert(d.orderId));
+    });
+  }
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") pullPushInbox(); });
+}
+
+const ORDER_PUSH_COPY = {
+  on:          { title: "แจ้งเตือนออร์เดอร์: เปิดอยู่", sub: "เครื่องนี้จะได้รับแจ้งเตือนแม้ปิดแอปหรือล็อกจอ" },
+  off:         { title: "รับแจ้งเตือนออร์เดอร์บนเครื่องนี้", sub: "ออร์เดอร์ใหม่ / ถูกแก้ไข / ยกเลิก — แจ้งแม้ปิดแอปหรือล็อกจอ" },
+  install:     { title: "iPhone: ต้องเพิ่มแอปลงหน้าจอโฮมก่อน", sub: "ใน Safari กดปุ่มแชร์ → \"เพิ่มไปยังหน้าจอโฮม\" แล้วเปิดแอปจากไอคอน จากนั้นกดเปิดแจ้งเตือนที่นี่" },
+  denied:      { title: "การแจ้งเตือนถูกปิดไว้ในเครื่อง", sub: "เปิดอนุญาตการแจ้งเตือนของเว็บนี้ในการตั้งค่าเบราว์เซอร์/เครื่อง แล้วกลับมาที่นี่" },
+  unsupported: { title: "เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือน", sub: "ใช้ Chrome (Android) หรือแอปบนหน้าจอโฮม (iPhone)" },
+};
+
+/* On/off card for this device — mobile notification sheet, desktop bell
+   popover and (when off) the mobile home screen. */
+function OrderPushToggle({ onDismiss }) {
+  const [st, setSt] = useStateTrk(() => orderPushState());
+  const [busy, setBusy] = useStateTrk(false);
+  useEffectTrk(() => {
+    const h = () => setSt(orderPushState());
+    window.addEventListener("ims-push-state", h);
+    document.addEventListener("visibilitychange", h);
+    return () => { window.removeEventListener("ims-push-state", h); document.removeEventListener("visibilitychange", h); };
+  }, []);
+  if (!orderAlertsAllowed()) return null;
+  const toast = (m) => window.dispatchEvent(new CustomEvent("ims-toast", { detail: m }));
+  const turnOn = async () => {
+    setBusy(true);
+    const r = await enableOrderPush();
+    setBusy(false);
+    setSt(orderPushState());
+    if (r.ok) toast("เปิดแจ้งเตือนออร์เดอร์บนเครื่องนี้แล้ว");
+    else if (r.error === "denied") toast({ msg: "ถูกปฏิเสธการแจ้งเตือน — เปิดอนุญาตในการตั้งค่าเครื่อง", type: "warn" });
+    else if (r.error !== "dismissed") toast({ msg: "เปิดแจ้งเตือนไม่สำเร็จ: " + r.error, type: "error" });
+  };
+  const test = async () => {
+    setBusy(true);
+    const r = (typeof sendOrderPush === "function") ? await sendOrderPush({ mode: "test" }) : { error: "no fn" };
+    setBusy(false);
+    if (r.error) toast({ msg: "ส่งทดสอบไม่สำเร็จ: " + r.error, type: "error" });
+    else toast("ส่งการแจ้งเตือนทดสอบไปที่ " + (r.data.devices || 0) + " เครื่องของคุณแล้ว");
+  };
+  const off = async () => { setBusy(true); await disableOrderPush(); setBusy(false); setSt(orderPushState()); };
+  const c = ORDER_PUSH_COPY[st] || ORDER_PUSH_COPY.off;
+  return (
+    <div className={"opt opt-" + st}>
+      <span className="opt-ic"><Icons.Bell size={16}/></span>
+      <div className="opt-main">
+        <div className="opt-title">{c.title}</div>
+        <div className="opt-sub">{c.sub}</div>
+        <div className="opt-actions">
+          {st === "off" && <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={turnOn}>{busy ? "กำลังเปิด…" : "เปิดการแจ้งเตือน"}</button>}
+          {st === "on" && <button type="button" className="btn btn-sm" disabled={busy} onClick={test}>ทดสอบ</button>}
+          {st === "on" && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={off}>ปิด</button>}
+          {onDismiss && st !== "on" && <button type="button" className="btn btn-ghost btn-sm" onClick={onDismiss}>ไว้ทีหลัง</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* Home-screen nudge (mobile) until this device turns notifications on. */
+function OrderPushNudge() {
+  const KEY = "ims_push_nudge_hide";
+  const [hidden, setHidden] = useStateTrk(() => { try { return Number(localStorage.getItem(KEY) || 0) > Date.now(); } catch (e) { return false; } });
+  const [st, setSt] = useStateTrk(() => orderPushState());
+  useEffectTrk(() => {
+    const h = () => setSt(orderPushState());
+    window.addEventListener("ims-push-state", h);
+    return () => window.removeEventListener("ims-push-state", h);
+  }, []);
+  if (hidden || st === "on" || st === "unsupported" || !orderAlertsAllowed()) return null;
+  const dismiss = () => {
+    try { localStorage.setItem(KEY, String(Date.now() + 3 * 24 * 3600 * 1000)); } catch (e) {}
+    setHidden(true);
+  };
+  return <OrderPushToggle onDismiss={dismiss}/>;
+}
+
 /* One-line summary of an edit for the alert card ("เพิ่ม 1 · เอาออก 1 · ที่อยู่จัดส่ง"). */
 function _orderAlertSummary(a) {
   const d = a.diff || [];
@@ -2808,10 +3053,16 @@ function OrderAlerts({ onOpen, mobile }) {
   const [collapsed, setCollapsed] = useStateTrk(false);
   const [reviewId, setReviewId] = useStateTrk(null);
   const [sound, setSound] = useStateTrk(() => orderAlertSoundOn());
-  const [perm, setPerm] = useStateTrk(() => ("Notification" in window) ? Notification.permission : "unsupported");
+  const [pushSt, setPushSt] = useStateTrk(() => orderPushState());
   const countRef = useRefTrk(list.length);
 
   useEffectTrk(() => {
+    // A tapped push notification asks for its order's review (registered BEFORE
+    // the watcher starts, which is what may fire the request).
+    const op = (e) => { setCollapsed(false); setReviewId(e.detail && e.detail.id); };
+    const ps = () => setPushSt(orderPushState());
+    window.addEventListener("ims-order-alert-open", op);
+    window.addEventListener("ims-push-state", ps);
     startOrderAlertWatch();
     const h = () => {
       const next = loadOrderAlerts();
@@ -2826,6 +3077,8 @@ function OrderAlerts({ onOpen, mobile }) {
     return () => {
       window.removeEventListener("ims-order-alerts-change", h);
       window.removeEventListener("storage", sh);
+      window.removeEventListener("ims-order-alert-open", op);
+      window.removeEventListener("ims-push-state", ps);
     };
   }, []);
 
@@ -2837,9 +3090,7 @@ function OrderAlerts({ onOpen, mobile }) {
   );
   if (!list.length) return null;
 
-  const askPerm = () => {
-    try { Notification.requestPermission().then(p => setPerm(p)).catch(() => {}); } catch (e) {}
-  };
+  const askPerm = () => { enableOrderPush().then(() => setPushSt(orderPushState())); };
   const toggleSound = () => { const v = !sound; setSound(v); setOrderAlertSound(v); if (v) _orderAlertChime(false); };
 
   if (collapsed) {
@@ -2895,11 +3146,11 @@ function OrderAlerts({ onOpen, mobile }) {
             );
           })}
         </div>
-        {(list.length > 1 || perm === "default") && (
+        {(list.length > 1 || pushSt === "off") && (
           <div className="oa-foot">
             {list.length > 3 && <span>และอีก {list.length - 3} ออร์เดอร์</span>}
             <span style={{ flex: 1 }}/>
-            {perm === "default" && <button type="button" className="oa-ghost" onClick={askPerm}>แจ้งเตือนตอนปิดหน้าจอ</button>}
+            {pushSt === "off" && <button type="button" className="oa-ghost" onClick={askPerm}>แจ้งเตือนตอนปิดหน้าจอ</button>}
             {list.length > 1 && <button type="button" className="oa-ghost" onClick={ackAllOrderAlerts}>รับทราบทั้งหมด</button>}
           </div>
         )}
@@ -2910,4 +3161,4 @@ function OrderAlerts({ onOpen, mobile }) {
 }
 
 Object.assign(window, { orderCustomerText, TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder,
-  OrderAlerts, OrderChangeBanner, OrderChangeDetail, startOrderAlertWatch, loadOrderAlerts, ackOrderAlert, ackAllOrderAlerts });
+  OrderAlerts, OrderChangeBanner, OrderChangeDetail, OrderPushToggle, OrderPushNudge, enableOrderPush, disableOrderPush, orderPushState, startOrderAlertWatch, loadOrderAlerts, ackOrderAlert, ackAllOrderAlerts });

@@ -216,6 +216,7 @@ function NotifPopover({ onClose, goTo, goToProduct, goToOrder }) {
   return (
     <div style={{ position:"absolute", top:"calc(100% + 8px)", right:0, width:320, background:"var(--surface)", border:"1px solid var(--border)", borderRadius:14, boxShadow:"var(--shadow-lg)", zIndex:60, overflow:"hidden" }}>
       <div style={{ padding:"12px 16px 8px", fontSize:13, fontWeight:600, borderBottom:"1px solid var(--border)" }}>การแจ้งเตือน</div>
+      {typeof OrderPushToggle === "function" && <div style={{ padding:"10px 12px 0" }}><OrderPushToggle/></div>}
 
       {nothing && (
         <div style={{ padding:"24px 16px", textAlign:"center", color:"var(--muted)", fontSize:13 }}>✅ ไม่มีการแจ้งเตือนใหม่</div>
