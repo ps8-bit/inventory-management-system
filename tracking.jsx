@@ -2533,6 +2533,10 @@ function _orderAlertSystemNotify(fresh) {
   } catch (e) {}
 }
 
+function _orderAlertLiveIds() {
+  return (typeof buildOrders === "function" ? buildOrders() : []).map(o => o.id);
+}
+
 /* The watcher — started once by whichever shell mounts first. */
 let _oaStarted = false;
 function startOrderAlertWatch() {
@@ -2540,16 +2544,50 @@ function startOrderAlertWatch() {
   _oaStarted = true;
   let snap = _orderAlertSnap();
   let timer = null;
-  const runDiff = () => {
-    timer = null;
-    const next = _orderAlertSnap();
-    const fresh = orderAlertsAllowed() ? _orderAlertDiff(snap, next) : [];
-    snap = next;
+  const publish = (fresh) => {
     if (!fresh.length) return;
     _saveOrderAlerts(_mergeOrderAlerts(loadOrderAlerts(), fresh));
     _orderAlertChime(fresh.some(a => a.kind !== "new"));
     try { if (navigator.vibrate) navigator.vibrate([180, 80, 180]); } catch (e) {}
     _orderAlertSystemNotify(fresh);
+  };
+  /* A "cancelled" alert tells staff NOT to ship, so it must be real. An order
+     that vanished is re-checked against the server a few seconds later and only
+     reported if it is still gone (or carries the deleted tombstone). This is
+     what stopped a token-refresh blip (an empty reload) from flagging every
+     waiting order as cancelled on 2026-10-12. */
+  // Orders that vanished and await confirmation: id → their last pending record.
+  // Kept in the baseline meanwhile, so one that comes back is compared with its
+  // old self (no alert unless it really changed) instead of reading as new.
+  const gone = {};
+  const confirmRemoved = (removed) => {
+    setTimeout(async () => {
+      removed.forEach(a => { delete gone[a.id]; });
+      let rows = null;
+      try { rows = (typeof dbLoadOrders === "function") ? await dbLoadOrders() : null; } catch (e) {}
+      if (!rows || !rows.length) return;               // can't confirm → say nothing
+      const live = new Set(_orderAlertLiveIds());
+      const inTable = new Set(rows.map(r => r.id));
+      const ov = (typeof loadOrderOverrides === "function") ? loadOrderOverrides() : {};
+      publish(removed.filter(a => !live.has(a.id) && (!inTable.has(a.id) || (ov[a.id] && ov[a.id].deleted))));
+    }, 4000);
+  };
+  const runDiff = () => {
+    timer = null;
+    const next = _orderAlertSnap();
+    // Everything waiting disappeared at once → a broken load, not N cancels.
+    // Keep the old baseline so the recovery doesn't read as N new orders either.
+    const had = Object.keys(snap.pend).length;
+    if (had >= 3 && !Object.keys(next.pend).length) return;
+    Object.keys(gone).forEach(id => {
+      if (!snap.pend[id]) { snap.pend[id] = gone[id]; snap.st[id] = "p"; }
+    });
+    const fresh = orderAlertsAllowed() ? _orderAlertDiff(snap, next) : [];
+    const removed = fresh.filter(a => a.kind === "removed" && !gone[a.id]);
+    removed.forEach(a => { gone[a.id] = snap.pend[a.id]; });
+    snap = next;
+    publish(fresh.filter(a => a.kind !== "removed"));
+    if (removed.length) confirmRemoved(removed);
   };
   const onChange = (e) => {
     if (e && e.detail && e.detail.remote) {

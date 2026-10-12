@@ -934,6 +934,11 @@ async function _rtReloadOrders() {
   const seq = _rtClaim('orders');
   const fresh = await dbLoadOrders();
   if (_rtStale('orders', seq)) return;
+  // An EMPTY answer while we hold orders is a transient, not a wipe: a request
+  // that goes out during the hourly JWT refresh runs as anon, and RLS then
+  // returns 0 rows with no error. Taking it blanked every order list and made
+  // the order-alert watcher report every waiting order as cancelled.
+  if (fresh && !fresh.length && (window._DB_ORDERS || []).length) return;
   if (fresh) window._DB_ORDERS = fresh;
   // remote:true = this came from ANOTHER device (or a catch-up) — the order-alert
   // watcher only alerts on these; local writes fire the plain event.
@@ -1011,6 +1016,8 @@ function setupRealtimeSync() {
       const seq = _rtClaim('labels');
       const fresh = await dbLoadLabels();
       if (_rtStale('labels', seq)) return;
+      // Same transient-empty guard as _rtReloadOrders (JWT refresh → anon → 0 rows).
+      if (fresh && !fresh.length && (window._DB_LABELS || []).length) return;
       if (fresh) window._DB_LABELS = fresh;
       window.dispatchEvent(new CustomEvent('ims-labels-change', { detail: { remote: true } }));
     })
