@@ -788,6 +788,9 @@ function _printPDHtml(innerHtml, size, beforePrint) {
     "#__pdPrintRoot{display:none}" +
     "@page{size:" + w + "mm " + h + "mm;margin:" + ((size && size.margin) || 0) + "mm}" +
     "@media print{html,body{margin:0!important;padding:0!important;background:#fff!important}" +
+    // The phone shell pins html/body to the screen (height:100%; overflow:hidden),
+    // which clipped a multi-page print/PDF to its FIRST page — let it flow.
+    "html,body{height:auto!important;min-height:0!important;overflow:visible!important;position:static!important}" +
     "body>*{display:none!important}body>#__pdPrintRoot{display:block!important}" +
     "#__pdPrintRoot,#__pdPrintRoot *{letter-spacing:normal!important;color:#000!important;font-family:'IBM Plex Sans Thai','Sarabun','Leelawadee UI',Tahoma,sans-serif;" +
       "text-rendering:geometricPrecision;-webkit-font-smoothing:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}}";
@@ -1009,7 +1012,7 @@ function printOrderAddress(order, lines, sizeId) {
    prints). Lines come from packLinesForOrder, so the
    shelf is the one the sale actually debited — same as the screen. A4 is the
    phone print sheet's default paper, so no exact-size PDF path is needed. */
-function buildPackChecklistHtml(orders) {
+function buildPackChecklistHtml(orders, sheetNo) {
   const list = (orders || []).filter(Boolean).map(o => ({
     o, lines: ((typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []).filter(l => (Number(l.qty) || 0) > 0)
   }));
@@ -1047,7 +1050,8 @@ function buildPackChecklistHtml(orders) {
   const now = new Date().toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" });
   const head =
     `<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:4mm;border-bottom:0.6mm solid #000;padding-bottom:2mm">` +
-      `<div><div style="font-size:17pt;font-weight:700">ใบรายการแพ็คสินค้า</div><div style="font-size:9.5pt">PS TACTICAL · พิมพ์ ${_escPD(now)}</div></div>` +
+      `<div><div style="font-size:17pt;font-weight:700">ใบรายการแพ็คสินค้า</div><div style="font-size:9.5pt">PS TACTICAL · พิมพ์ ${_escPD(now)}</div>` +
+        (sheetNo ? `<div style="font-size:10pt;font-weight:700;margin-top:0.5mm">เลขที่ใบ ${_escPD(sheetNo)}</div>` : "") + `</div>` +
       `<div style="text-align:right"><div style="font-size:11pt;font-weight:700">${list.length} ออร์เดอร์ · รวม ${allPcs} ชิ้น</div>` +
         (byPf.length > 1 ? `<div style="font-size:9.5pt;margin-top:0.5mm">${byPf.map(([k, n]) => _escPD(k) + " " + n).join(" · ")}</div>` : "") + `</div>` +
     `</div>`;
@@ -1072,10 +1076,33 @@ function buildPackChecklistHtml(orders) {
   }).join("");
   return `<div style="width:100%;box-sizing:border-box;line-height:1.35;font-weight:500">${head}${blocks}</div>`;
 }
+/* Every print gets its own sheet number, printed on the page AND used as the
+   saved PDF's file name (browsers name it after document.title), so two
+   sheets never overwrite / get confused and staff can tell which run an
+   order was already on: ใบรายการแพ็ค_PL-20261012-115530-K7_3ออร์เดอร์_SO-1_SO-2_SO-3 */
+function packChecklistSheetNo() {
+  const d = new Date(), z = (n) => String(n).padStart(2, "0");
+  const rnd = Math.random().toString(36).slice(2, 4).toUpperCase();
+  return `PL-${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}-${rnd}`;
+}
+function packChecklistFileName(list, sheetNo) {
+  const clean = (v) => String(v || "").replace(/[\\/:*?"<>|#%\s]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const ids = list.map(o => clean((typeof orderShortId === "function") ? orderShortId(o) : o.id)).filter(Boolean);
+  let tail = ids.slice(0, 6).join("_");
+  if (ids.length > 6) tail += `_และอีก${ids.length - 6}`;
+  return `ใบรายการแพ็ค_${sheetNo}_${list.length}ออร์เดอร์${tail ? "_" + tail : ""}`.slice(0, 150);
+}
 function printPackChecklist(orders, pushToast) {
   const list = (orders || []).filter(Boolean);
   if (!list.length) { (pushToast || _pdToast)("ไม่มีออร์เดอร์ให้พิมพ์"); return; }
-  _printPDHtml(buildPackChecklistHtml(list), { w: 210, h: 297, margin: 10 });
+  const sheetNo = packChecklistSheetNo();
+  const prevTitle = document.title;
+  let restored = false;
+  const restore = () => { if (restored) return; restored = true; document.title = prevTitle; window.removeEventListener("afterprint", restore); };
+  document.title = packChecklistFileName(list, sheetNo);
+  window.addEventListener("afterprint", restore);
+  setTimeout(restore, 120000);   // afterprint never fires on some phones
+  _printPDHtml(buildPackChecklistHtml(list, sheetNo), { w: 210, h: 297, margin: 10 });
 }
 
 /* Preview first, then print — opened from ANY order list (pack queue + packed,
@@ -1124,8 +1151,19 @@ function openPackChecklist(orders, pushToast) {
 function PackChecklistPreview({ orders, pushToast, onClose }) {
   const boxRef = useRefPD(null);
   const [zoom, setZoom] = useStatePD(1);
-  const html = React.useMemo(() => buildPackChecklistHtml(orders), [orders]);
-  const pcs = React.useMemo(() => orders.reduce((n, o) => n + packLinesForOrder(o).reduce((m, l) => m + (Number(l.qty) || 0), 0), 0), [orders]);
+  // Product photos (cloud img:* rows, Woo catalog) and shelves load in the
+  // BACKGROUND after start-up — a sheet opened early showed "ไม่มีรูป" while
+  // the print a moment later had them. Rebuild whenever that data lands.
+  const [rev, setRev] = useStatePD(0);
+  useEffectPD(() => {
+    const evs = ["ims-images-change", "ims-woo-catalog-change", "ims-products-change", "ims-product-locs-change", "ims-labels-change"];
+    let t = 0;
+    const bump = () => { clearTimeout(t); t = setTimeout(() => setRev(r => r + 1), 150); };
+    evs.forEach(ev => window.addEventListener(ev, bump));
+    return () => { clearTimeout(t); evs.forEach(ev => window.removeEventListener(ev, bump)); };
+  }, []);
+  const html = React.useMemo(() => buildPackChecklistHtml(orders), [orders, rev]);
+  const pcs = React.useMemo(() => orders.reduce((n, o) => n + packLinesForOrder(o).reduce((m, l) => m + (Number(l.qty) || 0), 0), 0), [orders, rev]);
   useEffectPD(() => {
     const fit = () => { const w = boxRef.current ? boxRef.current.clientWidth - 24 : 794; setZoom(Math.min(1, Math.max(0.3, w / 794))); };
     fit();
