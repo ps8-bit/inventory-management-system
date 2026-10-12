@@ -7180,6 +7180,7 @@ function MPack({ ctx }) {
             <div className="mp-section-head"><span>{dayOnly ? "แพ็คเสร็จวันนี้" : "แพ็คเสร็จใน 3 วันล่าสุด"}</span>
               {dayOnly && <button type="button" className="m-chip" onClick={() => setDayOnly(false)}>ดู 3 วันล่าสุด</button>}
               {doneList.length > 0 && typeof openPackChecklist === "function" && <button type="button" className="m-chip" onClick={() => openPackChecklist(doneList, ctx.pushToast)}><Icons.Print size={12}/> พิมพ์ทั้งหมด</button>}
+              {doneList.length > 0 && typeof openPackLabelBatch === "function" && <button type="button" className="m-chip" onClick={() => openPackLabelBatch(doneList, ctx.pushToast)}><Icons.Print size={12}/> ใบปะหน้ารวม</button>}
             </div>
             <div className="mp-cards">
               {doneList.map(o => (
@@ -7233,6 +7234,11 @@ function MPack({ ctx }) {
             )}
 
             {typeof PackPlatformBar === "function" && rows.length > 0 && !selecting && <PackPlatformBar rows={rows} value={plat} onChange={setPlat} mobile/>}
+            {typeof openPackLabelBatch === "function" && visible.length > 0 && !selecting && (
+              <button type="button" className="m-btn-big outline" style={{ margin: "10px 0 4px" }} onClick={() => openPackLabelBatch(visible.map(r => r.o), ctx.pushToast, plat)}>
+                <Icons.Print size={18}/> พิมพ์ใบปะหน้ารวม{plat ? " · " + plat : " (แยกแพลตฟอร์ม)"}
+              </button>
+            )}
 
             <div className="mp-section-head">
               <span>รายการรอแพ็ค <b className="tnum">{visible.length}</b></span>
@@ -7311,6 +7317,11 @@ function MPack({ ctx }) {
                 {typeof openPackChecklist === "function" && (
                   <button className="m-btn-big outline" style={{ marginTop: 8 }} onClick={() => openPackChecklist(rows.filter(r => sel[r.o.id]).map(r => r.o), ctx.pushToast)}>
                     <Icons.Print size={18}/> พิมพ์ใบรายการ {selIds.length} ออร์เดอร์
+                  </button>
+                )}
+                {typeof openPackLabelBatch === "function" && (
+                  <button className="m-btn-big outline" style={{ marginTop: 8 }} onClick={() => openPackLabelBatch(rows.filter(r => sel[r.o.id]).map(r => r.o), ctx.pushToast)}>
+                    <Icons.Print size={18}/> พิมพ์ใบปะหน้า {selIds.length} ออร์เดอร์
                   </button>
                 )}
               </div>

@@ -4096,7 +4096,89 @@ async function downloadStockReport(products) {
   toast(`ดาวน์โหลดรายงานสต็อก ${list.length} รายการแล้ว`);
 }
 
+/* ── PDF / file hand-off on iOS ──
+   jsPDF's save() and window.open(blob) make an INSTALLED iOS app navigate its own
+   page to the file (Quick Look). Leaving the PDF then reloads the whole app from
+   scratch — staff lost their place after every label. On iOS the file goes to
+   the share sheet instead (opens OVER the app; "พิมพ์" = AirPrint, "บันทึกไปยัง
+   ไฟล์", label-printer apps). navigator.share needs a fresh tap: if the work
+   before it (rasterising labels) used up the tap, a one-button sheet asks for
+   one more. Everything else keeps the plain download. */
+function isIOSDevice() {
+  const ua = navigator.userAgent || "";
+  return /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+function _plainDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+let _fileSheet = null;
+function _fileShareSheet(file, onFail) {
+  if (_fileSheet) _fileSheet.remove();
+  const wrap = document.createElement("div");
+  _fileSheet = wrap;
+  wrap.setAttribute("role", "dialog");
+  wrap.setAttribute("aria-modal", "true");
+  wrap.style.cssText = "position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center";
+  const card = document.createElement("div");
+  card.style.cssText = "width:100%;max-width:520px;background:var(--surface,#fff);color:var(--fg,#111);border-radius:16px 16px 0 0;padding:18px 16px calc(16px + env(safe-area-inset-bottom));box-shadow:0 -8px 30px rgba(0,0,0,.25);font-family:inherit";
+  const title = document.createElement("div");
+  title.textContent = "ไฟล์พร้อมแล้ว";
+  title.style.cssText = "font-weight:700;font-size:16px";
+  const name = document.createElement("div");
+  name.textContent = file.name;
+  name.style.cssText = "font-size:12.5px;color:var(--muted,#666);margin:4px 0 14px;word-break:break-all";
+  const go = document.createElement("button");
+  go.type = "button";
+  go.textContent = "เปิดเพื่อพิมพ์ / บันทึก";
+  go.style.cssText = "width:100%;min-height:52px;border:none;border-radius:12px;background:var(--accent,#f60);color:#fff;font-size:16px;font-weight:700;font-family:inherit";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "ยกเลิก";
+  cancel.style.cssText = "width:100%;min-height:46px;margin-top:8px;border:1px solid var(--border,#ddd);border-radius:12px;background:transparent;color:inherit;font-size:15px;font-family:inherit";
+  const close = () => { wrap.remove(); if (_fileSheet === wrap) _fileSheet = null; };
+  go.onclick = () => {
+    close();
+    navigator.share({ files: [file] }).catch(e => { if (!e || e.name !== "AbortError") onFail(); });
+  };
+  cancel.onclick = close;
+  wrap.onclick = (e) => { if (e.target === wrap) close(); };
+  card.append(title, name, go, cancel);
+  wrap.appendChild(card);
+  document.body.appendChild(wrap);
+}
+/* blob → the device. Returns "share" (iOS) | "download". */
+function deliverFile(blob, filename) {
+  const name = String(filename || "file").replace(/[\/\\:*?"<>|]+/g, "_");
+  if (isIOSDevice() && typeof File === "function" && navigator.share && navigator.canShare) {
+    let file = null;
+    try { file = new File([blob], name, { type: blob.type || "application/pdf" }); } catch (e) {}
+    if (file && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file] }).catch(e => {
+        if (e && e.name === "AbortError") return;             // closed the share sheet
+        _fileShareSheet(file, () => _plainDownload(blob, name));   // tap used up → ask for one
+      });
+      return "share";
+    }
+  }
+  _plainDownload(blob, name);
+  return "download";
+}
+/* Drop-in for jsPDF's pdf.save(filename). On iOS the PDF opens in the in-app
+   viewer (pack-docs.jsx openFileViewer) — staff want to SEE it, then พิมพ์ /
+   แชร์ from there; the share sheet alone read as "save the file". */
+function savePdf(pdf, filename) {
+  if (!isIOSDevice()) { pdf.save(filename); return "download"; }
+  const blob = pdf.output("blob");
+  if (typeof openFileViewer === "function") { openFileViewer(blob, filename); return "view"; }
+  return deliverFile(blob, filename);
+}
+
 Object.assign(window, {
+  isIOSDevice, deliverFile, savePdf,
   STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,
   skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,

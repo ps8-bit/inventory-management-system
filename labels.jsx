@@ -197,7 +197,7 @@ async function exportLabelPDF(el, size, soId, pushToast, scale) {
   const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h] });
   pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h);
   const filename = String(soId || "label").replace(/[/\\:*?"<>|]/g, "_") + "_label.pdf";
-  pdf.save(filename);
+  if (typeof savePdf === "function") savePdf(pdf, filename); else pdf.save(filename);
   if (pushToast) pushToast("ดาวน์โหลด " + filename + " แล้ว ✓");
   return true;
 }
@@ -431,7 +431,7 @@ async function labelsToPDF(els, size, soId, pushToast) {
   }
   if (!added) { if (pushToast) pushToast("ไม่สามารถสร้าง PDF ได้ — กรุณาลองใหม่"); return false; }
   const filename = String(soId || "label").replace(/[/\\:*?"<>|]/g, "_") + "_label.pdf";
-  pdf.save(filename);
+  if (typeof savePdf === "function") savePdf(pdf, filename); else pdf.save(filename);
   const failCount = els.length - added;
   if (pushToast) pushToast(failCount > 0
     ? `ดาวน์โหลดแล้ว ${added}/${els.length} ฉลาก (${failCount} ล้มเหลว)`
@@ -1125,7 +1125,7 @@ function Labels({ pushToast, store }) {
     const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h] });
     pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h);
     const filename = (active.soId || "label").replace(/[/\\:*?"<>|]/g, "_") + "_label.pdf";
-    pdf.save(filename);
+    if (typeof savePdf === "function") savePdf(pdf, filename); else pdf.save(filename);
     pushToast("ดาวน์โหลด " + filename + " แล้ว ✓");
   };
 
@@ -1142,7 +1142,7 @@ function Labels({ pushToast, store }) {
       pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h);
     }
     const filename = "labels_batch_" + sel.length + "pcs.pdf";
-    pdf.save(filename);
+    if (typeof savePdf === "function") savePdf(pdf, filename); else pdf.save(filename);
     pushToast("ดาวน์โหลด PDF ชุด " + sel.length + " ใบแล้ว ✓");
   };
 
