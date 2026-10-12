@@ -309,6 +309,7 @@ async function dbAdjustStock(adjustments, opId) {
    Best-effort, mirroring dbInsertAuditEntry: the atomic adjust_stock write is
    the authoritative operation, and it already surfaces its own permission
    toast — a blocked history row must not toast a second error on top. */
+let _ledgerHasBA = null;   // null = unknown, false = qty_before/qty_after columns missing
 async function dbInsertStockAdjustment(entries) {
   const rows = (entries || [])
     .filter(e => e && e.sku && Number(e.delta))
@@ -321,10 +322,20 @@ async function dbInsertStockAdjustment(entries) {
       };
       // Backdated adjustment / ขายออก — date the history row when it really happened.
       if (e.createdAt) row.created_at = e.createdAt;
+      // Server-reported stock around this move (supabase/ledger-before-after.sql).
+      if (_ledgerHasBA !== false && Number.isFinite(e.before) && Number.isFinite(e.after)) {
+        row.qty_before = Math.trunc(e.before); row.qty_after = Math.trunc(e.after);
+      }
       return row;
     });
   if (!rows.length) return { ok: true };
-  const { data, error } = await sb.from('stock_adjustments').insert(rows).select('id');
+  let { data, error } = await sb.from('stock_adjustments').insert(rows).select('id');
+  // Columns not migrated yet → remember it and write the row without them.
+  if (error && /qty_(before|after)/.test(error.message || '')) {
+    _ledgerHasBA = false;
+    rows.forEach(r => { delete r.qty_before; delete r.qty_after; });
+    ({ data, error } = await sb.from('stock_adjustments').insert(rows).select('id'));
+  }
   if (error) { console.error('[DB] insert stock_adjustments:', error.message); return { error: error.message }; }
   if (!data || data.length < rows.length) {
     console.error('[DB] insert stock_adjustments blocked:', (data || []).length, 'of', rows.length, 'rows');
@@ -350,6 +361,17 @@ async function dbLoadSaleAdjustments(sinceIso) {
   if (error) { console.error('[DB] load sale adjustments:', error.message); return null; }
   return data || [];
 }
+/* Current server qty for a few skus — { sku: qty } or null on error. Reads the
+   products_v view (products itself hides cost and is not readable as a whole). */
+async function dbLoadQtys(skus) {
+  const list = (skus || []).filter(Boolean);
+  if (!list.length) return {};
+  const { data, error } = await sb.from("products_v").select("sku, qty").in("sku", list);
+  if (error) { console.error("[DB] load qtys:", error.message); return null; }
+  const out = {};
+  (data || []).forEach(r => { out[r.sku] = Number(r.qty) || 0; });
+  return out;
+}
 /* Latest adjustments for one sku — feeds the ProductDrawer movement list. */
 async function dbLoadStockAdjustments(sku, limit = 10) {
   const { data, error } = await sb
@@ -358,6 +380,24 @@ async function dbLoadStockAdjustments(sku, limit = 10) {
     .order('created_at', { ascending: false })
     .limit(limit);
   if (error) { console.error('[DB] load stock_adjustments:', error.message); return null; }
+  return data || [];
+}
+/* Movement rows behind ONE activity entry (ประวัติการแก้ไข detail view).
+   by.order  → every row whose reason names that order (sale + cancel-restock)
+   by.skus   → rows for those skus inside [from, to] (a receive / count / adjust
+               batch is written within seconds of its activity entry)
+   by.user   → narrows the time-window match to the person who did it */
+async function dbLoadLedgerFor(by) {
+  let q = sb.from('stock_adjustments').select('*').order('id', { ascending: true }).limit(500);
+  if (by && by.order) q = q.like('reason', `%${by.order}%`);
+  else {
+    if (!by || !by.from || !by.to) return [];
+    q = q.gte('created_at', by.from).lte('created_at', by.to);
+    if (by.skus && by.skus.length) q = q.in('sku', by.skus);
+    if (by.user) q = q.eq('created_by', by.user);
+  }
+  const { data, error } = await q;
+  if (error) { console.error('[DB] load ledger for entry:', error.message); return null; }
   return data || [];
 }
 
@@ -753,7 +793,10 @@ function _auditRowToEntry(row) {
     entityId: row.entity_id,
     action:   row.action,
     summary:  row.summary,
-    note:     row.note
+    note:     row.note,
+    // The login that wrote it (auth.uid() by trigger) — user.name above is only
+    // what the app sent. null on rows written before 2026-10-12.
+    actorId:  row.actor_id || null
   };
 }
 // `before` pages FURTHER BACK than the newest `limit` rows. Pass the oldest
@@ -769,6 +812,31 @@ async function dbLoadAuditLog(limit = 500, before) {
   else if (before && before.ts)     q = q.lt('created_at', before.ts);
   const { data, error } = await q;
   if (error) { console.error('[DB] load audit_log:', error.message); return null; }
+  return data.map(_auditRowToEntry);
+}
+/* Display names for login ids (audit_log / stock_adjustments.actor_id) —
+   { id: name }, or null on error. supabase/actor-names.sql. */
+async function dbActorNames(ids) {
+  const list = [...new Set((ids || []).filter(Boolean))];
+  if (!list.length) return {};
+  const { data, error } = await sb.rpc("actor_names", { ids: list });
+  if (error) { console.error("[DB] actor_names:", error.message); return null; }
+  const out = {};
+  (data || []).forEach(r => { out[r.id] = r.name; });
+  return out;
+}
+// Every activity that touched ONE order — its own entries (entity_id) plus the
+// batch ones that only name it in the text (หยิบรวม wave, desktop multi-pack).
+// Oldest first: it is read as a timeline.
+async function dbLoadAuditForOrder(orderId) {
+  const id = String(orderId || '');
+  if (!/^[\w-]+$/.test(id)) return [];
+  const { data, error } = await sb.from('audit_log').select('*')
+    .or(`entity_id.eq.${id},note.ilike.*${id}*,summary.ilike.*${id}*`)
+    .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(300);
+  if (error) { console.error('[DB] load audit for order:', error.message); return null; }
   return data.map(_auditRowToEntry);
 }
 // One Bangkok calendar day, however deep it sits in the log — jumping to an old
@@ -1433,7 +1501,7 @@ Object.assign(window, {
   dbInit, setupRealtimeSync, refreshLiveData,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,     dbRenameSku,
-  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments,
+  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments, dbLoadLedgerFor, dbLoadAuditForOrder, dbLoadQtys, dbActorNames,
   dbLoadProductLocs,   dbSaveProductLocs,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,
