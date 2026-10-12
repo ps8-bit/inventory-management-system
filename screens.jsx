@@ -5800,7 +5800,10 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
         });
       }
     });
-    deductManyAndPersist(allDeductions, "ขายสินค้า · " + (ship.name || "ลูกค้าใหม่"));
+    // The order number exists BEFORE the stock moves, so the movement history and
+    // the activity entry both name it (ประวัติการแก้ไข → order detail / timeline).
+    const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
+    deductManyAndPersist(allDeductions, "ขายสินค้า · " + (ship.name || "ลูกค้าใหม่") + " · ออร์เดอร์ " + orderId);
     // Same tick, before any other await: applyLocPicks re-reads the just-written qty.
     if (typeof applyLocPicks === "function") {
       const locRes = await applyLocPicks(locPicks);
@@ -5809,7 +5812,6 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
       else if (locRes && locRes.errors && locRes.errors.length) toast("ตัดสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + locRes.errors[0].error);
     }
 
-    const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
     const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
     const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
     const ts = stamp ? stamp.ts : new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
@@ -5817,7 +5819,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
 
     if (typeof recordChange === "function") {
       recordChange({
-        entity: "order", action: "create",
+        entity: "order", entityId: orderId, action: "create",
         summary: `ขายสินค้า ${cart.length} รายการ → ${ship.name} (${ship.carrier})`,
         count: cartTotal,
         changes: cart.map(item => ({
@@ -6771,6 +6773,7 @@ function PackQueue({ pushToast, goTo, user }) {
   const [page, setPage] = useState(0);           // table pages of PQ_PAGE rows
   const [openPacked, setOpenPacked] = useState(null);
   const [plat, setPlat] = useState("");          // platform filter ("" = all)
+  const [histOf, setHistOf] = useState(null);    // order whose ประวัติ drawer is open
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
@@ -6888,6 +6891,9 @@ function PackQueue({ pushToast, goTo, user }) {
         )}
       </div>
       {labelCfg && typeof PackLabelSettings === "function" && <PackLabelSettings pushToast={pushToast} onClose={() => setLabelCfg(false)}/>}
+      {/* A packing problem is noticed HERE, so the order's history (notes the packer
+          was given, who packed, shortages, stock it cut) opens from the queue too. */}
+      {histOf && typeof OrderHistoryDrawer === "function" && <OrderHistoryDrawer order={histOf} onClose={() => setHistOf(null)}/>}
 
       {/* Packed in the last 3 days — the packer may have hit พร้อมส่ง before
           downloading / copying / printing the label. Reopens PackShipDocs only. */}
@@ -6906,7 +6912,10 @@ function PackQueue({ pushToast, goTo, user }) {
                         <td style={{ fontSize: 12, color: "var(--muted)" }}>{o.channel || "—"}</td>
                         <td style={{ fontSize: 12 }}>{new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
                         <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{o.packedBy || "—"}</td>
-                        <td><button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button></td>
+                        <td style={{ whiteSpace: "nowrap" }}>
+                          <button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button>{" "}
+                          {typeof OrderHistoryDrawer === "function" && <button className="btn btn-sm btn-ghost" onClick={ev => { ev.stopPropagation(); setHistOf(o); }}><Icons.History size={12}/> ประวัติ</button>}
+                        </td>
                       </tr>
                       {isOpen && (
                         <tr><td colSpan="6" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
@@ -7043,6 +7052,11 @@ function PackQueue({ pushToast, goTo, user }) {
                         <button className="btn btn-sm pq-act-done" onClick={() => markPacked([r.o.id])} title="ทำเครื่องหมายพร้อมส่ง">
                           <Icons.Check size={13}/> แพ็คเสร็จ
                         </button>
+                        {typeof OrderHistoryDrawer === "function" && (
+                          <button className="btn btn-sm btn-ghost" title="ประวัติออร์เดอร์ / งานที่สั่ง" aria-label="ประวัติออร์เดอร์" onClick={() => setHistOf(r.o)}>
+                            <Icons.History size={14}/>
+                          </button>
+                        )}
                         <button className="btn btn-sm btn-ghost" aria-label={isOpen ? "ซ่อนรายละเอียด" : "ดูรายละเอียด"} onClick={() => setOpen(isOpen ? null : r.o.id)}>
                           <Icons.Chev size={14} style={isOpen ? { transform: "rotate(90deg)" } : undefined}/>
                         </button>

@@ -417,8 +417,10 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
     // Capture before-qtys BEFORE deducting so the audit shows the true from→to
     // (the old code read qty AFTER deduction, which is wrong when a deduct clamps at 0).
     const before = Object.fromEntries(bundle.items.map(it => [it.sku, getEffectiveQty(it.sku)]));
+    // Order number first, so the stock movement names the order it belongs to.
+    const id = (typeof genOrderId === "function") ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000);
     deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })),
-      `ขายชุดสินค้า ${bundle.name} ×${sellQty}`);
+      `ขายชุดสินค้า ${bundle.name} ×${sellQty} · ออร์เดอร์ ${id}`);
     /* Third sell path (shared by both forks) — without this every component of a
        bundle sale drifts its per-position split. No per-component picker: each
        takes its own pick-first shelf, the SAME default the other flows use. */
@@ -437,7 +439,6 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
     // จัดส่ง (Outbound) / ติดตามพัสดุ (Tracking) / Analytics and the customer
     // track-lookup. Mirrors the desktop Outbound bundle path (screens.jsx
     // submitIssue): appendOrder is the convergence-safe single-row writer.
-    const id = (typeof genOrderId === "function") ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000);
     const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
     const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
     const backLabel = createdAt ? stockOutStampLabel(stamp) : "";

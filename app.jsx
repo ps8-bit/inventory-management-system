@@ -1049,7 +1049,7 @@ function App({ user, onLogout, onSwitchUser }) {
           {page === "labels"    && <Labels pushToast={pushToast} store={store}/>}
           {page === "tracking"  && <TrackingPage pushToast={pushToast} store={store} focus={focusFor("tracking")}/>}
           {page === "analytics" && <AnalyticsPage pushToast={pushToast}/>}
-          {page === "history"   && <HistoryPage pushToast={pushToast}/>}
+          {page === "history"   && <HistoryPage pushToast={pushToast} goToProduct={goToProduct} goToOrder={goToOrder}/>}
           {page === "users"     && <UserManagement currentUser={user} pushToast={pushToast} store={store} setStore={setStore} allNav={ALL_NAV}/>}
           {page === "layout"    && <LayoutCustomize navItems={navItems} setNavItems={setNavItems} pushToast={pushToast} allNavItems={ALL_NAV}/>}
           {page === "bundles"   && <BundlePage pushToast={pushToast}/>}

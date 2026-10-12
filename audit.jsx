@@ -217,7 +217,9 @@ const ENTITY_LABELS = {
   settings: "ตั้งค่าร้าน",
   layout: "เลย์เอาต์",
   label: "ฉลาก",
-  inbound: "รับเข้า"
+  inbound: "รับเข้า",
+  bundle: "ชุดสินค้า",
+  location: "ตำแหน่ง"
 };
 
 const ACTION_LABELS = {
@@ -229,7 +231,9 @@ const ACTION_LABELS = {
   close: "ปิดงาน",
   add: "เพิ่ม",
   "bulk-update": "แก้ไขกลุ่ม",
-  "bulk-delete": "ลบกลุ่ม"
+  "bulk-delete": "ลบกลุ่ม",
+  note: "โน้ต",
+  "cancel-restock": "ยกเลิก/คืนสต็อก"
 };
 
 const ACTION_TONES = {
@@ -241,7 +245,9 @@ const ACTION_TONES = {
   close: "badge-success",
   add: "badge-success",
   "bulk-update": "badge-info",
-  "bulk-delete": "badge-danger"
+  "bulk-delete": "badge-danger",
+  note: "badge-info",
+  "cancel-restock": "badge-warning"
 };
 
 function formatTime(iso) {
@@ -255,7 +261,7 @@ function formatTime(iso) {
   return d.toLocaleDateString("th-TH", { day: "numeric", month: "short" }) + " · " + t;
 }
 
-function HistoryPage({ pushToast }) {
+function HistoryPage({ pushToast, goToProduct, goToOrder }) {
   const log = useAuditLog();
   const [q, setQ] = useStateAud("");
   // "ประวัติการรับเข้า" on the Inbound page opens this list pre-filtered.
@@ -263,7 +269,7 @@ function HistoryPage({ pushToast }) {
     try { const v = sessionStorage.getItem("ims_history_filter"); sessionStorage.removeItem("ims_history_filter"); return v || "all"; } catch (e) { return "all"; }
   });
   const [actionFilter, setActionFilter] = useStateAud("all");
-  const [expanded, setExpanded] = useStateAud(new Set());
+  const [sel, setSel] = useStateAud(null);       // entry open in the detail panel
   const [day, setDay] = useStateAud(null);        // null = ทุกวันที่โหลดไว้
   const [dayRows, setDayRows] = useStateAud(null);
   const [busy, setBusy] = useStateAud(false);
@@ -320,11 +326,6 @@ function HistoryPage({ pushToast }) {
   // anything logged before 07:00 local under the previous day).
   const groups = useMemoAud(() => groupAuditByDay(filtered), [filtered]);
 
-  const toggleExpand = (id) => setExpanded(prev => {
-    const n = new Set(prev);
-    if (n.has(id)) n.delete(id); else n.add(id);
-    return n;
-  });
 
   const clearLog = async () => {
     if (!confirm("ลบประวัติทั้งหมดออกจากระบบ?")) return;
@@ -436,13 +437,12 @@ function HistoryPage({ pushToast }) {
 
               <div className="card card-tight">
                 {entries.map((e, i) => {
-                  const isExpanded = expanded.has(e.id);
-                  const hasDetails = (e.changes && e.changes.length > 0) || e.note;
+                  const hasDetails = (e.changes && e.changes.length > 0) || e.note || auditEntryMovesStock(e);
                   return (
                     <div key={e.id} style={{ borderBottom: i < entries.length - 1 ? "1px solid var(--border)" : "none" }}>
                       <div
                         style={{ padding: "14px 18px", display: "flex", gap: 14, alignItems: "flex-start", cursor: hasDetails ? "pointer" : "default" }}
-                        onClick={() => hasDetails && toggleExpand(e.id)}
+                        onClick={() => hasDetails && setSel(e)}
                       >
                         <div className="user-avatar" style={{ background: "oklch(0.55 0.15 " + ((e.user?.name?.charCodeAt(0) || 0) * 4 % 360) + ")", width: 32, height: 32, fontSize: 11, flexShrink: 0 }}>{e.user?.avatar || "?"}</div>
                         <div style={{ flex: 1, minWidth: 0 }}>
@@ -456,7 +456,7 @@ function HistoryPage({ pushToast }) {
                           <div style={{ fontSize: 13 }}>
                             {e.summary || (e.entityId ? <>แก้ไข <span className="mono">{e.entityId}</span></> : "เปลี่ยนแปลง")}
                           </div>
-                          {!isExpanded && hasDetails && (
+                          {hasDetails && (e.changes?.length || e.note) && (
                             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
                               {e.changes?.length ? `${e.changes.length} ฟิลด์เปลี่ยน` : ""}{e.note ? " · " + e.note : ""}
                             </div>
@@ -465,27 +465,10 @@ function HistoryPage({ pushToast }) {
                         <div style={{ textAlign: "right", flexShrink: 0 }}>
                           <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{bangkokTimeOf(e.ts)}</div>
                           {hasDetails && (
-                            <Icons.Chev size={12} style={{ color: "var(--muted)", marginTop: 2, transform: isExpanded ? "rotate(90deg)" : "rotate(0)", transition: "transform 0.15s" }}/>
+                            <Icons.Chev size={12} style={{ color: "var(--muted)", marginTop: 2, }}/>
                           )}
                         </div>
                       </div>
-                      {isExpanded && hasDetails && (
-                        <div style={{ padding: "0 18px 16px 64px", background: "var(--surface-2)" }}>
-                          {e.note && (
-                            <div style={{ fontSize: 12, color: "var(--fg-2)", padding: "12px 0 8px", fontStyle: "italic" }}>{e.note}</div>
-                          )}
-                          {e.changes?.map((c, j) => (
-                            <div key={j} style={{ padding: "8px 12px", background: "var(--surface)", borderRadius: 8, marginTop: 8, border: "1px solid var(--border)" }}>
-                              <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>{c.label}</div>
-                              <div className="row" style={{ gap: 10, fontSize: 12 }}>
-                                <span style={{ color: "var(--muted)", textDecoration: c.from ? "line-through" : "none" }}>{c.from || "—"}</span>
-                                <Icons.ArrowRight size={11} style={{ color: "var(--muted)" }}/>
-                                <span style={{ fontWeight: 500 }}>{c.to || "—"}</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
                     </div>
                   );
                 })}
@@ -507,11 +490,544 @@ function HistoryPage({ pushToast }) {
           </div>
         </div>
       )}
+
+      <AuditDetailDrawer entry={sel} onClose={() => setSel(null)}
+        // Only ติดตามพัสดุ has the order drawer (and its history); a role without it
+        // still sees the order card + timeline inside this panel.
+        onOpenOrder={goToOrder && canOpenAny(["tracking"]) ? (o => { setSel(null); goToOrder(o.id); }) : null}
+        onOpenProduct={goToProduct && canOpenAny(["inventory", "finder"]) ? (sku => { setSel(null); goToProduct(sku); }) : null}/>
+    </div>
+  );
+}
+// Any of these pages open for the current role (goTo* picks the first allowed).
+function canOpenAny(ids) {
+  return typeof canOpenPage !== "function" || ids.some(id => canOpenPage(id));
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   Activity detail — what one ประวัติการแก้ไข entry actually moved.
+   audit_log keeps only text, so the stock side is read from the movement
+   ledger (stock_adjustments), which since 2026-10-12 carries the server's
+   qty_before / qty_after per row (backfilled exactly from the pack launch,
+   2026-10-07 — see supabase/ledger-before-after.sql). Older rows have no
+   before/after and show only the current stock.
+   How an entry is matched to its ledger rows: see loadAuditEntryMoves.
+   ════════════════════════════════════════════════════════════════════════ */
+/* What kind of stock movement an entry stands for — null when it moved none.
+   Drives both the matcher and whether the detail shows a movement section. */
+function auditMoveKind(e) {
+  if (!e) return null;
+  if (e.entity === "order") {
+    if (e.action === "create") return "order-sale";       // ตัดสต็อก / ขาย+จัดส่ง (a slip-scan create moves none → section hides)
+    if (e.action === "cancel-restock") return "order-cancel";
+    return null;                                         // status / tracking / note edits never move stock
+  }
+  if (e.entity === "bundle" && /^ขาย "/.test(e.summary || "")) return "bundle-sale";
+  if (e.entity === "inbound") return "inbound";
+  if (e.entity === "product") {
+    if (e.action === "adjust") return "adjust";
+    if (e.action === "receive") return "receive";
+    if (e.action === "add" || e.action === "create") return "add";
+  }
+  return null;
+}
+function auditEntryMovesStock(e) { return !!auditMoveKind(e); }
+
+// Orders an entry belongs to: its own id, else the SO numbers its note names
+// (cancel-restock and bundle-sale entries carry "ออร์เดอร์: SO-…" in the note).
+function auditOrderIds(e) {
+  if (!e) return [];
+  if (e.entity === "order" && e.entityId && e.action !== "bulk-update" && e.action !== "bulk-delete") return [e.entityId];
+  const kind = auditMoveKind(e);
+  if (kind !== "order-cancel" && kind !== "bundle-sale") return [];
+  return [...new Set(String(e.note || "").match(/\bSO-[A-Za-z0-9]+\b/g) || [])];
+}
+
+/* The note's own text vs. the change list the DB folded onto it.
+   audit_log has no changes[] column, so dbInsertAuditEntry appends them as
+   "note | label: a → b · label: …". Split only at the LAST " | " and only when
+   what follows looks like that list — a note the user typed with " | " in it,
+   or an order/shelf note (action "note"), is shown whole. */
+function auditNoteParts(e) {
+  const note = String((e && e.note) || "");
+  if (!note || (e && e.action === "note")) return { text: note, detail: "" };
+  const i = note.lastIndexOf(" | ");
+  if (i < 0) return { text: note, detail: "" };
+  const tail = note.slice(i + 3);
+  return /^[^|:]{1,120}: /.test(tail) ? { text: note.slice(0, i), detail: tail } : { text: note, detail: "" };
+}
+
+// "+3 ชิ้น (12 → 15)" in an adjust/receive summary → 3.
+function _auditSummaryDelta(e) {
+  const m = /([+-]\d+) ชิ้น/.exec((e && e.summary) || "");
+  return m ? Number(m[1]) : null;
+}
+function _auditWindow(e, ms) {
+  const t = new Date(e.ts).getTime();
+  return isFinite(t) ? { from: new Date(t - ms).toISOString(), to: new Date(t + ms).toISOString(), t } : null;
+}
+function _closestTo(rows, t) {
+  return rows.slice().sort((a, b) => Math.abs(new Date(a.created_at) - t) - Math.abs(new Date(b.created_at) - t))[0];
+}
+
+/* Ledger rows behind one entry → { rows, cancelled:Set<orderId> }.
+   Every rule here was checked against live data (2026-10-12):
+     order sale / cancel / bundle sale → by the order number in the movement
+       reason — exact. Older ขาย+จัดส่ง and ขายชุด rows predate the number, so
+       they fall back to the same person ±3 min with that flow's reason prefix
+       (and the recipient's name for ขาย+จัดส่ง).
+     inbound close → ±3 min, same person, +qty, ONLY the skus the close lists
+       (a neighbouring receive used to leak in: 4 of 15 closes).
+     ปรับสต็อก → the row whose reason IS the entry's note and whose qty matches
+       the summary; a backdated one is dated in the past, so it is looked up by
+       sku, not time (a time match used to grab a neighbouring row: 2 of 150).
+     รับเข้า (per product) → same sku ±3 min, +qty, same quantity, nearest. */
+async function loadAuditEntryMoves(e) {
+  const out = { rows: [], cancelled: new Set() };
+  const kind = auditMoveKind(e);
+  if (!kind || typeof dbLoadLedgerFor !== "function") return out;
+  const ids = auditOrderIds(e);
+  const user = e.user && e.user.name && e.user.name !== "ระบบ" ? e.user.name : null;
+  const win = _auditWindow(e, 180000);
+  const sortById = (rows) => rows.sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0));
+
+  if ((kind === "order-sale" || kind === "order-cancel" || kind === "bundle-sale") && ids.length) {
+    const lists = await Promise.all(ids.map(id => dbLoadLedgerFor({ order: id })));
+    lists.forEach((list, k) => (list || []).forEach(r => {
+      if (!String(r.reason || "").includes(ids[k])) return;
+      const restock = /คืนสต็อก/.test(r.reason || "");
+      if (restock) out.cancelled.add(ids[k]);
+      if (kind === "order-cancel" ? restock : (!restock && r.delta < 0)) out.rows.push(r);
+    }));
+    out.rows = sortById(out.rows);
+    return out;
+  }
+  if (!win) return out;
+
+  if (kind === "order-sale" || kind === "bundle-sale" || kind === "order-cancel") {
+    let rows = (await dbLoadLedgerFor({ from: win.from, to: win.to, user })) || [];
+    if (kind === "order-cancel") rows = rows.filter(r => /คืนสต็อก/.test(r.reason || ""));
+    else if (kind === "bundle-sale") rows = rows.filter(r => r.delta < 0 && /^ขายชุดสินค้า/.test(r.reason || ""));
+    else {
+      const who = (/ผู้รับ: ([^·]+?) ·/.exec(e.note || "") || [])[1];
+      rows = rows.filter(r => r.delta < 0 && /^ขายสินค้า/.test(r.reason || "") && (!who || String(r.reason).includes(who.trim())));
+    }
+    out.rows = sortById(rows);
+    return out;
+  }
+
+  if (kind === "inbound") {
+    const listed = new Set((String(e.note || "").match(/([^\s·|:]+): \+\d+ ชิ้น/g) || []).map(s => s.split(":")[0]));
+    let rows = (await dbLoadLedgerFor({ from: win.from, to: win.to, user })) || [];
+    rows = rows.filter(r => r.delta > 0 && (!listed.size || listed.has(r.sku)));
+    out.rows = sortById(rows);
+    return out;
+  }
+
+  const sku = e.entityId;
+  if (!sku) return out;
+  const want = _auditSummaryDelta(e);
+
+  if (kind === "adjust") {
+    const key = String(e.note || "").replace(/ \| จำนวน: [^|]*$/, "").trim();
+    const fits = (r) => (!key || r.reason === key) && (want == null || r.delta === want);
+    let rows = ((await dbLoadLedgerFor({ from: win.from, to: win.to, skus: [sku], user })) || []).filter(fits);
+    if (!rows.length && typeof dbLoadStockAdjustments === "function") {
+      rows = ((await dbLoadStockAdjustments(sku, 200)) || []).filter(fits);   // backdated: dated in the past
+    }
+    const pick = rows.length > 1 ? _closestTo(rows, win.t) : rows[0];
+    out.rows = pick ? [pick] : [];
+    return out;
+  }
+
+  // receive / add: same sku, +qty, ±3 min, the same quantity when the summary says it.
+  let rows = ((await dbLoadLedgerFor({ from: win.from, to: win.to, skus: [sku], user })) || []).filter(r => r.delta > 0);
+  if (want != null && rows.some(r => r.delta === want)) rows = rows.filter(r => r.delta === want);
+  const pick = rows.length > 1 ? _closestTo(rows, win.t) : rows[0];
+  out.rows = pick ? [pick] : [];
+  return out;
+}
+
+function useAuditEntryDetail(e) {
+  const [st, setSt] = useStateAud({ loading: true, rows: [], cancelled: new Set() });
+  useEffectAud(() => {
+    if (!e) return;
+    const moves = auditEntryMovesStock(e);
+    setSt({ loading: moves, rows: [], cancelled: new Set() });
+    if (!moves) return;
+    let alive = true;
+    loadAuditEntryMoves(e)
+      .then(r => { if (alive) setSt({ loading: false, rows: r.rows, cancelled: r.cancelled }); })
+      .catch(() => { if (alive) setSt({ loading: false, rows: [], cancelled: new Set(), error: true }); });
+    return () => { alive = false; };
+  }, [e && e.id]);
+  const orders = useMemoAud(() => {
+    const ids = auditOrderIds(e);
+    if (!ids.length) return [];
+    let all = [];
+    try { all = typeof buildOrders === "function" ? buildOrders() : []; } catch (x) { all = []; }
+    return ids.map(id => ({ id, order: all.find(o => o.id === id) || null }));
+  }, [e && e.id]);
+  return { ...st, orders };
+}
+
+// The shelf a row moved: "… → ตึก › ชั้น" on receives, else the order line's loc.
+function auditRowShelf(r, order) {
+  const m = /→ ([^·]+?)(?: · |$)/.exec(r.reason || "");
+  if (m && !/^\d/.test(m[1])) return m[1].trim();
+  const real = (l) => l && l.loc && !/^[-—–\s]*$/.test(String(l.loc));   // "-" = never shelved
+  const li = order && Array.isArray(order.lineItems) ? order.lineItems.find(l => l && l.sku === r.sku && real(l)) : null;
+  return li ? li.loc : "";
+}
+
+// Movement kinds that ALWAYS move stock — an empty match there is worth saying.
+const AUDIT_MOVE_EXPECTED = { adjust: 1, receive: 1, inbound: 1, "order-cancel": 1 };
+
+function AuditOrderCard({ id, order, cancelled, onOpenOrder, nested, compact }) {
+  const [showTl, setShowTl] = useStateAud(false);
+  const fs = compact ? 12 : 13;
+  const lab = { fontSize: 11, color: "var(--muted)" };
+  const statusTh = (order && typeof ORDER_STATUS_TH === "object" && ORDER_STATUS_TH[order.status]) || (order && order.status) || "";
+  return (
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: compact ? 10 : 12 }}>
+      <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={lab}>ออร์เดอร์</div>
+          <div className="mono" style={{ fontSize: fs, fontWeight: 600 }}>{id}</div>
+        </div>
+        <div className="row" style={{ gap: 6 }}>
+          {!nested && <button className="btn btn-sm" onClick={() => setShowTl(v => !v)}>{showTl ? "ซ่อนไทม์ไลน์" : "ไทม์ไลน์"}</button>}
+          {order && onOpenOrder && <button className="btn btn-sm" onClick={() => onOpenOrder(order)}>เปิดออร์เดอร์ <Icons.Chev size={11}/></button>}
+        </div>
+      </div>
+      {order ? (
+        <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", marginTop: 8, fontSize: 12 }}>
+          <span style={lab}>ช่องทาง</span><span>{typeof orderChannelLabel === "function" ? orderChannelLabel(order) : order.channel}</span>
+          {order.customer && <><span style={lab}>ลูกค้า</span><span>{order.customer}</span></>}
+          <span style={lab}>สถานะ</span><span>{statusTh || "—"}</span>
+          {order.tracking && <><span style={lab}>เลขพัสดุ</span><span className="mono">{order.tracking}</span></>}
+        </div>
+      ) : (
+        <div style={{ ...lab, marginTop: 6, color: cancelled ? "var(--danger)" : "var(--muted)" }}>
+          {cancelled ? "ออร์เดอร์นี้ถูกยกเลิกและคืนสต็อกแล้ว" : "ไม่พบออร์เดอร์นี้ในระบบแล้ว (ถูกลบ)"}
+        </div>
+      )}
+      {showTl && !nested && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+          <OrderHistory order={order || { id }} compact={compact} nested/>
+        </div>
+      )}
     </div>
   );
 }
 
+function AuditEntryDetail({ entry: e, onOpenOrder, onOpenProduct, compact, nested }) {
+  const { loading, rows, orders, cancelled, error } = useAuditEntryDetail(e);
+  const fs = compact ? 12 : 13;
+  const box = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: compact ? 10 : 12 };
+  const lab = { fontSize: 11, color: "var(--muted)" };
+  const kind = auditMoveKind(e);
+  const hasBA = rows.some(r => r.qty_after != null);
+  const { text: noteText, detail: noteDetail } = auditNoteParts(e);
+  const firstOrder = orders.find(o => o.order) ? orders.find(o => o.order).order : null;
+  const productHere = e.entity === "product" && e.entityId && typeof PRODUCTS !== "undefined" && PRODUCTS.some(p => p.sku === e.entityId);
+  const showMoves = !!kind && (loading || error || rows.length > 0 || AUDIT_MOVE_EXPECTED[kind]);
+  return (
+    <div className="stack" style={{ gap: 12 }}>
+      {!nested && (
+        <div style={box}>
+          <div className="row" style={{ justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+            <div style={{ fontSize: fs, fontWeight: 500, minWidth: 0 }}>{e.summary || "เปลี่ยนแปลง"}</div>
+            {productHere && onOpenProduct && (
+              <button className="btn btn-sm" style={{ flexShrink: 0 }} onClick={() => onOpenProduct(e.entityId)}>เปิดสินค้า <Icons.Chev size={11}/></button>
+            )}
+          </div>
+          <div style={{ ...lab, marginTop: 4 }}>
+            {new Date(e.ts).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "medium", timeStyle: "short" })} · {e.user?.name || "ระบบ"}
+          </div>
+          {noteText && <div style={{ fontSize: 12, color: "var(--fg-2)", marginTop: 6, whiteSpace: "pre-wrap" }}>{noteText}</div>}
+        </div>
+      )}
+
+      {!nested && orders.map(({ id, order }) => (
+        <AuditOrderCard key={id} id={id} order={order} cancelled={cancelled.has(id) || e.action === "cancel-restock"}
+          onOpenOrder={onOpenOrder} compact={compact}/>
+      ))}
+
+      {showMoves && (
+        <div>
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 6 }}>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>การเคลื่อนไหวสต็อก</div>
+            {!loading && rows.length > 0 && <div style={lab}>{rows.length} รายการ</div>}
+          </div>
+          {loading ? <div style={{ ...lab, padding: 12 }}>กำลังโหลด…</div>
+          : error ? <div style={{ ...lab, padding: 12 }}>โหลดไม่สำเร็จ</div>
+          : !rows.length ? <div style={{ ...lab, padding: 12 }}>ไม่พบรายการเคลื่อนไหวสต็อกของกิจกรรมนี้</div>
+          : (
+            <div className="stack" style={{ gap: 8 }}>
+              {rows.map(r => {
+                const p = (typeof PRODUCTS !== "undefined") ? PRODUCTS.find(x => x.sku === r.sku) : null;
+                const shelf = auditRowShelf(r, firstOrder);
+                const neg = r.delta < 0;
+                const canOpen = p && onOpenProduct;
+                return (
+                  <div key={r.id} style={box}>
+                    <div className="row" style={{ justifyContent: "space-between", gap: compact ? 10 : 12, alignItems: "flex-start" }}>
+                      {typeof ProductImageThumb === "function" && (
+                        <div style={{ flexShrink: 0, cursor: canOpen ? "pointer" : "default" }}
+                          onClick={canOpen ? () => onOpenProduct(r.sku) : undefined}>
+                          <ProductImageThumb sku={r.sku} size={compact ? 48 : 56} radius={10}/>
+                        </div>
+                      )}
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: fs, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: compact ? "normal" : "nowrap" }}>{p ? p.name : r.sku}</div>
+                        <div style={lab}>
+                          {canOpen
+                            ? <a className="mono" style={{ color: "var(--accent)", cursor: "pointer" }} onClick={() => onOpenProduct(r.sku)}>{r.sku}</a>
+                            : <span className="mono">{r.sku}</span>}
+                          {shelf ? " · " + shelf : ""}
+                        </div>
+                      </div>
+                      <span className="tnum" style={{ fontSize: fs + 1, fontWeight: 600, color: neg ? "var(--danger)" : "var(--success)", flexShrink: 0 }}>
+                        {neg ? "−" : "+"}{Math.abs(r.delta)}
+                      </span>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+                      <div>
+                        <div style={lab}>{neg ? "สต็อก ก่อน → หลังตัด" : "สต็อก ก่อน → หลังเพิ่ม"}</div>
+                        <div className="tnum" style={{ fontSize: fs, fontWeight: 600 }}>
+                          {r.qty_after != null
+                            ? <>{r.qty_before} <span style={{ color: "var(--muted)", fontWeight: 400 }}>→</span> {r.qty_after}</>
+                            : <span style={{ color: "var(--muted)", fontWeight: 400 }}>ไม่มีข้อมูล</span>}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={lab}>คงเหลือตอนนี้</div>
+                        <div className="tnum" style={{ fontSize: fs, fontWeight: 600 }}>{p ? p.qty : "—"}</div>
+                      </div>
+                    </div>
+                    {/รอซิงค์/.test(r.reason || "") && r.qty_after == null && <div style={{ ...lab, marginTop: 6 }}>บันทึกตอนออฟไลน์</div>}
+                  </div>
+                );
+              })}
+              {!hasBA && <div style={lab}>รายการนี้ไม่มีบันทึกจำนวนก่อน/หลัง (บันทึกได้ตั้งแต่ 7 ต.ค. 2569) — แสดงเฉพาะคงเหลือปัจจุบัน</div>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!kind && e.changes && e.changes.length > 0 && (
+        <div className="stack" style={{ gap: 6 }}>
+          {e.changes.map((c, j) => (
+            <div key={j} style={box}>
+              <div style={lab}>{c.label}</div>
+              <div style={{ fontSize: 12 }}>{c.from ? `${c.from} → ` : ""}{c.to || "—"}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {!kind && !(e.changes && e.changes.length) && noteDetail && (
+        <div style={{ ...box, fontSize: 12, color: "var(--fg-2)" }}>{noteDetail}</div>
+      )}
+    </div>
+  );
+}
+
+/* ── Order history (ประวัติออร์เดอร์) ──
+   Everything that happened to ONE order, oldest first, for checking a packing
+   problem after the fact: the note the packer was given (current + every
+   version since 2026-10-12 — setPackOrderNote logs each one), the shelf notes
+   on the shelves it is picked from, who is packing / finished and what came up
+   short (its own pack record OR the หยิบรวม wave it is in), status and tracking
+   edits, and the stock it cut. Re-renders on ims-pack-change (notes, progress)
+   and reloads the timeline on ims-audit-change. */
+function OrderHistory({ order, compact, nested }) {
+  const [rows, setRows] = useStateAud(null);
+  const [open, setOpen] = useStateAud(null);     // timeline entry expanded inline
+  const [, setTick] = useStateAud(0);
+  const id = order && order.id;
+  useEffectAud(() => {
+    if (!id || typeof dbLoadAuditForOrder !== "function") { setRows([]); return; }
+    let alive = true;
+    const load = () => dbLoadAuditForOrder(id).then(r => { if (alive) setRows(r || []); }).catch(() => { if (alive) setRows([]); });
+    load();
+    let t = null;
+    const soon = () => { clearTimeout(t); t = setTimeout(load, 1500); };
+    const repaint = () => setTick(n => n + 1);
+    window.addEventListener("ims-audit-change", soon);
+    window.addEventListener("ims-pack-change", repaint);
+    return () => {
+      alive = false; clearTimeout(t);
+      window.removeEventListener("ims-audit-change", soon);
+      window.removeEventListener("ims-pack-change", repaint);
+    };
+  }, [id]);
+  if (!order) return null;
+
+  const fs = compact ? 12 : 13;
+  const lab = { fontSize: 11, color: "var(--muted)" };
+  const card = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: compact ? 10 : 12 };
+  const note = typeof packOrderNote === "function" ? packOrderNote(id) : null;
+  // Its own pack record, or the wave (batch:…) that holds it.
+  const prog = typeof loadPackProgress === "function" ? loadPackProgress() : {};
+  let pe = prog[id] || null, wave = null;
+  if (!pe) {
+    const hit = Object.keys(prog).find(k => /^batch:/.test(k) && prog[k] && Array.isArray(prog[k].orderIds) && prog[k].orderIds.includes(id));
+    if (hit) { pe = prog[hit]; wave = hit; }
+  }
+  const shorts = pe && pe.short ? Object.keys(pe.short).map(k => k.split("|")[0]) : [];
+  // Shelf notes the packer sees on this order's pick lines.
+  let shelfNotes = [];
+  try {
+    const lines = (order.lineItems || order.items) && typeof packLinesForOrder === "function" ? packLinesForOrder(order) : [];
+    const seen = new Set();
+    lines.forEach(l => {
+      if (!l || !l.loc || seen.has(l.loc)) return;
+      seen.add(l.loc);
+      const n = typeof packLocNote === "function" ? packLocNote(l.loc) : null;
+      if (n && n.text) shelfNotes.push({ loc: l.loc, ...n });
+    });
+  } catch (x) { shelfNotes = []; }
+  const fmt = (iso) => iso ? new Date(iso).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  const dot = (tone) => ({ width: 10, height: 10, borderRadius: 99, background: tone, flexShrink: 0, marginTop: 4, boxShadow: "0 0 0 3px var(--surface)" });
+  const toneOf = (e) => e.action === "note" ? "var(--info)"
+    : /แพ็ค/.test(e.summary || "") ? "var(--success)"
+    : (e.action === "cancel-restock" || e.action === "delete" || e.action === "bulk-delete") ? "var(--danger)"
+    : "var(--accent)";
+
+  return (
+    <div className="stack" style={{ gap: 10 }}>
+      <div style={card}>
+        <div style={lab}>โน้ตถึงคนแพ็ค (ปัจจุบัน)</div>
+        {note
+          ? <><div style={{ fontSize: fs, whiteSpace: "pre-wrap", marginTop: 4 }}>{note.text}</div>
+              <div style={{ ...lab, marginTop: 4 }}>{[note.by, fmt(note.at)].filter(Boolean).join(" · ")}</div></>
+          : <div style={{ fontSize: fs, color: "var(--muted)", marginTop: 4 }}>ไม่มีโน้ต</div>}
+      </div>
+
+      {shelfNotes.length > 0 && (
+        <div style={card}>
+          <div style={lab}>โน้ตประจำช่องที่คนแพ็คเห็น (ปัจจุบัน)</div>
+          {shelfNotes.map(n => (
+            <div key={n.loc} style={{ marginTop: 6 }}>
+              <div style={{ fontSize: 11, fontWeight: 600 }}>{n.loc}</div>
+              <div style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{n.text}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {(pe || order.packedAt) && (
+        <div style={{ ...card, display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px", fontSize: 12 }}>
+          {pe && pe.by && <><span style={lab}>{wave ? "กำลังหยิบรวมโดย" : "กำลังแพ็คโดย"}</span><span>{pe.by}{pe.startedAt ? " · เริ่ม " + fmt(pe.startedAt) : ""}{wave && pe.orderIds ? ` · ${pe.orderIds.length} ออร์เดอร์` : ""}</span></>}
+          {pe && shorts.length > 0 && <><span style={lab}>ของขาด{wave ? " (ทั้งรอบ)" : ""}</span><span style={{ color: "var(--danger)" }}>{[...new Set(shorts)].join(", ")}</span></>}
+          {order.packedAt && <><span style={lab}>แพ็คเสร็จ</span><span>{fmt(order.packedAt)}{order.packedBy ? " · " + order.packedBy : ""}</span></>}
+        </div>
+      )}
+
+      <div>
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>ไทม์ไลน์ {rows && rows.length ? <span style={lab}>· {rows.length} รายการ</span> : null}</div>
+        {rows === null ? <div style={{ ...lab, padding: 8 }}>กำลังโหลด…</div>
+        : !rows.length ? <div style={{ ...lab, padding: 8 }}>ยังไม่มีประวัติของออร์เดอร์นี้</div>
+        : (
+          <div style={{ position: "relative", paddingLeft: 4 }}>
+            <div style={{ position: "absolute", left: 8, top: 8, bottom: 8, width: 2, background: "var(--border)" }}/>
+            {rows.map(e => {
+              const { text } = auditNoteParts(e);
+              const expandable = auditEntryMovesStock(e);
+              const isOpen = open && open.id === e.id;
+              return (
+                <div key={e.id} className="row" style={{ gap: 10, alignItems: "flex-start", padding: "6px 0", position: "relative", cursor: expandable ? "pointer" : "default" }}
+                  onClick={expandable ? () => setOpen(isOpen ? null : e) : undefined}>
+                  <span style={dot(toneOf(e))}/>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                      <span className={"badge " + (ACTION_TONES[e.action] || "badge-neutral")} style={{ fontSize: 10 }}>{ACTION_LABELS[e.action] || e.action}</span>
+                      <span style={lab}>{fmt(e.ts)} · {e.user?.name || "ระบบ"}</span>
+                      {expandable && <span style={{ ...lab, color: "var(--accent)" }}>{isOpen ? "ซ่อนรายการ" : "ดูรายการสินค้า"}</span>}
+                    </div>
+                    <div style={{ fontSize: fs, marginTop: 2 }}>{e.summary}</div>
+                    {text && (
+                      <div style={{ fontSize: 12, marginTop: 4, whiteSpace: "pre-wrap",
+                        ...(e.action === "note"
+                          ? { background: "var(--info-soft, var(--surface-2))", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px" }
+                          : { color: "var(--fg-2)" }) }}>{text}</div>
+                    )}
+                    {isOpen && (
+                      <div style={{ marginTop: 8 }} onClick={ev => ev.stopPropagation()}>
+                        <AuditEntryDetail entry={e} compact nested/>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div style={{ ...lab, marginTop: 6 }}>โน้ตที่แก้ก่อน 12 ต.ค. 2569 เก็บไว้เฉพาะฉบับล่าสุด</div>
+      </div>
+    </div>
+  );
+}
+
+/* Desktop side panel with just an order's history — the แพ็คสินค้า queue opens
+   it, since that is where a packing problem is noticed. */
+function OrderHistoryDrawer({ order, onClose }) {
+  useEffectAud(() => {
+    if (!order) return;
+    const k = (ev) => { if (ev.key === "Escape") onClose(); };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [order]);
+  if (!order) return null;
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose}/>
+      <div className="drawer">
+        <div className="drawer-head">
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>ประวัติออร์เดอร์ / งานที่สั่ง</div>
+            <div className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>{order.id}{order.customer ? " · " + order.customer : ""}</div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
+        </div>
+        <div className="drawer-body" style={{ background: "var(--surface-2)" }}>
+          <OrderHistory order={order}/>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* Desktop side panel around AuditEntryDetail. */
+function AuditDetailDrawer({ entry, onClose, onOpenOrder, onOpenProduct }) {
+  useEffectAud(() => {
+    if (!entry) return;
+    const k = (ev) => { if (ev.key === "Escape") onClose(); };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [entry]);
+  if (!entry) return null;
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose}/>
+      <div className="drawer">
+        <div className="drawer-head">
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>รายละเอียดกิจกรรม</div>
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>{ACTION_LABELS[entry.action] || entry.action} · {ENTITY_LABELS[entry.entity] || entry.entity}</div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
+        </div>
+        <div className="drawer-body" style={{ background: "var(--surface-2)" }}>
+          <AuditEntryDetail entry={entry} onOpenOrder={onOpenOrder} onOpenProduct={onOpenProduct}/>
+        </div>
+      </div>
+    </>
+  );
+}
+
 Object.assign(window, {
-  ConfirmDialog, recordChange, useAuditLog, HistoryPage, loadAuditLog, formatTime: formatTime,
+  ConfirmDialog, recordChange, useAuditLog, HistoryPage, AuditEntryDetail, AuditDetailDrawer, auditEntryMovesStock, OrderHistory, OrderHistoryDrawer, auditMoveKind, auditOrderIds, loadAuditEntryMoves, loadAuditLog, formatTime: formatTime,
   loadMoreAuditLog, loadAuditDay, auditHasMore, refreshAuditTotal, auditTotal, AUDIT_PAGE
 });

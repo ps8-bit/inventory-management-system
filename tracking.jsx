@@ -1049,6 +1049,13 @@ function OrderEditDrawer({ order, onClose, pushToast }) {
               </div>
             </div>
           )}
+
+          {typeof OrderHistory === "function" && (
+            <>
+              <div className="eyebrow" style={{ margin: "22px 0 8px" }}>ประวัติออร์เดอร์ / งานที่สั่ง</div>
+              <OrderHistory order={order}/>
+            </>
+          )}
         </div>
         <div className="drawer-foot">
           <button className="btn" onClick={onClose}>ยกเลิก</button>

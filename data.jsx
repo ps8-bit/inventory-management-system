@@ -642,7 +642,8 @@ function hydrateProductsFromServer(rows, seq) {
 function recordStockMoves(entries, reason) {
   if (typeof dbInsertStockAdjustment !== "function") return;
   const rows = (Array.isArray(entries) ? entries : [])
-    .map(e => ({ sku: e && e.sku, delta: Math.trunc(Number(e && e.delta) || 0), reason: (e && e.reason) || reason || "" }))
+    .map(e => ({ sku: e && e.sku, delta: Math.trunc(Number(e && e.delta) || 0), reason: (e && e.reason) || reason || "",
+                  before: e && e.before, after: e && e.after }))
     .filter(e => e.sku && e.delta);
   if (!rows.length) return;
   writeLedgerRows(rows);
@@ -666,7 +667,9 @@ function writeLedgerRows(rows) {
   const at = new Date().toISOString();
   const list = (Array.isArray(rows) ? rows : []).filter(r => r && r.sku && Number(r.delta))
     .map(r => ({ sku: r.sku, delta: Math.trunc(Number(r.delta)), reason: r.reason || "", created_by: r.created_by || by,
-                 createdAt: r.createdAt || undefined, at: r.createdAt || r.at || at }));
+                 createdAt: r.createdAt || undefined, at: r.createdAt || r.at || at,
+                 // Server-reported stock around the move; omitted when unknown (queued).
+                 ...(Number.isFinite(r.before) && Number.isFinite(r.after) ? { before: r.before, after: r.after } : {}) }));
   if (!list.length) return Promise.resolve({ ok: true });
   const keep = () => { if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("ledger", list); };
   if (typeof navigator !== "undefined" && navigator.onLine === false) { keep(); return Promise.resolve({ queued: true }); }
@@ -790,10 +793,14 @@ function deductManyAndPersist(deductions, reason) {
 function _recordDeduction(write, wanted, reason) {
   Promise.resolve(write).then(res => {
     const suffix = _pendingSuffix(res);
+    const moves = (res && res.ok) ? _serverMoveMap(res.rows) : new Map();
     const rows = [];
     wanted.forEach((qty, sku) => {
       const d = _movedDelta(res, sku, -(Number(qty) || 0));
-      if (d) rows.push({ sku, delta: d, reason: reason + suffix });
+      if (!d) return;
+      const m = moves.get(sku);
+      rows.push(m && m.before != null ? { sku, delta: d, reason: reason + suffix, before: m.before, after: m.after }
+                                      : { sku, delta: d, reason: reason + suffix });
     });
     recordStockMoves(rows, reason);
   }).catch(() => {
@@ -845,7 +852,8 @@ function receiveStockAndRecord(lines, reason, opts) {
       );
       if (!d) return;
       const where = (job.loc && job.loc !== "—") ? ` → ${job.loc}` : "";
-      rows.push({ sku: job.sku, delta: d, reason: reason + where + _pendingSuffix(res) });
+      const ba = (res && res.ok && typeof res.after === "number" && typeof res.before === "number") ? { before: res.before, after: res.after } : {};
+      rows.push({ sku: job.sku, delta: d, reason: reason + where + _pendingSuffix(res), ...ba });
       if (audit && typeof recordChange === "function") {
         const p = PRODUCTS.find(x => x.sku === job.sku);
         const known = res && res.ok && typeof res.after === "number";
@@ -917,7 +925,7 @@ function applyStockAdjustment({ sku, delta, reason, note, source, when }) {
      reached the local estimate is still recorded — the movement is real and
      queued — but marked "รอซิงค์" so a number that may shift is visible as such. */
   if (eff) {
-    const writeHistory = (rFrom, rTo, rEff, pendingNote) => {
+    const writeHistory = (rFrom, rTo, rEff, pendingNote, exact) => {
       const noteOut = pendingNote ? `${fullReason} · ${pendingNote}` : fullReason;
       // Audit trail: only summary/note survive to the DB (changes[] stays local),
       // so sku, ±delta, from→to and the reason are all packed into them.
@@ -931,7 +939,8 @@ function applyStockAdjustment({ sku, delta, reason, note, source, when }) {
       }
       // Structured, queryable history (stock_adjustments table). Best-effort like
       // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
-      writeLedgerRows([{ sku, delta: rEff, reason: noteOut, createdAt: backAt }])
+      writeLedgerRows([{ sku, delta: rEff, reason: noteOut, createdAt: backAt,
+                         ...(exact ? { before: rFrom, after: rTo } : {}) }])
         .then(() => { if (rEff < 0 && isAdjustSaleReason(noteOut)) refreshSaleMovesSoon(); })
         .catch(() => {});
     };
@@ -942,7 +951,7 @@ function applyStockAdjustment({ sku, delta, reason, note, source, when }) {
         const sEff = sTo - sFrom;
         // 0 = the server recognised an already-applied operation and moved
         // nothing. Recording it would invent a movement that never happened.
-        if (sEff) writeHistory(sFrom, sTo, sEff, "");
+        if (sEff) writeHistory(sFrom, sTo, sEff, "", typeof res.before === "number");
         return;
       }
       writeHistory(from, to, eff, (res && res.queued) ? "รอซิงค์" : "");
@@ -3048,6 +3057,16 @@ async function setPackLocNote(loc, text, by) {
     _blobWriteFailed("โน้ตประจำช่อง", (res && res.error) || "");
     return { ok: false };
   }
+  // Like order notes: the blob holds only the current text, so each version is
+  // logged — a packing check can then see what this shelf said at the time.
+  const was = prev[loc] && prev[loc].text ? prev[loc].text : "";
+  if (typeof recordChange === "function" && was !== (rec ? rec.text : "")) {
+    recordChange({
+      entity: "location", entityId: loc, action: "note",
+      summary: rec ? (was ? `แก้ไขโน้ตประจำช่อง ${loc}` : `เพิ่มโน้ตประจำช่อง ${loc}`) : `ลบโน้ตประจำช่อง ${loc}`,
+      note: rec ? rec.text : (was ? "เดิม: " + was : "")
+    });
+  }
   return { ok: true };
 }
 /* The ONE add/edit/remove dialog for a shelf note — mobile MPackLocNote and the
@@ -3111,6 +3130,17 @@ async function setPackOrderNote(orderId, text, by) {
     _packOrderNotesMirror(prev);
     _blobWriteFailed("โน้ตออร์เดอร์", (res && res.error) || "");
     return { ok: false };
+  }
+  // The blob keeps only the CURRENT note, so every version is also written to the
+  // activity log — the order's history can then show exactly what the packer was
+  // told and when, which is what a packing dispute needs.
+  const before = prev[orderId] && prev[orderId].text ? prev[orderId].text : "";
+  if (typeof recordChange === "function" && before !== (rec ? rec.text : "")) {
+    recordChange({
+      entity: "order", entityId: orderId, action: "note",
+      summary: rec ? (before ? `แก้ไขโน้ตออร์เดอร์ ${orderId}` : `เพิ่มโน้ตออร์เดอร์ ${orderId}`) : `ลบโน้ตออร์เดอร์ ${orderId}`,
+      note: rec ? rec.text : (before ? "เดิม: " + before : "")
+    });
   }
   return { ok: true };
 }
@@ -3237,9 +3267,9 @@ function applyStockCounts(counts) {
     p.qty = to;
   });
   if (!changes.length) return changes;
-  // Physical count = truth → write the counted skus' absolute qty (scoped rows),
-  // not the whole catalog.
-  _syncProductRows(changes.map(c => c.sku));
+  // Physical count = truth. The server lands on the counted number; HOW is in
+  // _commitCountsToServer (after applyLocPicks has planned, below).
+  const toServer = changes.map(c => ({ sku: c.sku, from: c.from, to: c.to }));
   if (typeof applyLocPicks === "function") {
     const picks = changes.map(c => {
       const p = PRODUCTS.find(x => x.sku === c.sku);
@@ -3253,10 +3283,54 @@ function applyStockCounts(counts) {
       }
     }).catch(() => {});
   }
-  recordStockMoves(changes.map(c => ({
-    sku: c.sku, delta: c.delta, reason: `ตรวจนับสต็อก (${c.from} → ${c.to})`
-  })));
+  _commitCountsToServer(toServer);
   return changes;
+}
+/* Land a count on the server and record what REALLY moved.
+   The count used to upsert the absolute qty and log `from` = this device's copy.
+   With a stale copy (another phone sold one a minute ago) both the logged
+   "before" and the delta were fiction, and the movement history stopped adding
+   up. Now: read the server's current qty for these skus, apply the difference
+   through the atomic adjust_stock RPC, and log the RPC's own before → after —
+   the same rule every other movement follows. The read→adjust gap is a few ms
+   instead of however old the phone's copy was; a sale landing inside it simply
+   counts as happening after the count.
+   No connection / no RPC → the old absolute upsert, logged with the device's
+   numbers (no before/after) so nothing pretends to be exact. */
+async function _commitCountsToServer(list) {
+  const skus = list.map(c => c.sku);
+  _persistProductsLocal();   // the counted numbers are on screen + in the local cache now
+  const legacy = () => {
+    _syncProductRows(skus);
+    recordStockMoves(list.map(c => ({ sku: c.sku, delta: c.to - c.from, reason: `ตรวจนับสต็อก (${c.from} → ${c.to})` })));
+  };
+  if (!navigator.onLine || typeof dbLoadQtys !== "function" || typeof dbAdjustStock !== "function") { legacy(); return; }
+  let server = null;
+  try { server = await dbLoadQtys(skus); } catch (e) { server = null; }
+  if (!server) { legacy(); return; }
+  const adj = list.map(c => ({ sku: c.sku, to: c.to, delta: c.to - (Number.isFinite(server[c.sku]) ? server[c.sku] : c.from) }))
+    .filter(a => a.delta);
+  if (!adj.length) { _persistProductsLocal(); return; }   // server already holds the counted numbers
+  let res = null;
+  try { res = await dbAdjustStock(adj.map(a => ({ sku: a.sku, delta: a.delta })), genOpId()); } catch (e) { res = null; }
+  if (!res || res.error === "RPC_MISSING" || (!res.ok && res.error !== "PERMISSION_OR_MISSING")) { legacy(); return; }
+  _applyServerQty(res.rows);
+  const moves = _serverMoveMap(res.rows);
+  const rows = [];
+  adj.forEach(a => {
+    const m = moves.get(a.sku);
+    if (!m) return;                                    // RLS-blocked sku: nothing moved
+    const before = m.before != null ? m.before : m.after - a.delta;
+    const d = m.after - before;
+    if (!d) return;
+    rows.push(m.before != null
+      ? { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})`, before, after: m.after }
+      : { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})` });
+  });
+  recordStockMoves(rows);
+  if (res.error === "PERMISSION_OR_MISSING") {
+    window.dispatchEvent(new CustomEvent("ims-toast", { detail: "ปรับสต็อกจากการตรวจนับไม่สำเร็จบางรายการ: บัญชีนี้ไม่มีสิทธิ์" }));
+  }
 }
 
 /* ── WooCommerce reference catalog ───────────────────────────────────────
@@ -3735,7 +3809,8 @@ async function flushOfflineQueue() {
           // A history row that couldn't be written when its movement happened —
           // dated when it HAPPENED, not when the phone got signal back.
           const rows = (item.payload || []).map(r => ({ sku: r.sku, delta: r.delta, reason: r.reason || "",
-                                                       created_by: r.created_by, createdAt: r.at }));
+                                                       created_by: r.created_by, createdAt: r.at,
+                                                       before: r.before, after: r.after }));
           const r = await dbInsertStockAdjustment(rows);
           ok = !!(r && (r.ok || _ledgerRefused(r.error)));
           if (ok && typeof refreshSaleMovesSoon === "function") refreshSaleMovesSoon();
