@@ -2889,6 +2889,18 @@ function packedRecent(days) {
     .sort((a, b) => Date.parse(b.packedAt) - Date.parse(a.packedAt));
 }
 
+/* Orders packed on the local day of `day` (default today), newest first — every
+   one packed that day whatever happened next, so shipping a parcel doesn't take
+   it off the day's count. Packed is NOT shipped: callers show o.status as-is.
+   Team-wide (not per packer). Cancelled orders are left out. */
+function packedOnDay(day) {
+  const key = (day ? new Date(day) : new Date()).toDateString();
+  const list = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+  return (list || [])
+    .filter(o => o && o.packedAt && o.status !== "cancelled" && new Date(o.packedAt).toDateString() === key)
+    .sort((a, b) => Date.parse(b.packedAt) - Date.parse(a.packedAt));
+}
+
 /* Queue order — picked by the packer, remembered per device (two packers may
    work the queue differently). Every mode falls back to oldest-first so ties
    never shuffle between renders. */
@@ -4052,7 +4064,7 @@ Object.assign(window, {
   receiveLineShelf, receiveLinesWithoutShelf, buildReceiveReport, lastReceiveLoc, rememberReceiveLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
-  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packedRecent, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
+  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packedRecent, packedOnDay, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
   loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, loadPackOrderNotes, packOrderNote, setPackOrderNote, markOrderTouched, orderTouchedRecently, editPackOrderNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
