@@ -2702,3 +2702,25 @@ button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft
 .ocb-ack { align-self: flex-end; }
 [data-mobile="1"] .ocb-ack { align-self: stretch; height: 42px; justify-content: center; }
 @media print { .ocr-modal, .ocr-backdrop, .ocb { display: none !important; } }
+
+/* Web-push on/off card (tracking.jsx OrderPushToggle) — notification sheet,
+   desktop bell popover, mobile home nudge. */
+.opt {
+  display: flex; gap: 10px; align-items: flex-start; padding: 12px;
+  border-radius: 12px; border: 1px solid var(--border); background: var(--surface);
+  margin-bottom: 8px;
+}
+.opt-off, .opt-install { border-color: var(--accent); background: color-mix(in oklab, var(--accent-soft) 45%, var(--surface)); }
+.opt-denied { border-color: var(--warning); background: color-mix(in oklab, var(--warning-soft) 45%, var(--surface)); }
+.opt-ic {
+  flex-shrink: 0; width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--accent); color: var(--accent-fg, #fff);
+}
+.opt-on .opt-ic { background: var(--success); }
+.opt-denied .opt-ic, .opt-unsupported .opt-ic { background: var(--muted); }
+.opt-main { flex: 1; min-width: 0; }
+.opt-title { font-size: 13.5px; font-weight: 700; line-height: 1.35; }
+.opt-sub { font-size: 12px; color: var(--muted); line-height: 1.45; margin-top: 2px; }
+.opt-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.opt-actions:empty { display: none; }
+[data-mobile="1"] .opt-actions .btn-primary { flex: 1; height: 40px; justify-content: center; font-size: 13.5px; }
