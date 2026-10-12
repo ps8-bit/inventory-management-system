@@ -3,7 +3,7 @@
    versioned assets (?v=...), so we do NOT cache app code to avoid stale bugs.
    v3: actively forces a fresh HTML shell + purges any old caches, so an installed
    PWA can never get stuck on an old build. */
-const VERSION = "ims-pwa-v3";
+const VERSION = "ims-pwa-v4";
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();
@@ -38,4 +38,15 @@ self.addEventListener("fetch", (event) => {
       fetch(event.request, { cache: "no-store" }).catch(() => fetch(event.request))
     );
   }
+});
+
+// v4: tapping an order-alert notification (tracking.jsx _orderAlertSystemNotify)
+// brings the open app to the front, or opens it if it was closed.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const list = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    for (const c of list) { if ("focus" in c) return c.focus(); }
+    if (self.clients.openWindow) return self.clients.openWindow("/");
+  })());
 });

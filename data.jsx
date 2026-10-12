@@ -1077,12 +1077,26 @@ function saveOrders(orders) {
   if (window.dbUpsertOrders) dbUpsertOrders(orders).catch(() => {});
 }
 
+/* Orders THIS device just wrote. The order-alert watcher (tracking.jsx) skips
+   them when a realtime reload lands, so nobody is told to re-check an edit they
+   made themselves — the server echo of our own write arrives as a remote event. */
+function markOrderTouched(id) {
+  if (!id) return;
+  const m = window.__orderTouch || (window.__orderTouch = {});
+  m[id] = Date.now();
+}
+function orderTouchedRecently(id, ms) {
+  const t = window.__orderTouch && window.__orderTouch[id];
+  return !!t && Date.now() - t < (ms || 15000);
+}
+
 /* Append/update ONE order: optimistic local cache + single-row DB upsert.
    This is the convergence-safe writer — unlike saveOrders() it never upserts
    the whole list and never diffs-and-deletes, so two devices can't clobber
    each other's orders. Failed writes go to the offline queue. */
 async function appendOrder(order) {
   if (!order || !order.id) return { ok: false };
+  markOrderTouched(order.id);
   // If this id was previously deleted, drop the stale tombstone so the new order
   // isn't hidden by it (clearOrderOverride is a no-op for a fresh, never-used id).
   if (typeof clearOrderOverride === "function") clearOrderOverride(order.id);
@@ -3122,6 +3136,7 @@ async function setPackOrderNote(orderId, text, by) {
   const clean = t.replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").slice(0, 500);
   const rec = t ? { text: clean, by: by || "", at: new Date().toISOString() } : null;
   const prev = loadPackOrderNotes();
+  markOrderTouched(orderId);
   _packOrderNotesMirror({ ...prev, [orderId]: rec });
   let res = null;
   try {
@@ -4038,7 +4053,7 @@ Object.assign(window, {
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
   packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packedRecent, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
-  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, loadPackOrderNotes, packOrderNote, setPackOrderNote, editPackOrderNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
+  loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, loadPackOrderNotes, packOrderNote, setPackOrderNote, markOrderTouched, orderTouchedRecently, editPackOrderNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,

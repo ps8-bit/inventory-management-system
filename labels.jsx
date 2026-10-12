@@ -94,6 +94,7 @@ function makeBlankLabel(existing) {
    the sale — one vanished record, one duplicate). */
 function appendLabel(label) {
   if (!label || !label.id) return { ok: false };
+  if (typeof markOrderTouched === "function") markOrderTouched(typeof orderIdForLabel === "function" ? orderIdForLabel(label) : label.id);
   const next = [...((typeof loadLabels === "function") ? loadLabels() : []).filter(l => l.id !== label.id), label];
   try { localStorage.setItem("ims_labels", JSON.stringify(next)); } catch (e) {}
   window._DB_LABELS = next;

@@ -79,6 +79,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 setTimeout(() => { flushOrderOverridePending(); }, 8000);   // after dbInit, for a relaunch with leftovers
 
 function setOrderField(id, changes) {
+  if (typeof markOrderTouched === "function") markOrderTouched(id);
   const prev = loadOrderOverrides();
   const entry = { ...prev[id], ...changes };
   // Fresh object reference so React state setters (setO/setOverrides) re-render.
@@ -103,6 +104,7 @@ function clearOrderOverride(id) {
   if (!id) return;
   const prev = loadOrderOverrides();
   if (!prev[id] || !Object.keys(prev[id]).length) return; // nothing stale to clear
+  if (typeof markOrderTouched === "function") markOrderTouched(id);
   const pend = _loadOverridePending();
   if (pend[id]) { delete pend[id]; _saveOverridePending(pend); }
   const m = { ...prev, [id]: {} };
@@ -954,6 +956,7 @@ function OrderEditDrawer({ order, onClose, pushToast }) {
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
         <div className="drawer-body">
+          <OrderChangeBanner orderId={order.id}/>
           <div className="eyebrow" style={{ marginBottom: 8 }}>ข้อมูลลูกค้า / ออร์เดอร์</div>
           <div className="stack" style={{ gap: 10, marginBottom: 18 }}>
             <div className="field">
@@ -2293,4 +2296,580 @@ function CustomerOrderDetail({ order, store, onBack }) {
   );
 }
 
-Object.assign(window, { orderCustomerText, TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder });
+/* ============ ORDER ALERTS — "check this order carefully" ============
+   When an order arrives from ANOTHER device, or someone else edits / cancels one
+   that is still waiting (รอแพ็ค / พร้อมส่ง), every device that works orders shows
+   a sticky alert telling staff to re-check the goods, with exactly what changed.
+
+   Only REMOTE changes alert: the realtime reloads in supabase.jsx dispatch their
+   change events with detail.remote, and local writers fire the plain event — on
+   which the watcher silently re-baselines. Ids this device wrote in the last 15 s
+   (markOrderTouched) are skipped too, so the server echo of our own write is
+   never mistaken for someone else's edit. Status moves (แพ็คแล้ว, ส่งแล้ว) are
+   workflow, not edits, and never alert.
+
+   Alerts are per device, kept in localStorage until acknowledged (รับทราบ), so a
+   reload can't swallow one that nobody has looked at yet. */
+const ORDER_ALERTS_KEY = "ims_order_alerts_v1";
+const ORDER_ALERT_SOUND_KEY = "ims_order_alert_sound";
+const ORDER_ALERT_MAX = 30;
+
+function loadOrderAlerts() {
+  try { const a = JSON.parse(localStorage.getItem(ORDER_ALERTS_KEY) || "[]"); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+function _saveOrderAlerts(list) {
+  try { localStorage.setItem(ORDER_ALERTS_KEY, JSON.stringify(list.slice(0, ORDER_ALERT_MAX))); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-order-alerts-change"));
+}
+function ackOrderAlert(orderId) { _saveOrderAlerts(loadOrderAlerts().filter(a => a.id !== orderId)); }
+function ackAllOrderAlerts() { _saveOrderAlerts([]); }
+function orderAlertSoundOn() { try { return localStorage.getItem(ORDER_ALERT_SOUND_KEY) !== "0"; } catch (e) { return true; } }
+function setOrderAlertSound(on) { try { localStorage.setItem(ORDER_ALERT_SOUND_KEY, on ? "1" : "0"); } catch (e) {} }
+
+// Roles that never handle orders (no จัดส่ง / แพ็ค / ติดตาม page) get no alerts.
+function orderAlertsAllowed() {
+  if (typeof canOpenPage !== "function") return true;
+  return ["outbound", "pack", "tracking"].some(id => canOpenPage(id));
+}
+
+// sku → qty for one order, from the same source the packer's pick list uses
+// (lineItems + เพิ่มรายการ, or the label's items for label-born orders).
+function _orderAlertItems(o) {
+  const src = (typeof _packSourceItems === "function") ? _packSourceItems(o)
+    : (Array.isArray(o.lineItems) ? o.lineItems : []);
+  const m = {};
+  (src || []).forEach(li => {
+    if (!li || !li.sku) return;
+    const q = Math.max(0, Math.round(Number(li.qty) || 0));
+    if (q) m[li.sku] = (m[li.sku] || 0) + q;
+  });
+  return m;
+}
+function _orderAlertName(sku) {
+  const p = (typeof PRODUCTS !== "undefined") ? PRODUCTS.find(x => x.sku === sku) : null;
+  return (p && p.name) || sku;
+}
+
+/* One snapshot of everything an alert could be about. `st` holds every known id's
+   class: "p" pending, "b" blank label draft, "x:<status>" anything else. Only
+   pending orders get a full fingerprint — nothing else is worth re-checking. */
+function _orderAlertSnap() {
+  const notes = (typeof loadPackOrderNotes === "function") ? loadPackOrderNotes() : {};
+  const st = {}, pend = {};
+  (typeof buildOrders === "function" ? buildOrders() : []).forEach(o => {
+    if (!o || !o.id) return;
+    const pending = (typeof isPendingOrder === "function") ? isPendingOrder(o) : (o.status === "picking" || o.status === "packed");
+    st[o.id] = pending ? "p" : ((typeof isBlankDraftOrder === "function" && isBlankDraftOrder(o)) ? "b" : ("x:" + (o.status || "")));
+    if (!pending) return;
+    const n = notes[o.id];
+    pend[o.id] = {
+      src: o.__fromLabel ? "label" : "row",
+      short: (typeof orderShortId === "function") ? orderShortId(o) : o.id,
+      customer: (typeof orderCustomerText === "function") ? orderCustomerText(o) : (o.customer || ""),
+      channel: (typeof orderChannelLabel === "function") ? orderChannelLabel(o) : (o.channel || ""),
+      status: o.status,
+      items: _orderAlertItems(o),
+      name: String(o.customer || "").trim(),
+      phone: String(o.phone || "").replace(/\D/g, ""),
+      addr: String(o.shippingAddr || "").trim(),
+      note: String(o.note || "").trim(),
+      cod: Number(o.codAmount) || 0,
+      carrier: String(o.carrier || "").trim(),
+      pnote: (n && n.text) ? String(n.text) : "",
+    };
+  });
+  return { st, pend };
+}
+
+function _orderAlertItemList(items) {
+  return Object.keys(items).map(sku => ({ sku, name: _orderAlertName(sku), qty: items[sku] }));
+}
+
+function _orderAlertStatusTh(st) {
+  return (typeof ORDER_STATUS_TH === "object" && ORDER_STATUS_TH[st]) || st || "—";
+}
+// Order fields an alert reports, in the order the review screen lists them.
+const ORDER_ALERT_FIELDS = [
+  { k: "name",    label: "ชื่อลูกค้า" },
+  { k: "phone",   label: "เบอร์โทร" },
+  { k: "addr",    label: "ที่อยู่จัดส่ง" },
+  { k: "carrier", label: "ขนส่ง" },
+  { k: "cod",     label: "ยอด COD", fmt: (v) => v ? Number(v).toLocaleString() + " ฿" : "ไม่เก็บเงินปลายทาง" },
+  { k: "note",    label: "หมายเหตุ" },
+  { k: "pnote",   label: "โน้ตออร์เดอร์" },
+];
+
+/* prev → next snapshot → alert records. */
+function _orderAlertDiff(prev, next) {
+  const out = [];
+  const now = Date.now();
+  const touched = (id) => typeof orderTouchedRecently === "function" && orderTouchedRecently(id);
+  const base = (id, s) => ({ id, at: now, short: s.short, customer: s.customer, channel: s.channel, status: s.status });
+  Object.keys(next.pend).forEach(id => {
+    if (touched(id)) return;
+    const n = next.pend[id], p = prev.pend[id];
+    if (!p) {
+      const was = prev.st[id];
+      if (!was || was === "b") out.push({ ...base(id, n), kind: "new", items: _orderAlertItemList(n.items) });
+      else out.push({ ...base(id, n), kind: "edit", items: _orderAlertItemList(n.items), diff: [],
+        fields: [{ k: "status", label: "สถานะ", from: _orderAlertStatusTh(was.slice(2)), to: _orderAlertStatusTh(n.status) }] });
+      return;
+    }
+    // The same id can be served by its label copy or its orders-table copy
+    // (buildOrders lets the label win once one exists). They carry different
+    // field sets — name from the recipient, items without custom lines — so a
+    // flip of the winning source is not an edit: just re-baseline.
+    if (p.src !== n.src) return;
+    const diff = [];
+    new Set([...Object.keys(p.items), ...Object.keys(n.items)]).forEach(sku => {
+      const a = p.items[sku] || 0, b = n.items[sku] || 0;
+      if (a !== b) diff.push({ sku, name: _orderAlertName(sku), from: a, to: b });
+    });
+    // Every changed field keeps BOTH values, so the review screen can show
+    // exactly what it was and what it is now.
+    const fields = ORDER_ALERT_FIELDS
+      .filter(f => p[f.k] !== n[f.k])
+      .map(f => ({ k: f.k, label: f.label, from: f.fmt ? f.fmt(p[f.k]) : p[f.k], to: f.fmt ? f.fmt(n[f.k]) : n[f.k] }));
+    if (!diff.length && !fields.length) return;
+    out.push({ ...base(id, n), kind: "edit", items: _orderAlertItemList(n.items), diff, fields });
+  });
+  // A label draft that gets its real SO number changes id (orderIdForLabel), which
+  // looks like "one order gone + one new" — the new card is enough, no cancel.
+  const freshCustomers = new Set(out.filter(a => a.kind === "new").map(a => a.customer));
+  Object.keys(prev.pend).forEach(id => {
+    if (next.pend[id] || next.st[id]) return;   // still there (maybe shipped) → not a cancel
+    if (touched(id) || freshCustomers.has(prev.pend[id].customer)) return;
+    out.push({ ...base(id, prev.pend[id]), kind: "removed", items: _orderAlertItemList(prev.pend[id].items) });
+  });
+  return out;
+}
+
+/* Fold fresh alerts into the unacknowledged list — one card per order. */
+function _mergeOrderAlerts(list, fresh) {
+  const next = list.slice();
+  fresh.forEach(a => {
+    const i = next.findIndex(x => x.id === a.id);
+    if (i < 0) { next.unshift(a); return; }
+    const old = next[i];
+    let merged;
+    if (a.kind === "removed") merged = { ...a };
+    // Not looked at yet → still "new"; the card simply shows the current contents.
+    else if (old.kind === "new" || old.kind === "removed") merged = { ...a, kind: "new", diff: undefined, fields: undefined };
+    else {
+      // edit after edit: keep each sku's ORIGINAL qty so the card shows the net change.
+      const dm = {};
+      (old.diff || []).forEach(d => { dm[d.sku] = { ...d }; });
+      (a.diff || []).forEach(d => { dm[d.sku] = dm[d.sku] ? { ...dm[d.sku], to: d.to } : { ...d }; });
+      const fm = {};
+      (old.fields || []).forEach(f => { fm[f.k] = { ...f }; });
+      (a.fields || []).forEach(f => { fm[f.k] = fm[f.k] ? { ...fm[f.k], to: f.to } : { ...f }; });
+      merged = { ...a, diff: Object.values(dm).filter(d => d.from !== d.to), fields: Object.values(fm).filter(f => f.from !== f.to) };
+    }
+    next.splice(i, 1);
+    next.unshift(merged);
+  });
+  return next;
+}
+
+let _oaAudio = null;
+function _orderAlertAudio() {
+  try {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return null;
+    if (!_oaAudio) _oaAudio = new C();
+    if (_oaAudio.state === "suspended") _oaAudio.resume().catch(() => {});
+    return _oaAudio;
+  } catch (e) { return null; }
+}
+// Browsers only let audio start after a user gesture — warm the context on the first tap.
+window.addEventListener("pointerdown", function _oaUnlock() {
+  window.removeEventListener("pointerdown", _oaUnlock);
+  _orderAlertAudio();
+}, { passive: true });
+function _orderAlertChime(urgent) {
+  if (!orderAlertSoundOn()) return;
+  const ctx = _orderAlertAudio();
+  if (!ctx) return;
+  try {
+    const t = ctx.currentTime;
+    const notes = urgent ? [[784, 0], [523, 0.22], [784, 0.44], [523, 0.66]] : [[880, 0], [1175, 0.16], [1568, 0.32]];
+    notes.forEach(([f, d]) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "sine"; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t + d);
+      g.gain.exponentialRampToValueAtTime(0.28, t + d + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.34);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t + d); o.stop(t + d + 0.4);
+    });
+  } catch (e) {}
+}
+
+const ORDER_ALERT_KIND = {
+  new:     { tag: "ออร์เดอร์ใหม่",   msg: "ตรวจสอบรายการ แล้วเช็คสินค้า (รุ่น · สี · ไซซ์ · จำนวน) ให้ตรงก่อนแพ็ค" },
+  edit:    { tag: "มีการแก้ไข",      msg: "ออร์เดอร์นี้ถูกแก้ไข — เช็คสินค้าใหม่อีกครั้ง ถ้าแพ็คไปแล้วให้เปิดกล่องตรวจ" },
+  removed: { tag: "ยกเลิก / ลบแล้ว", msg: "ห้ามส่งออร์เดอร์นี้ ถ้าหยิบสินค้าไว้แล้วให้นำกลับที่เดิม" },
+};
+
+// System notification while the app is in the background (permission is opt-in
+// from the alert panel). Goes through the service worker when there is one —
+// Android Chrome refuses `new Notification()` from a page.
+function _orderAlertSystemNotify(fresh) {
+  try {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    if (document.visibilityState === "visible") return;
+    const a = fresh[0];
+    const k = ORDER_ALERT_KIND[a.kind] || ORDER_ALERT_KIND.new;
+    const title = fresh.length > 1 ? fresh.length + " ออร์เดอร์ต้องตรวจสอบ" : k.tag + " · " + a.short;
+    const opts = { body: (a.customer ? a.customer + " — " : "") + k.msg, tag: "ims-order-" + a.id, icon: "/icon-192.png", badge: "/favicon-32.png", renotify: true };
+    const plain = () => { try { new Notification(title, opts); } catch (e) {} };
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
+      navigator.serviceWorker.getRegistration().then(reg => {
+        if (reg && reg.showNotification) reg.showNotification(title, opts).catch(plain);
+        else plain();
+      }).catch(plain);
+    } else plain();
+  } catch (e) {}
+}
+
+/* The watcher — started once by whichever shell mounts first. */
+let _oaStarted = false;
+function startOrderAlertWatch() {
+  if (_oaStarted) return;
+  _oaStarted = true;
+  let snap = _orderAlertSnap();
+  let timer = null;
+  const runDiff = () => {
+    timer = null;
+    const next = _orderAlertSnap();
+    const fresh = orderAlertsAllowed() ? _orderAlertDiff(snap, next) : [];
+    snap = next;
+    if (!fresh.length) return;
+    _saveOrderAlerts(_mergeOrderAlerts(loadOrderAlerts(), fresh));
+    _orderAlertChime(fresh.some(a => a.kind !== "new"));
+    try { if (navigator.vibrate) navigator.vibrate([180, 80, 180]); } catch (e) {}
+    _orderAlertSystemNotify(fresh);
+  };
+  const onChange = (e) => {
+    if (e && e.detail && e.detail.remote) {
+      // Coalesce a burst (orders row + label + overrides arriving together).
+      clearTimeout(timer);
+      timer = setTimeout(runDiff, 600);
+      return;
+    }
+    // Our own write: anything remote still waiting is diffed first (ids we just
+    // touched are skipped there), then the baseline absorbs the local change.
+    if (timer) { clearTimeout(timer); runDiff(); }
+    snap = _orderAlertSnap();
+  };
+  ["ims-orders-change", "ims-labels-change", "ims-pack-change"].forEach(ev => window.addEventListener(ev, onChange));
+}
+
+function _oaTime(at) {
+  try { return new Date(at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", hour12: false }); }
+  catch (e) { return ""; }
+}
+
+/* What the order holds NOW, one row per sku (shelves joined), from the same pick
+   lines the packer walks. A cancelled order no longer exists → the alert's copy. */
+function _orderAlertLiveRows(alert) {
+  const order = (typeof buildOrders === "function" ? buildOrders() : []).find(o => o.id === alert.id);
+  if (!order || alert.kind === "removed") {
+    return (alert.items || []).map(it => ({ sku: it.sku, name: it.name, qty: it.qty, locs: [] }));
+  }
+  const by = {};
+  const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(order)
+    : _orderAlertItemList(_orderAlertItems(order)).map(it => ({ ...it, loc: "" }));
+  lines.forEach(l => {
+    const r = by[l.sku] || (by[l.sku] = { sku: l.sku, name: l.name || _orderAlertName(l.sku), qty: 0, locs: [] });
+    r.qty += l.qty || 0;
+    if (l.loc && l.loc !== "-" && r.locs.indexOf(l.loc) < 0) r.locs.push(l.loc);
+  });
+  return Object.values(by);
+}
+
+const ORDER_CHANGE_TAG = {
+  added:   "เพิ่มใหม่",
+  qty:     "แก้จำนวน",
+  removed: "เอาออก",
+  same:    "เหมือนเดิม",
+  new:     "ใหม่",
+  cancel:  "ยกเลิก",
+};
+
+/* Every line of the order, each marked เพิ่มใหม่ / แก้จำนวน / เอาออก / เหมือนเดิม,
+   changed lines first, then every changed field as before → after. Shared by
+   the review modal and the inline banner (pick list, order drawers). */
+function OrderChangeDetail({ alert }) {
+  const live = _orderAlertLiveRows(alert);
+  const dm = {};
+  (alert.diff || []).forEach(d => { dm[d.sku] = d; });
+  let rows;
+  if (alert.kind === "removed") rows = live.map(r => ({ ...r, st: "cancel" }));
+  else if (alert.kind === "new") rows = live.map(r => ({ ...r, st: "new" }));
+  else {
+    rows = live.map(r => {
+      const d = dm[r.sku];
+      if (!d) return { ...r, st: "same" };
+      return d.from === 0 ? { ...r, st: "added" } : { ...r, st: "qty", from: d.from };
+    });
+    // Lines taken out are no longer in the order — show them struck through.
+    (alert.diff || []).filter(d => d.to === 0 && !live.some(r => r.sku === d.sku))
+      .forEach(d => rows.push({ sku: d.sku, name: d.name || _orderAlertName(d.sku), qty: 0, from: d.from, locs: [], st: "removed" }));
+    const rank = { added: 0, qty: 1, removed: 2, same: 3 };
+    rows.sort((a, b) => rank[a.st] - rank[b.st]);
+  }
+  const count = (st) => rows.filter(r => r.st === st).length;
+  const fields = alert.fields || [];
+  const pieces = rows.filter(r => r.st !== "removed").reduce((s, r) => s + (r.qty || 0), 0);
+
+  return (
+    <div className="ocd">
+      {alert.kind === "edit" && (
+        <div className="ocd-legend">
+          {count("added") > 0 && <span className="ocd-chip added">เพิ่มใหม่ {count("added")}</span>}
+          {count("qty") > 0 && <span className="ocd-chip qty">แก้จำนวน {count("qty")}</span>}
+          {count("removed") > 0 && <span className="ocd-chip removed">เอาออก {count("removed")}</span>}
+          {fields.length > 0 && <span className="ocd-chip field">แก้ข้อมูล {fields.length}</span>}
+          {count("same") > 0 && <span className="ocd-chip same">เหมือนเดิม {count("same")}</span>}
+        </div>
+      )}
+      {rows.length > 0 && (
+        <div className="ocd-sec">
+          <div className="ocd-sec-h">รายการสินค้า <span>{rows.filter(r => r.st !== "removed").length} รายการ · {pieces} ชิ้น</span></div>
+          <div className="ocd-rows">
+            {rows.map(r => (
+              <div key={r.sku + r.st} className={"ocd-row ocd-st-" + r.st}>
+                <span className="ocd-tag">{ORDER_CHANGE_TAG[r.st]}</span>
+                <div className="ocd-main">
+                  <div className="ocd-name">{r.name}</div>
+                  <div className="ocd-sku"><span className="mono">{r.sku}</span>{r.locs.length ? " · " + r.locs.join(", ") : ""}</div>
+                </div>
+                <div className="ocd-qty tnum">
+                  {r.st === "qty" ? <><s>{r.from}</s><span className="ocd-arrow">→</span><b>{r.qty}</b></>
+                    : r.st === "removed" ? <s>×{r.from}</s>
+                    : <b>×{r.qty}</b>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {fields.length > 0 && (
+        <div className="ocd-sec">
+          <div className="ocd-sec-h">ข้อมูลที่แก้ไข</div>
+          <div className="ocd-fields">
+            {fields.map(f => (
+              <div key={f.k} className="ocd-field">
+                <div className="ocd-flabel">{f.label}</div>
+                <div className="ocd-fvals">
+                  <span className="ocd-from">{String(f.from || "") || "(ว่าง)"}</span>
+                  <span className="ocd-arrow">→</span>
+                  <span className="ocd-to">{String(f.to || "") || "(ลบออก)"}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function _orderAlertKindOf(a) { return ORDER_ALERT_KIND[a.kind] || ORDER_ALERT_KIND.new; }
+
+/* Full-screen review of one alert — what the "ตรวจสอบ" button opens. */
+function OrderChangeReview({ alert, onClose, onOpen, mobile }) {
+  const k = _orderAlertKindOf(alert);
+  useEffectTrk(() => {
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+  return (
+    <>
+      <div className="ocr-backdrop no-print" onClick={onClose}/>
+      <div className={"ocr-modal no-print oa-" + alert.kind + (mobile ? " ocr-mobile" : "")} role="dialog" aria-modal="true">
+        <div className="ocr-head">
+          <div style={{ minWidth: 0 }}>
+            <div className="ocr-eyebrow"><span className="oa-tag">{k.tag}</span><span className="tnum">{_oaTime(alert.at)}</span></div>
+            <div className="ocr-id">{alert.short}</div>
+            <div className="oa-sub">{[alert.customer, alert.channel].filter(Boolean).join(" · ")}</div>
+          </div>
+          <button type="button" className="btn btn-ghost btn-icon" onClick={onClose} aria-label="ปิด"><Icons.X/></button>
+        </div>
+        <div className="ocr-body">
+          <div className="oa-msg"><Icons.Warn size={13}/><span>{k.msg}</span></div>
+          <OrderChangeDetail alert={alert}/>
+        </div>
+        <div className="ocr-foot">
+          {alert.kind !== "removed" && onOpen && (
+            <button type="button" className="btn" onClick={() => { onClose(); onOpen(alert); }}>
+              {alert.status === "picking" ? "ไปหน้าแพ็ค" : "เปิดออร์เดอร์"}
+            </button>
+          )}
+          <button type="button" className="btn btn-primary" onClick={() => { ackOrderAlert(alert.id); onClose(); }}>
+            <Icons.Check size={14}/> {alert.kind === "removed" ? "รับทราบ" : "ตรวจสอบแล้ว"}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* Inline version for the screens an order is worked on (mobile pick list, order
+   detail drawers): while an alert for this order is unacknowledged, show what
+   changed right above the work. */
+function OrderChangeBanner({ orderId }) {
+  const find = () => loadOrderAlerts().find(a => a.id === orderId) || null;
+  const [alert, setAlert] = useStateTrk(find);
+  useEffectTrk(() => {
+    const h = () => setAlert(find());
+    h();
+    window.addEventListener("ims-order-alerts-change", h);
+    window.addEventListener("ims-orders-change", h);
+    return () => {
+      window.removeEventListener("ims-order-alerts-change", h);
+      window.removeEventListener("ims-orders-change", h);
+    };
+  }, [orderId]);
+  if (!alert || alert.kind === "removed") return null;
+  const k = _orderAlertKindOf(alert);
+  return (
+    <div className={"ocb oa-" + alert.kind}>
+      <div className="ocb-head">
+        <span className="oa-tag">{k.tag}</span>
+        <span className="ocb-msg">{alert.kind === "new" ? "ตรวจสอบทุกรายการให้ตรงก่อนแพ็ค" : "รายการที่ถูกแก้ไขอยู่ด้านล่าง — เช็คสินค้าใหม่อีกครั้ง"}</span>
+      </div>
+      {alert.kind === "edit" && <OrderChangeDetail alert={alert}/>}
+      <button type="button" className="btn btn-primary btn-sm ocb-ack" onClick={() => ackOrderAlert(alert.id)}>
+        <Icons.Check size={13}/> ตรวจสอบแล้ว
+      </button>
+    </div>
+  );
+}
+
+/* One-line summary of an edit for the alert card ("เพิ่ม 1 · เอาออก 1 · ที่อยู่จัดส่ง"). */
+function _orderAlertSummary(a) {
+  const d = a.diff || [];
+  const parts = [];
+  const add = d.filter(x => x.from === 0).length, rem = d.filter(x => x.to === 0).length, qty = d.length - add - rem;
+  if (add) parts.push("เพิ่ม " + add);
+  if (qty) parts.push("แก้จำนวน " + qty);
+  if (rem) parts.push("เอาออก " + rem);
+  (a.fields || []).forEach(f => parts.push(f.label));
+  return parts;
+}
+
+/* Sticky alert stack for BOTH shells. `onOpen(alert)` routes to the order —
+   the shell decides where (desktop drawer / mobile pack view). Tapping a card's
+   ตรวจสอบ opens the full before/after review first. */
+function OrderAlerts({ onOpen, mobile }) {
+  const [list, setList] = useStateTrk(() => loadOrderAlerts());
+  const [collapsed, setCollapsed] = useStateTrk(false);
+  const [reviewId, setReviewId] = useStateTrk(null);
+  const [sound, setSound] = useStateTrk(() => orderAlertSoundOn());
+  const [perm, setPerm] = useStateTrk(() => ("Notification" in window) ? Notification.permission : "unsupported");
+  const countRef = useRefTrk(list.length);
+
+  useEffectTrk(() => {
+    startOrderAlertWatch();
+    const h = () => {
+      const next = loadOrderAlerts();
+      // A NEW alert re-opens a collapsed panel; acknowledging one doesn't.
+      if (next.length > countRef.current) setCollapsed(false);
+      countRef.current = next.length;
+      setList(next);
+    };
+    const sh = (e) => { if (e.key === ORDER_ALERTS_KEY) h(); };   // another tab acknowledged
+    window.addEventListener("ims-order-alerts-change", h);
+    window.addEventListener("storage", sh);
+    return () => {
+      window.removeEventListener("ims-order-alerts-change", h);
+      window.removeEventListener("storage", sh);
+    };
+  }, []);
+
+  if (!orderAlertsAllowed()) return null;
+  const reviewing = reviewId ? list.find(a => a.id === reviewId) : null;
+  const review = reviewing && (
+    <OrderChangeReview alert={reviewing} mobile={mobile} onClose={() => setReviewId(null)}
+      onOpen={(a) => { if (onOpen) onOpen(a); if (mobile) setCollapsed(true); }}/>
+  );
+  if (!list.length) return null;
+
+  const askPerm = () => {
+    try { Notification.requestPermission().then(p => setPerm(p)).catch(() => {}); } catch (e) {}
+  };
+  const toggleSound = () => { const v = !sound; setSound(v); setOrderAlertSound(v); if (v) _orderAlertChime(false); };
+
+  if (collapsed) {
+    return (
+      <>
+        <button type="button" className={"oa-pill no-print" + (mobile ? " oa-mobile" : "")} onClick={() => setCollapsed(false)}>
+          <Icons.Bell size={14}/> {list.length} ออร์เดอร์รอตรวจสอบ
+        </button>
+        {review}
+      </>
+    );
+  }
+
+  const shown = list.slice(0, 3);
+  return (
+    <>
+      <div className={"oa-wrap no-print" + (mobile ? " oa-mobile" : "")} role="alert" aria-live="assertive">
+        <div className="oa-head">
+          <span className="oa-head-ic"><Icons.Bell size={14}/></span>
+          <b>ตรวจสอบออร์เดอร์</b>
+          <span className="oa-count tnum">{list.length}</span>
+          <span style={{ flex: 1 }}/>
+          <button type="button" className="oa-ghost" onClick={toggleSound} title={sound ? "ปิดเสียงแจ้งเตือน" : "เปิดเสียงแจ้งเตือน"}>{sound ? "เสียง: เปิด" : "เสียง: ปิด"}</button>
+          <button type="button" className="oa-ghost oa-icon" onClick={() => setCollapsed(true)} title="ย่อ" aria-label="ย่อ"><Icons.Down size={13}/></button>
+        </div>
+        <div className="oa-body">
+          {shown.map(a => {
+            const k = _orderAlertKindOf(a);
+            const items = a.items || [];
+            const pieces = items.reduce((s, it) => s + (it.qty || 0), 0);
+            const summary = a.kind === "edit" ? _orderAlertSummary(a) : [];
+            return (
+              <div key={a.id} className={"oa-card oa-" + a.kind}>
+                <button type="button" className="oa-card-hit" onClick={() => setReviewId(a.id)}>
+                  <div className="oa-title">
+                    <span className="oa-tag">{k.tag}</span>
+                    <b className="oa-id">{a.short}</b>
+                    <span className="oa-time tnum">{_oaTime(a.at)}</span>
+                  </div>
+                  <div className="oa-sub">{[a.customer, a.channel].filter(Boolean).join(" · ")}{items.length ? " · " + items.length + " รายการ " + pieces + " ชิ้น" : ""}</div>
+                  {summary.length > 0 && (
+                    <div className="oa-summary">{summary.map((s, i) => <span key={i} className="oa-sumchip">{s}</span>)}</div>
+                  )}
+                  <div className="oa-msg"><Icons.Warn size={13}/><span>{k.msg}</span></div>
+                </button>
+                <div className="oa-actions">
+                  <button type="button" className="btn btn-sm" onClick={() => ackOrderAlert(a.id)}>รับทราบ</button>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => setReviewId(a.id)}>
+                    <Icons.Eye size={13}/> {a.kind === "edit" ? "ดูว่าแก้อะไร" : "ตรวจสอบ"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {(list.length > 1 || perm === "default") && (
+          <div className="oa-foot">
+            {list.length > 3 && <span>และอีก {list.length - 3} ออร์เดอร์</span>}
+            <span style={{ flex: 1 }}/>
+            {perm === "default" && <button type="button" className="oa-ghost" onClick={askPerm}>แจ้งเตือนตอนปิดหน้าจอ</button>}
+            {list.length > 1 && <button type="button" className="oa-ghost" onClick={ackAllOrderAlerts}>รับทราบทั้งหมด</button>}
+          </div>
+        )}
+      </div>
+      {review}
+    </>
+  );
+}
+
+Object.assign(window, { orderCustomerText, TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder,
+  OrderAlerts, OrderChangeBanner, OrderChangeDetail, startOrderAlertWatch, loadOrderAlerts, ackOrderAlert, ackAllOrderAlerts });
