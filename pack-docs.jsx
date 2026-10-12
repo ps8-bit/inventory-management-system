@@ -107,7 +107,14 @@ function openOrderFile(file) {
   const bin = atob(f.dataUrl.split(",")[1] || "");
   const arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-  const url = URL.createObjectURL(new Blob([arr], { type: f.type }));
+  const blob = new Blob([arr], { type: f.type });
+  // iOS: a blob opened in a new tab / downloaded REPLACES the installed app's page,
+  // and closing the PDF reloads the app — hand it to the share sheet instead.
+  if (typeof isIOSDevice === "function" && isIOSDevice()) {
+    deliverFile(blob, f.name || (f.type === "application/pdf" ? "label.pdf" : "label.jpg"));
+    return;
+  }
+  const url = URL.createObjectURL(blob);
   // Pop-ups are often blocked (installed PWA, in-app browsers, some phones), and
   // the CSP forbids framing a blob — so when the new tab is refused, download
   // the file instead; the phone/PC then opens it in its own viewer to print.
@@ -135,7 +142,8 @@ async function downloadOrderFile(file, fallbackName) {
   const arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   const blob = new Blob([arr], { type: f.type });
-  const phone = (typeof _pdIsPhone === "function") ? _pdIsPhone() : /Android|iPhone|iPad/i.test(navigator.userAgent);
+  if (typeof isIOSDevice === "function" && isIOSDevice()) { deliverFile(blob, name); return; }
+  const phone =(typeof _pdIsPhone === "function") ? _pdIsPhone() : /Android|iPhone|iPad/i.test(navigator.userAgent);
   if (phone && typeof File === "function" && navigator.canShare) {
     try {
       const fileObj = new File([blob], name, { type: f.type });
@@ -1273,7 +1281,7 @@ function printOrderFile(file) {
         const k = Math.min(size.w / im.naturalWidth, size.h / im.naturalHeight);
         const w = im.naturalWidth * k, h = im.naturalHeight * k;
         pdf.addImage(f.dataUrl, (/png/i.test(f.type) ? "PNG" : "JPEG"), (size.w - w) / 2, (size.h - h) / 2, w, h);
-        pdf.save(String(f.name || "label").replace(/\.[a-z0-9]+$/i, "").replace(/[/\\:*?"<>|]/g, "_") + "_" + size.id + ".pdf");
+        savePdf(pdf, String(f.name || "label").replace(/\.[a-z0-9]+$/i, "").replace(/[/\\:*?"<>|]/g, "_") + "_" + size.id + ".pdf");
       } catch (e) { _printPDHtml(img, size); }
     };
     im.onerror = () => _printPDHtml(img, size);
@@ -1436,7 +1444,7 @@ async function printLabelPages(pages, size, name) {
       pdf.addImage(img.dataUrl, img.fmt, (size.w - w) / 2, (size.h - h) / 2, w, h);
       added++;
     }
-    if (added) pdf.save(name + ".pdf");
+    if (added) savePdf(pdf, name + ".pdf");
     return added;
   }
   const html = pages.map((p, i) =>
