@@ -2901,6 +2901,68 @@ function packedOnDay(day) {
     .sort((a, b) => Date.parse(b.packedAt) - Date.parse(a.packedAt));
 }
 
+/* ── Pack home (พนักงานแพ็ค) — shared by desktop PackHome (screens.jsx) and
+   mobile MPackHome (handheld.jsx) so the two can never show different numbers.
+   Read-only: it moves no stock and changes no order. */
+const PACK_HOME_DAYS = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"];
+const PACK_HOME_MONTHS = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+function packHomeThaiDate(d) { return `วัน${PACK_HOME_DAYS[d.getDay()]}ที่ ${d.getDate()} ${PACK_HOME_MONTHS[d.getMonth()]} ${d.getFullYear() + 543}`; }
+// Avatar text: two letters for a Latin name ("PS"), else the first character
+// cluster (a Thai consonant with its marks — never a dangling vowel/tone mark).
+function packHomeInitials(name) {
+  const n = String(name || "").trim();
+  if (!n) return "?";
+  if (/^[A-Za-z0-9]/.test(n)) return n.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
+  try {
+    if (typeof Intl !== "undefined" && Intl.Segmenter) {
+      const it = new Intl.Segmenter("th", { granularity: "grapheme" }).segment(n)[Symbol.iterator]().next();
+      if (!it.done) return it.value.segment;
+    }
+  } catch (e) {}
+  return Array.from(n)[0];
+}
+// "loading" | "ok" | "failed" — set by dbInit / retryOrdersLoad (supabase.jsx).
+function packHomeLoadState() {
+  const s = window._DB_ORDERS_LOAD;
+  if (s === "loading" || s === "ok" || s === "failed") return s;
+  return Array.isArray(window._DB_ORDERS) ? "ok" : "loading";
+}
+function usePackHomeStats() {
+  const [tick, setTick] = React.useState(0);
+  const [load, setLoad] = React.useState(packHomeLoadState);
+  const [now, setNow] = React.useState(() => new Date());
+  React.useEffect(() => {
+    const refresh = () => setTick(t => t + 1);
+    const onLoad = () => { setLoad(packHomeLoadState()); refresh(); };
+    const evs = ["ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-products-change"];
+    evs.forEach(e => window.addEventListener(e, refresh));
+    window.addEventListener("ims-orders-load", onLoad);
+    // Roll "today" over at midnight / when the device wakes the app the next day.
+    const tickDay = () => setNow(prev => { const n = new Date(); return n.toDateString() === prev.toDateString() ? prev : n; });
+    const iv = setInterval(tickDay, 60000);
+    document.addEventListener("visibilitychange", tickDay);
+    return () => {
+      evs.forEach(e => window.removeEventListener(e, refresh));
+      window.removeEventListener("ims-orders-load", onLoad);
+      clearInterval(iv);
+      document.removeEventListener("visibilitychange", tickDay);
+    };
+  }, []);
+  const orders = React.useMemo(() => packQueue(), [tick]);
+  const progress = React.useMemo(() => loadPackProgress(), [tick]);
+  const packedToday = React.useMemo(() => packedOnDay(now).length, [tick, now]);
+  // Pieces still to pick — lines already ticked are in hand.
+  const pieces = React.useMemo(() => orders.reduce((n, o) =>
+    n + packLineTotals(packLinesForOrder(o), progress[o.id]).remaining, 0), [orders, progress]);
+  const late = React.useMemo(() => orders.filter(o => typeof packLateDays === "function" && packLateDays(o) > 0).length, [orders, now]);
+  const waves = Object.keys(progress).filter(k => k.indexOf("batch:") === 0);
+  // An order already in an open wave is picked there — opening it alone would
+  // fetch the same pieces twice (same rule as the pack screens).
+  const waveOf = {};
+  waves.forEach(id => ((progress[id] || {}).orderIds || []).forEach(oid => { waveOf[oid] = id; }));
+  return { load, known: load === "ok", now, orders, progress, packedToday, pieces, late, waves, waveOf };
+}
+
 /* Queue order — picked by the packer, remembered per device (two packers may
    work the queue differently). Every mode falls back to oldest-first so ties
    never shuffle between renders. */
@@ -4064,7 +4126,7 @@ Object.assign(window, {
   receiveLineShelf, receiveLinesWithoutShelf, buildReceiveReport, lastReceiveLoc, rememberReceiveLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
-  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packedRecent, packedOnDay, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
+  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packedRecent, packedOnDay, usePackHomeStats, packHomeThaiDate, packHomeInitials, packHomeLoadState, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
   loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, loadPackOrderNotes, packOrderNote, setPackOrderNote, markOrderTouched, orderTouchedRecently, editPackOrderNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,

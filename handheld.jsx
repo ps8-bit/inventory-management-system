@@ -296,67 +296,8 @@ function MNoAccess({ ctx }) {
    work at a glance + one tap into the queue. Read-only — it moves no stock and
    changes no order; it shows only the pack queue the role already sees, and no
    stock/sales figures. All classes are ph-* so no other screen is affected. */
-const PH_DAYS = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"];
-const PH_MONTHS = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
-function phThaiDate(d) { return `วัน${PH_DAYS[d.getDay()]}ที่ ${d.getDate()} ${PH_MONTHS[d.getMonth()]} ${d.getFullYear() + 543}`; }
-// Avatar text: two letters for a Latin name ("PS"), else the first character
-// cluster (a Thai consonant with its marks — never a dangling vowel/tone mark).
-function phInitials(name) {
-  const n = String(name || "").trim();
-  if (!n) return "?";
-  if (/^[A-Za-z0-9]/.test(n)) return n.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
-  try {
-    if (typeof Intl !== "undefined" && Intl.Segmenter) {
-      const it = new Intl.Segmenter("th", { granularity: "grapheme" }).segment(n)[Symbol.iterator]().next();
-      if (!it.done) return it.value.segment;
-    }
-  } catch (e) {}
-  return Array.from(n)[0];
-}
-// "loading" | "ok" | "failed" — set by dbInit / retryOrdersLoad (supabase.jsx).
-function phLoadState() {
-  const s = window._DB_ORDERS_LOAD;
-  if (s === "loading" || s === "ok" || s === "failed") return s;
-  return Array.isArray(window._DB_ORDERS) ? "ok" : "loading";
-}
-
 function MPackHome({ ctx }) {
-  const [tick, setTick] = useStateM(0);
-  const [load, setLoad] = useStateM(phLoadState);
-  const [now, setNow] = useStateM(() => new Date());
-  useEffectM(() => {
-    const refresh = () => setTick(t => t + 1);
-    const onLoad = () => { setLoad(phLoadState()); refresh(); };
-    const evs = ["ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-products-change"];
-    evs.forEach(e => window.addEventListener(e, refresh));
-    window.addEventListener("ims-orders-load", onLoad);
-    // Roll "today" over at midnight / when the phone wakes the app the next day.
-    const tickDay = () => setNow(prev => { const n = new Date(); return n.toDateString() === prev.toDateString() ? prev : n; });
-    const iv = setInterval(tickDay, 60000);
-    document.addEventListener("visibilitychange", tickDay);
-    return () => {
-      evs.forEach(e => window.removeEventListener(e, refresh));
-      window.removeEventListener("ims-orders-load", onLoad);
-      clearInterval(iv);
-      document.removeEventListener("visibilitychange", tickDay);
-    };
-  }, []);
-
-  const orders = useMemoM(() => (typeof packQueue === "function") ? packQueue() : [], [tick]);
-  const progress = useMemoM(() => (typeof loadPackProgress === "function") ? loadPackProgress() : {}, [tick]);
-  const packedToday = useMemoM(() => (typeof packedOnDay === "function") ? packedOnDay(now).length : 0, [tick, now]);
-  // Pieces still to pick — lines already ticked are in hand.
-  const pieces = useMemoM(() => orders.reduce((n, o) => {
-    const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
-    if (typeof packLineTotals === "function") return n + packLineTotals(lines, progress[o.id]).remaining;
-    return n + lines.reduce((s, l) => s + (l.qty || 0), 0);
-  }, 0), [orders, progress]);
-  const late = useMemoM(() => orders.filter(o => typeof packLateDays === "function" && packLateDays(o) > 0).length, [orders, now]);
-  const waves = Object.keys(progress).filter(k => k.indexOf("batch:") === 0);
-  // An order already in an open wave is picked there — opening it alone would
-  // fetch the same pieces twice (same rule as MPack).
-  const waveOf = {};
-  waves.forEach(id => ((progress[id] || {}).orderIds || []).forEach(oid => { waveOf[oid] = id; }));
+  const { load, known, now, orders, progress, packedToday, pieces, late, waves, waveOf } = usePackHomeStats();
   const next = orders.slice(0, 5);   // the queue's own order (packSortMode), untouched
 
   const name = (ctx.user && ctx.user.name) || "";
@@ -365,7 +306,6 @@ function MPackHome({ ctx }) {
   const canPack = typeof canOpenPage !== "function" || canOpenPage("pack");
   const openPack = () => ctx.push("pack");
   const openOrder = (o) => waveOf[o.id] ? ctx.push("pack-wave", { batchId: waveOf[o.id] }) : ctx.push("pack-order", { id: o.id });
-  const known = load === "ok";
   const empty = known && orders.length === 0;
 
   const tiles = [
@@ -381,9 +321,9 @@ function MPackHome({ ctx }) {
         <div className="ph-head-text">
           <div className="ph-eyebrow">ภาพรวมวันนี้</div>
           <div className="ph-hello">สวัสดี{firstName ? ", " + firstName : ""}</div>
-          <div className="ph-date">{phThaiDate(now)}</div>
+          <div className="ph-date">{packHomeThaiDate(now)}</div>
         </div>
-        <div className="ph-avatar" aria-hidden="true">{phInitials(name)}</div>
+        <div className="ph-avatar" aria-hidden="true">{packHomeInitials(name)}</div>
       </div>
 
       {load === "loading" && (
@@ -549,7 +489,7 @@ function MPackPushCard() {
     ? ["เปิดเว็บนี้ใน Safari", "แตะปุ่มแชร์ (สี่เหลี่ยมมีลูกศรขึ้น)", "เลือก \"เพิ่มไปยังหน้าจอโฮม\"", "เปิดแอปจากไอคอน แล้วแตะ \"เปิด\" ที่การ์ดนี้"]
     : ios
       ? ["เปิดแอป การตั้งค่า ของ iPhone", "แตะ การแจ้งเตือน → เลือกแอป PS STOCK", "เปิด \"อนุญาตการแจ้งเตือน\"", "กลับมาที่แอป แล้วแตะ \"เปิด\""]
-      : ["แตะไอคอนแม่กุญแจ/ⓘ หน้าแถบที่อยู่ (หรือ ตั้งค่า → แอป → Chrome/แอปนี้)", "เลือก การแจ้งเตือน → อนุญาต", "กลับมาที่แอป แล้วแตะ \"เปิด\""];
+      : ["แตะ/คลิกไอคอนแม่กุญแจ/ⓘ หน้าแถบที่อยู่ (มือถือ: หรือ ตั้งค่า → แอป → Chrome/แอปนี้)", "เลือก การแจ้งเตือน → อนุญาต", "กลับมาที่แอป แล้วแตะ \"เปิด\""];
   const canOn = st === "off" || st === "denied";
 
   return (
