@@ -786,7 +786,7 @@ function _printPDHtml(innerHtml, size, beforePrint) {
   // no anti-alias tinting, and the Thai font FIRST in the stack (iOS fallback).
   style.textContent =
     "#__pdPrintRoot{display:none}" +
-    "@page{size:" + w + "mm " + h + "mm;margin:0}" +
+    "@page{size:" + w + "mm " + h + "mm;margin:" + ((size && size.margin) || 0) + "mm}" +
     "@media print{html,body{margin:0!important;padding:0!important;background:#fff!important}" +
     "body>*{display:none!important}body>#__pdPrintRoot{display:block!important}" +
     "#__pdPrintRoot,#__pdPrintRoot *{letter-spacing:normal!important;color:#000!important;font-family:'IBM Plex Sans Thai','Sarabun','Leelawadee UI',Tahoma,sans-serif;" +
@@ -1003,6 +1003,160 @@ function printOrderAddress(order, lines, sizeId) {
   }
   _printPDHtml(html, size, fitPackLabel);
 }
+/* ใบรายการแพ็ค — an A4 check sheet the packer prints and ticks by hand: one
+   block per order, in the order given (every line with its photo, shelf, qty
+   and a tick box, the order's total pieces, the same reminders the label
+   prints). Lines come from packLinesForOrder, so the
+   shelf is the one the sale actually debited — same as the screen. A4 is the
+   phone print sheet's default paper, so no exact-size PDF path is needed. */
+function buildPackChecklistHtml(orders) {
+  const list = (orders || []).filter(Boolean).map(o => ({
+    o, lines: ((typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []).filter(l => (Number(l.qty) || 0) > 0)
+  }));
+  const pcsOf = (ls) => ls.reduce((n, l) => n + (Number(l.qty) || 0), 0);
+  const allPcs = list.reduce((n, x) => n + pcsOf(x.lines), 0);
+  const shelf = (l) => {
+    if (!l.loc || l.loc === "-") return "—";
+    const p = l.parts || {};
+    const path = [p.building, p.floor].filter(Boolean).map(_escPD).join(" › ");
+    return `<b>${_escPD(p.pos || l.loc)}</b>${path ? `<div style="font-size:8.5pt">${path}</div>` : ""}`;
+  };
+  const box = `<span style="display:inline-block;width:4.2mm;height:4.2mm;border:0.35mm solid #000;border-radius:0.6mm;vertical-align:middle"></span>`;
+  const imgs = (typeof loadProductImages === "function") ? loadProductImages() : {};
+  const photo = (sku) => {
+    const url = (typeof resolveProductImage === "function") ? resolveProductImage(sku, imgs) : "";
+    return url
+      ? `<img src="${_escPD(url)}" alt="" style="width:16mm;height:16mm;object-fit:cover;border:0.2mm solid #000;border-radius:1mm;display:block">`
+      : `<div style="width:16mm;height:16mm;border:0.2mm dashed #000;border-radius:1mm;font-size:7pt;display:flex;align-items:center;justify-content:center">ไม่มีรูป</div>`;
+  };
+  const th = "text-align:left;font-size:9.5pt;font-weight:700;padding:1.4mm 1.6mm;border-bottom:0.45mm solid #000";
+  const td = "font-size:10.5pt;padding:1.6mm;border-bottom:0.2mm solid #000;vertical-align:middle";
+  const num = "text-align:right;white-space:nowrap";
+  const table = (rows) =>
+    `<table style="width:100%;border-collapse:collapse;margin-top:1.5mm">` +
+      `<thead><tr><th style="${th};width:6mm">✓</th><th style="${th};width:6mm">#</th><th style="${th};width:17mm">รูป</th><th style="${th}">รหัส (SKU)</th><th style="${th}">ชื่อสินค้า</th><th style="${th}">ตำแหน่ง</th>` +
+      `<th style="${th};${num}">จำนวน</th></tr></thead><tbody>` +
+      rows.map((l, i) =>
+        `<tr style="page-break-inside:avoid"><td style="${td}">${box}</td><td style="${td}">${i + 1}</td><td style="${td}">${photo(l.sku)}</td>` +
+        `<td style="${td};font-weight:700;white-space:nowrap">${_escPD(l.sku)}</td><td style="${td}">${_escPD(l.name)}</td>` +
+        `<td style="${td};white-space:nowrap">${shelf(l)}</td>` +
+        `<td style="${td};${num};font-size:13pt;font-weight:700">${_escPD(l.qty)}</td></tr>`).join("") +
+      `</tbody></table>`;
+  const pfOf = (o) => (typeof packPlatformOf === "function") ? packPlatformOf(o) : (o.platform || o.channel || "อื่นๆ");
+  const byPf = Object.entries(list.reduce((m, x) => { const k = pfOf(x.o); m[k] = (m[k] || 0) + 1; return m; }, {}));
+  const now = new Date().toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" });
+  const head =
+    `<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:4mm;border-bottom:0.6mm solid #000;padding-bottom:2mm">` +
+      `<div><div style="font-size:17pt;font-weight:700">ใบรายการแพ็คสินค้า</div><div style="font-size:9.5pt">PS TACTICAL · พิมพ์ ${_escPD(now)}</div></div>` +
+      `<div style="text-align:right"><div style="font-size:11pt;font-weight:700">${list.length} ออร์เดอร์ · รวม ${allPcs} ชิ้น</div>` +
+        (byPf.length > 1 ? `<div style="font-size:9.5pt;margin-top:0.5mm">${byPf.map(([k, n]) => _escPD(k) + " " + n).join(" · ")}</div>` : "") + `</div>` +
+    `</div>`;
+  const blocks = list.map(({ o, lines }, oi) => {
+    const ref = (typeof orderShortId === "function") ? orderShortId(o) : o.id;
+    const pf = pfOf(o);
+    const who = (typeof isLabelPlaceholderName === "function" && isLabelPlaceholderName(o.customer)) ? "" : (o.customer || "");
+    const notes = packLabelNotes(o, lines);
+    const meta = [o.platformOrderNo ? "คำสั่งซื้อ " + o.platformOrderNo : "", o.carrier ? "ขนส่ง " + o.carrier : ""].filter(Boolean);
+    return `<div style="margin-top:5mm;border:0.45mm solid #000;border-radius:1.5mm;padding:2.5mm 3mm;page-break-inside:avoid">` +
+      `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:3mm">` +
+        `<div style="font-size:13pt;font-weight:700">${list.length > 1 ? (oi + 1) + ". " : ""}` +
+          `<span style="display:inline-block;border:0.6mm solid #000;font-size:11pt;padding:0 2mm;border-radius:1mm;margin-right:1.5mm">${_escPD(pf)}</span>${_escPD(ref)}${who ? " · " + _escPD(who) : ""}</div>` +
+        `<div style="font-size:12pt;font-weight:700;white-space:nowrap">${lines.length} รายการ · ${pcsOf(lines)} ชิ้น</div></div>` +
+      (meta.length ? `<div style="font-size:9.5pt">${meta.map(_escPD).join(" · ")}</div>` : "") +
+      (lines.length ? table(lines) : `<div style="font-size:10pt;margin-top:1.5mm">— ไม่มีรายการสินค้าในระบบ (ดูใบปะหน้า) —</div>`) +
+      (notes.length ? `<div style="margin-top:2mm;border:0.45mm dashed #000;padding:1.5mm 2mm;font-size:10pt;font-weight:700;white-space:pre-line">` +
+        notes.map(n => `📌 ${_escPD(n.tag)}: ${_escPD(n.text)}`).join("\n") + `</div>` : "") +
+      `<div style="display:flex;gap:6mm;margin-top:3mm;font-size:9.5pt">` +
+        ["ผู้หยิบ", "ผู้แพ็ค", "ผู้ตรวจ"].map(t => `<span style="flex:1">${t} ________________</span>`).join("") +
+      `</div></div>`;
+  }).join("");
+  return `<div style="width:100%;box-sizing:border-box;line-height:1.35;font-weight:500">${head}${blocks}</div>`;
+}
+function printPackChecklist(orders, pushToast) {
+  const list = (orders || []).filter(Boolean);
+  if (!list.length) { (pushToast || _pdToast)("ไม่มีออร์เดอร์ให้พิมพ์"); return; }
+  _printPDHtml(buildPackChecklistHtml(list), { w: 210, h: 297, margin: 10 });
+}
+
+/* Preview first, then print — opened from ANY order list (pack queue + packed,
+   Outbound, Tracking, mobile). Self-mounting (its own root on <body>) so no
+   shell has to host it; _printPDHtml hides every other body child on paper,
+   this overlay included. The paper is laid out at real A4 width and zoomed
+   down to fit a phone, so what's on screen is what prints. */
+let _pclRoot = null, _pclHost = null, _pclClose = null;
+function openPackChecklist(orders, pushToast) {
+  const list = (orders || []).filter(Boolean);
+  if (!list.length) { (pushToast || _pdToast)("ไม่มีออร์เดอร์ให้เปิด"); return; }
+  // Every line + photo is built at once — hundreds of orders can stall a phone.
+  if (list.length > 100 && !confirm(`เปิดใบรายการ ${list.length} ออร์เดอร์?
+จำนวนมากอาจใช้เวลาสักครู่ (เลือกเฉพาะบางออร์เดอร์ได้)`)) return;
+  if (!_pclHost) {
+    _pclHost = document.createElement("div");
+    _pclHost.id = "__pclHost";
+    document.body.appendChild(_pclHost);
+    _pclRoot = ReactDOM.createRoot(_pclHost);
+  }
+  if (_pclClose) _pclClose(true);   // reopening replaces the open one (keeps its history entry)
+  // The phone's back button must close the sheet, not change the screen under
+  // it — same same-URL history entry as openProductImageViewer.
+  let closed = false, pushed = false;
+  const onPop = () => teardown();
+  const teardown = () => {
+    if (closed) return;
+    closed = true; _pclClose = null;
+    window.removeEventListener("popstate", onPop);
+    _pclRoot.render(null);
+  };
+  const close = (keepEntry) => {
+    if (closed) return;
+    const ours = pushed && history.state && history.state.__imsPackList;
+    teardown();
+    if (ours && !keepEntry) history.back();
+  };
+  _pclClose = close;
+  const reuse = !!(history.state && history.state.__imsPackList);
+  try {
+    if (!reuse) history.pushState({ ...(history.state || {}), __imsPackList: 1 }, "");
+    pushed = true; window.addEventListener("popstate", onPop);
+  } catch (e) {}
+  _pclRoot.render(<PackChecklistPreview key={Date.now()} orders={list} pushToast={pushToast} onClose={() => close(false)}/>);
+}
+function PackChecklistPreview({ orders, pushToast, onClose }) {
+  const boxRef = useRefPD(null);
+  const [zoom, setZoom] = useStatePD(1);
+  const html = React.useMemo(() => buildPackChecklistHtml(orders), [orders]);
+  const pcs = React.useMemo(() => orders.reduce((n, o) => n + packLinesForOrder(o).reduce((m, l) => m + (Number(l.qty) || 0), 0), 0), [orders]);
+  useEffectPD(() => {
+    const fit = () => { const w = boxRef.current ? boxRef.current.clientWidth - 24 : 794; setZoom(Math.min(1, Math.max(0.3, w / 794))); };
+    fit();
+    const esc = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("resize", fit);
+    window.addEventListener("keydown", esc);
+    return () => { window.removeEventListener("resize", fit); window.removeEventListener("keydown", esc); };
+  }, []);
+  return (
+    <div role="dialog" aria-modal="true" aria-label="ใบรายการแพ็คสินค้า" onClick={onClose}
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom))" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 860, height: "100%", maxHeight: "100%", display: "flex", flexDirection: "column", background: "var(--surface)", color: "var(--fg)", borderRadius: 14, overflow: "hidden", boxShadow: "var(--shadow-lg)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: "1px solid var(--line, var(--border))" }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>ใบรายการแพ็คสินค้า</div>
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>{orders.length} ออร์เดอร์ · รวม {pcs} ชิ้น</div>
+          </div>
+          <button className="btn btn-primary" onClick={() => printPackChecklist(orders, pushToast)}><Icons.Print size={15}/> พิมพ์</button>
+          <button className="btn btn-ghost btn-icon" onClick={onClose} aria-label="ปิด"><Icons.X size={16}/></button>
+        </div>
+        <div ref={boxRef} style={{ flex: 1, overflow: "auto", background: "var(--surface-2)", padding: 12, WebkitOverflowScrolling: "touch" }}>
+          <div style={{ zoom, width: 794, margin: "0 auto", background: "#fff", color: "#000", padding: 38, boxSizing: "border-box", borderRadius: 4, boxShadow: "0 1px 4px rgba(0,0,0,.15)",
+            fontFamily: "'IBM Plex Sans Thai','Sarabun','Leelawadee UI',Tahoma,sans-serif", letterSpacing: "normal" }}
+            dangerouslySetInnerHTML={{ __html: html }}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* Shrink the recipient block step by step until nothing spills off the paper
    (floor 55% — still bigger than the sender/item text at that point). The
    root is display:none on screen, so measure it off-screen at real size. */
@@ -2014,7 +2168,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
-  packRecipientFor, printOrderAddress, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
+  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });

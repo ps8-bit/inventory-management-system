@@ -986,11 +986,12 @@ function MOutbound({ ctx }) {
           if (selecting && selectedCount > 0) {
             list = selectedIds.map(id => filtered.find(o => o.id === id)).filter(Boolean);
           } else {
-            list = filtered.filter(o => o.status === "picking");
+            list = filtered;   // ทั้งหมดในแท็บ/ตัวกรองนี้
           }
-          if (!list.length) { ctx.pushToast("ไม่มีออร์เดอร์ที่ต้องหยิบ"); return; }
-          if (typeof openPickListWindow === "function") openPickListWindow(list, ctx.pushToast);
-        }}><Icons.Print size={14}/></button>
+          if (!list.length) { ctx.pushToast("ไม่มีออร์เดอร์ให้พิมพ์"); return; }
+          if (typeof openPackChecklist === "function") openPackChecklist(list, ctx.pushToast);
+          else if (typeof openPickListWindow === "function") openPickListWindow(list, ctx.pushToast);
+        }} aria-label="พิมพ์ใบรายการ" title={selecting && selectedCount > 0 ? "พิมพ์ใบรายการที่เลือก" : "พิมพ์ใบรายการทั้งหมด"}><Icons.Print size={14}/></button>
         <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)}>
           {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
         </button>
@@ -1119,6 +1120,7 @@ function MOutbound({ ctx }) {
         <div className="m-bulk-bar">
           <span style={{ width: 26, height: 26, borderRadius: 999, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600 }} className="tnum">{selectedCount}</span>
           <span style={{ fontSize: 12, flex: 1 }}>เลือก {selectedCount} ออร์เดอร์</span>
+          {typeof openPackChecklist === "function" && <button className="m-action" aria-label="พิมพ์ใบรายการ" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => openPackChecklist(filtered.filter(o => selected[o.id]), ctx.pushToast)}><Icons.Print size={14}/></button>}
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkMenu(bulkMenu === "status" ? null : "status")}><Icons.Truck size={14}/></button>
           <button className="m-action" style={{ background: "rgba(90,180,255,0.3)", color: "white", width: 36, height: 36 }} title="ฉลากของออร์เดอร์ที่เลือก" onClick={openSelectedLabels}><Icons.Tag size={14}/></button>
           {canDeleteData() && <button className="m-action" style={{ background: "rgba(255,170,60,0.35)", color: "white", width: 36, height: 36 }} title="ยกเลิก + คืนสต็อก" onClick={bulkCancelRestock}><Icons.Refresh size={14}/></button>}
@@ -6897,6 +6899,11 @@ function MPack({ ctx }) {
             {selecting ? <Icons.X size={16}/> : <Icons.Check size={16}/>}
           </button>
         )}
+        {view === "open" && !selecting && visible.length > 0 && typeof openPackChecklist === "function" && (
+          <button className="m-action" onClick={() => openPackChecklist(visible.map(r => r.o), ctx.pushToast)} aria-label="พิมพ์ใบรายการ" title="พิมพ์ใบรายการ (ทุกออร์เดอร์ที่แสดง)">
+            <Icons.Print size={16}/>
+          </button>
+        )}
         {!selecting && typeof PackLabelSettings === "function" && canEditPackLabel() && (
           <button className={"m-action" + (labelCfg ? " accent" : "")} onClick={() => setLabelCfg(v => !v)} aria-label="ตั้งค่าใบปะหน้า" title="ตั้งค่าใบปะหน้า (ทุกใบ)">
             <Icons.Setting size={16}/>
@@ -6920,7 +6927,9 @@ function MPack({ ctx }) {
 
         {view === "done" && !selecting ? (
           <>
-            <div className="mp-section-head"><span>แพ็คเสร็จใน 3 วันล่าสุด</span></div>
+            <div className="mp-section-head"><span>แพ็คเสร็จใน 3 วันล่าสุด</span>
+              {packed.length > 0 && typeof openPackChecklist === "function" && <button type="button" className="m-chip" onClick={() => openPackChecklist(packed, ctx.pushToast)}><Icons.Print size={12}/> พิมพ์ทั้งหมด</button>}
+            </div>
             <div className="mp-cards">
               {packed.map(o => (
                 <button key={o.id} type="button" className="mp-card" onClick={() => ctx.push("pack-order", { id: o.id })}>
@@ -7046,6 +7055,11 @@ function MPack({ ctx }) {
                 <button className="m-btn-big dark" onClick={startWave}>
                   <Icons.Box size={18}/> เริ่มหยิบรวม {selIds.length} ออร์เดอร์
                 </button>
+                {typeof openPackChecklist === "function" && (
+                  <button className="m-btn-big outline" style={{ marginTop: 8 }} onClick={() => openPackChecklist(rows.filter(r => sel[r.o.id]).map(r => r.o), ctx.pushToast)}>
+                    <Icons.Print size={18}/> พิมพ์ใบรายการ {selIds.length} ออร์เดอร์
+                  </button>
+                )}
               </div>
             )}
           </>
@@ -7193,6 +7207,7 @@ function MPackOrder({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub mono">{order.id}</div>
+        {typeof openPackChecklist === "function" && <button className="m-action" onClick={() => openPackChecklist([order], ctx.pushToast)} aria-label="พิมพ์ใบรายการ" title="พิมพ์ใบรายการ"><Icons.Print size={15}/></button>}
         {!isPacked && <button className={"m-action" + (camOpen ? " accent" : "")} onClick={() => setCamOpen(v => !v)} title="สแกนเพื่อหยิบ"><Icons.Camera size={15}/></button>}
       </div>
       <div className="m-content">
@@ -7451,6 +7466,7 @@ function MPackWave({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub">หยิบรวม {orders.length} ออร์เดอร์</div>
+        {typeof openPackChecklist === "function" && <button className="m-action" onClick={() => openPackChecklist(orders, ctx.pushToast)} aria-label="พิมพ์ใบรายการ" title="พิมพ์ใบรายการ"><Icons.Print size={15}/></button>}
         {stage === "pick" && <button className={"m-action" + (camOpen ? " accent" : "")} onClick={() => setCamOpen(v => !v)} title="สแกนเพื่อหยิบ"><Icons.Camera size={15}/></button>}
         <button className="m-action" onClick={abandon} title="ยกเลิกรอบนี้"><Icons.Trash size={14}/></button>
       </div>
@@ -8488,6 +8504,7 @@ function MTracking({ ctx }) {
         <button className="m-action" onClick={() => selecting ? clear() : setSelecting(true)}>
           {selecting ? <Icons.X size={14}/> : <Icons.Check size={14}/>}
         </button>
+        {!selecting && typeof openPackChecklist === "function" && <button className="m-action" aria-label="พิมพ์ใบรายการทั้งหมด" title="พิมพ์ใบรายการทั้งหมด" onClick={() => openPackChecklist(sorted, ctx.pushToast)}><Icons.Print size={14}/></button>}
         {!selecting && <button className="m-action accent" onClick={() => setSlipOpen(true)}><Icons.Camera size={14}/></button>}
         {!selecting && <button className="m-action accent" onClick={() => setShareOpen(true)}><Icons.Copy size={14}/></button>}
       </div>
@@ -8556,6 +8573,7 @@ function MTracking({ ctx }) {
         <div className="m-bulk-bar">
           <span style={{ width: 26, height: 26, borderRadius: 999, background: "var(--accent)", color: "#fff", display: "grid", placeItems: "center", fontSize: 12, fontWeight: 600 }} className="tnum">{selCount}</span>
           <span style={{ fontSize: 12, flex: 1 }}>เลือก {selCount}</span>
+          {typeof openPackChecklist === "function" && <button className="m-action" aria-label="พิมพ์ใบรายการ" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => openPackChecklist(sorted.filter(o => selected[o.id]), ctx.pushToast)}><Icons.Print size={14}/></button>}
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkMenu(bulkMenu === "status" ? null : "status")}><Icons.Truck size={14}/></button>
           <button className="m-action" style={{ background: "rgba(255,255,255,0.15)", color: "white", width: 36, height: 36 }} onClick={() => setBulkMenu(bulkMenu === "carrier" ? null : "carrier")}><Icons.Tag size={14}/></button>
           {canDeleteData() && <button className="m-action" style={{ background: "rgba(255,90,90,0.3)", color: "white", width: 36, height: 36 }} onClick={bulkDelete}><Icons.Trash size={14}/></button>}

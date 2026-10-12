@@ -660,6 +660,13 @@ function TrackingPage({ pushToast, store, focus }) {
             exportOrdersCsv(sorted, `tracking-${TODAY_ISO}.csv`);
             pushToast(`ส่งออก ${sorted.length} ออร์เดอร์`);
           }}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
+          {typeof openPackChecklist === "function" && (() => {
+            // Only ticked rows the current filter still shows — the count must match the sheet.
+            const picked = sorted.filter(o => selected[o.id]);
+            return <button className="btn" onClick={() => openPackChecklist(picked.length ? picked : sorted, pushToast)}>
+              <Icons.Print size={14}/> {picked.length ? `พิมพ์ใบรายการ (${picked.length})` : `พิมพ์ใบรายการทั้งหมด (${sorted.length})`}
+            </button>;
+          })()}
           <button className="btn btn-primary" onClick={() => setSlipOpen(true)}><Icons.Camera size={14}/> สแกนสลิป</button>
           <button className="btn btn-accent" onClick={() => setShareOpen(true)}><Icons.Copy size={14}/> ลิงก์ค้นหาของลูกค้า</button>
         </div>
@@ -806,6 +813,7 @@ function TrackingPage({ pushToast, store, focus }) {
                         <Icons.Truck size={13}/> ส่งแล้ว
                       </button>
                     )}
+                    {typeof openPackChecklist === "function" && <Icons.Print size={14} style={{ color: "var(--muted)", cursor: "pointer", verticalAlign: "middle", marginRight: 10 }} onClick={(e) => { e.stopPropagation(); openPackChecklist([o], pushToast); }} aria-label="ใบรายการสินค้า"/>}
                     <Icons.Edit size={14} style={{ color: "var(--muted)", cursor: "pointer", verticalAlign: "middle" }} onClick={() => setEdit(o)}/>
                   </td>
                 </tr>
