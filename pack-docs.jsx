@@ -1151,8 +1151,19 @@ function openPackChecklist(orders, pushToast) {
 function PackChecklistPreview({ orders, pushToast, onClose }) {
   const boxRef = useRefPD(null);
   const [zoom, setZoom] = useStatePD(1);
-  const html = React.useMemo(() => buildPackChecklistHtml(orders), [orders]);
-  const pcs = React.useMemo(() => orders.reduce((n, o) => n + packLinesForOrder(o).reduce((m, l) => m + (Number(l.qty) || 0), 0), 0), [orders]);
+  // Product photos (cloud img:* rows, Woo catalog) and shelves load in the
+  // BACKGROUND after start-up — a sheet opened early showed "ไม่มีรูป" while
+  // the print a moment later had them. Rebuild whenever that data lands.
+  const [rev, setRev] = useStatePD(0);
+  useEffectPD(() => {
+    const evs = ["ims-images-change", "ims-woo-catalog-change", "ims-products-change", "ims-product-locs-change", "ims-labels-change"];
+    let t = 0;
+    const bump = () => { clearTimeout(t); t = setTimeout(() => setRev(r => r + 1), 150); };
+    evs.forEach(ev => window.addEventListener(ev, bump));
+    return () => { clearTimeout(t); evs.forEach(ev => window.removeEventListener(ev, bump)); };
+  }, []);
+  const html = React.useMemo(() => buildPackChecklistHtml(orders), [orders, rev]);
+  const pcs = React.useMemo(() => orders.reduce((n, o) => n + packLinesForOrder(o).reduce((m, l) => m + (Number(l.qty) || 0), 0), 0), [orders, rev]);
   useEffectPD(() => {
     const fit = () => { const w = boxRef.current ? boxRef.current.clientWidth - 24 : 794; setZoom(Math.min(1, Math.max(0.3, w / 794))); };
     fit();
