@@ -940,6 +940,8 @@ async function _rtReloadOrders() {
   // the order-alert watcher report every waiting order as cancelled.
   if (fresh && !fresh.length && (window._DB_ORDERS || []).length) return;
   if (fresh) window._DB_ORDERS = fresh;
+  // A later successful reload clears an earlier failed load (pack home's error card).
+  if (fresh && window._DB_ORDERS_LOAD === 'failed' && Array.isArray(window._DB_LABELS)) _setOrdersLoadState('ok');
   // remote:true = this came from ANOTHER device (or a catch-up) — the order-alert
   // watcher only alerts on these; local writes fire the plain event.
   window.dispatchEvent(new CustomEvent('ims-orders-change', { detail: { remote: true } }));
@@ -1245,7 +1247,40 @@ async function lineBotPreview(command) {
    Loads all data from Supabase into global
    window._DB_* caches and PRODUCTS array.
    ═══════════════════════════════════════════ */
+/* Whether the order data the pack screens count from actually arrived.
+   "loading" | "ok" | "failed" — a failed load falls back to the cached copy,
+   so a screen that says "ไม่มีออร์เดอร์" must check this first. */
+function _setOrdersLoadState(st) {
+  window._DB_ORDERS_LOAD = st;
+  window.dispatchEvent(new CustomEvent('ims-orders-load', { detail: st }));
+}
+/* Read-only retry for the pack home's "ลองใหม่": reloads orders, labels and
+   pack progress through the same guarded paths realtime uses. Writes nothing. */
+async function retryOrdersLoad() {
+  _setOrdersLoadState('loading');
+  try {
+    const [orders, labels, pack] = await Promise.all([dbLoadOrders(), dbLoadLabels(), dbLoadState('pack_progress')]);
+    if (orders && !(orders.length === 0 && (window._DB_ORDERS || []).length)) {
+      window._DB_ORDERS = orders;
+      window.dispatchEvent(new CustomEvent('ims-orders-change', { detail: { remote: true } }));
+    }
+    if (labels && !(labels.length === 0 && (window._DB_LABELS || []).length)) {
+      window._DB_LABELS = labels;
+      window.dispatchEvent(new CustomEvent('ims-labels-change', { detail: { remote: true } }));
+    }
+    if (pack != null) {
+      window._DB_PACK_PROGRESS = pack;
+      window.dispatchEvent(new CustomEvent('ims-pack-change', { detail: { remote: true } }));
+    }
+    _setOrdersLoadState(orders && labels ? 'ok' : 'failed');
+  } catch (e) {
+    console.error('[DB] retry orders load:', e);
+    _setOrdersLoadState('failed');
+  }
+}
+
 async function dbInit() {
+  _setOrdersLoadState('loading');
   try {
     const [products, orders, bundles, labels, storeSettings, auditLog, categories, locations, stockAdj, orderOverrides, wooCatalog, rolePerms, productLocs, packProgress, packLocNotes, packOrderNotes] = await Promise.all([
       dbLoadProducts(),
@@ -1439,6 +1474,7 @@ async function dbInit() {
       try { localStorage.setItem('ims_labels', JSON.stringify(merged)); } catch (e) {}
     }
 
+    _setOrdersLoadState(orders && labels ? 'ok' : 'failed');
     setupRealtimeSync();
     console.log('[DB] ✓ Initialized —',
       (products?.length  ?? 0), 'products,',
@@ -1449,6 +1485,7 @@ async function dbInit() {
     return true;
   } catch (err) {
     console.error('[DB] init failed:', err);
+    _setOrdersLoadState('failed');
     return false;
   }
 }
@@ -1542,6 +1579,7 @@ async function downloadBackup() {
 }
 
 Object.assign(window, {
+  retryOrdersLoad,
   sb, readProductNameFromImage, resolveWebImages, buildBackupSnapshot, downloadBackup,
   dbInit, setupRealtimeSync, refreshLiveData,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
