@@ -2596,6 +2596,18 @@ function issueShipFields(ship) {
    stock back while the sale stayed on the books. An override `restockedAt`
    stamp plus the commit latch make a second tap / second device a no-op.
    Returns { ok, restocked:[ids], skipped:[ids], blocked?, pieces }. */
+/* What a cancel may put back: only lines a sale really debited — the order's own
+   lineItems (each carries the shelf it left) plus เพิ่มรายการ lines. A label-only
+   order (typed in the label editor) never moved stock, so restocking its label
+   items would create stock out of nothing; it gets no lines and is skipped. */
+function restockLinesForOrder(order) {
+  if (!order) return [];
+  const own = Array.isArray(order.lineItems) ? order.lineItems.filter(li => li && li.sku) : [];
+  const extra = Array.isArray(order.addedItems) ? order.addedItems.filter(li => li && li.sku) : [];
+  if (!own.length && !extra.length) return [];
+  return packLinesForOrder(order);
+}
+
 async function cancelOrdersAndRestock(orders, reasonNote) {
   const list = (Array.isArray(orders) ? orders : []).filter(Boolean);
   const out = { ok: true, restocked: [], skipped: [], pieces: 0 };
@@ -2607,7 +2619,7 @@ async function cancelOrdersAndRestock(orders, reasonNote) {
   const todo = [];
   list.forEach(o => {
     if (overrides[o.id] && overrides[o.id].restockedAt) { out.skipped.push(o.id); return; }
-    const got = packLinesForOrder(o);
+    const got = restockLinesForOrder(o);
     if (!got.length) { out.skipped.push(o.id); return; }
     got.forEach(l => lines.push({ sku: l.sku, qty: l.qty, loc: l.loc }));
     todo.push(o);
@@ -4208,7 +4220,7 @@ Object.assign(window, {
   receiveLineShelf, receiveLinesWithoutShelf, buildReceiveReport, lastReceiveLoc, rememberReceiveLoc,
   addBuilding, renameBuilding, removeBuilding, addFloor, renameFloor, removeFloor,
   addPosition, renamePosition, removePosition,
-  packKey, packLocRank, packLinesForOrder, packLinesForOrders, packQueue, packedRecent, packedOnDay, usePackHomeStats, packHomeThaiDate, packHomeInitials, packHomeLoadState, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
+  packKey, packLocRank, packLinesForOrder, restockLinesForOrder, packLinesForOrders, packQueue, packedRecent, packedOnDay, usePackHomeStats, packHomeThaiDate, packHomeInitials, packHomeLoadState, packAltPositions, PACK_SORTS, packSortMode, setPackSortMode, packSortOrders, packOrderTime,
   loadPackProgress, packEntry, savePackEntry, clearPackEntry, newPackBatchId, packLocNote, packNoteLocOk, setPackLocNote, editPackLocNote, loadPackOrderNotes, packOrderNote, setPackOrderNote, markOrderTouched, orderTouchedRecently, editPackOrderNote, canEditPackLocNotes, loadPackLocNotes, packLineTotals, repointPackLine,
   PACK_KEY, PACK_STATE_KEY,
   loadInboundDraft, saveInboundDraft,

@@ -376,15 +376,48 @@ function orderMatchesQuery(o, raw) {
    useOrders' merge exactly: loadOrders() reads the same orders-table rows that
    useOrders fetches asynchronously (window._DB_ORDERS cache), so sync consumers
    (badges, search, notifications) see the same set as Tracking/MOutbound. */
+/* A sale (mobile ตัดสต็อก, ขาย + จัดส่ง on both forks) writes an `orders` row AND
+   a label under the same id, and the label copy wins the dedupe below. The label
+   alone said "packed" and had no lineItems, so those orders never reached the
+   pack queue and lost the shelf each line was debited from. Fold the row's
+   detail into the label copy: lineItems (with .loc / .ch) always; the row's
+   status only for orders minted from ORDER_ROW_STATUS_SINCE on, so years of old
+   sales already shown as พร้อมส่ง don't all drop back into รอแพ็ค. A tracking
+   number on the label still means shipped. */
+const ORDER_ROW_STATUS_SINCE = Date.parse("2026-10-13T00:00:00+07:00");
+function _orderIdTime(id) {
+  const m = /^SO-([0-9A-Z]+)[0-9A-Z]{2}$/.exec(String(id || ""));
+  const t = m ? parseInt(m[1], 36) : NaN;
+  return Number.isFinite(t) ? t : 0;
+}
+function _labelOrderWithRow(lo, row) {
+  if (!row) return lo;
+  const out = { ...lo };
+  ["lineItems", "deductions", "isBundle", "bundleName", "shipTo", "codAmount", "note"].forEach(k => {
+    if (row[k] !== undefined && row[k] !== null && row[k] !== "") out[k] = row[k];
+  });
+  if (!lo.tracking && row.status && _orderIdTime(row.id) >= ORDER_ROW_STATUS_SINCE) out.status = row.status;
+  return out;
+}
+function _labelOrders(rows) {
+  const byId = {};
+  (rows || []).forEach(r => { if (r && r.id) byId[r.id] = r; });
+  return (typeof loadLabels === "function" ? loadLabels() : []).map(l => {
+    const lo = labelToOrder(l);
+    return _labelOrderWithRow(lo, byId[lo.id]);
+  });
+}
+
 function buildOrders() {
   const overrides = loadOrderOverrides();
   const out = [];
   const seen = new Set();
+  const rows = (typeof loadOrders === "function" ? loadOrders() : []);
   const sources = [
     OUTBOUND,
-    (typeof loadLabels === "function" ? loadLabels() : []).map(labelToOrder),
+    _labelOrders(rows),
     loadPreservedOrders(),
-    (typeof loadOrders === "function" ? loadOrders() : []),
+    rows,
   ];
   for (const src of sources) {
     for (const o of src) {
@@ -437,7 +470,7 @@ function useOrders() {
     const seen = new Set();
     const sources = [
       OUTBOUND,
-      (typeof loadLabels === "function" ? loadLabels() : []).map(labelToOrder),
+      _labelOrders(dbOrders || (typeof loadOrders === "function" ? loadOrders() : [])),
       loadPreservedOrders(),
       dbOrders || [],
     ];

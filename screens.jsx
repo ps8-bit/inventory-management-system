@@ -1945,7 +1945,7 @@ function Outbound({ goTo, pushToast, focus }) {
   // Cancel = delete + put every piece back on the shelf the sale took it from.
   const bulkCancelRestock = () => {
     const sel = orders.filter(o => picked[o.id]);
-    const pieces = sel.reduce((s, o) => s + ((typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []).reduce((n, l) => n + l.qty, 0), 0);
+    const pieces = sel.reduce((s, o) => s + ((typeof restockLinesForOrder === "function") ? restockLinesForOrder(o) : []).reduce((n, l) => n + l.qty, 0), 0);
     setObBulkConfirm({
       title: "ยกเลิกออร์เดอร์ + คืนสต็อก",
       description: `ยกเลิก ${pickedCount} ออร์เดอร์ และคืนสินค้า ${pieces} ชิ้นกลับเข้าตำแหน่งเดิม`,
@@ -1959,7 +1959,7 @@ function Outbound({ goTo, pushToast, focus }) {
         if (r.blocked) { pushToast("ยกเลิกไม่ได้ — ต้องมีสิทธิ์ลบข้อมูล"); return; }
         if (!r.ok) return;
         let msg = `ยกเลิก ${r.restocked.length} ออร์เดอร์ — คืนสต็อก ${r.pieces} ชิ้น`;
-        if (r.skipped.length) msg += ` · ข้าม ${r.skipped.length} (ไม่มีรายการสินค้า/คืนไปแล้ว)`;
+        if (r.skipped.length) msg += ` · ข้าม ${r.skipped.length} (ไม่ได้ตัดสต็อกผ่านระบบ/คืนไปแล้ว)`;
         if (r.locError) msg += " · ปรับตำแหน่งไม่สำเร็จ: " + r.locError;
         pushToast(msg);
         clearPicked();

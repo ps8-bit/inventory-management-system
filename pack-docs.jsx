@@ -1973,7 +1973,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
       pushToast(`ยกเลิก ${order.id} — คืนสต็อก ${res.pieces} ชิ้น` + (res.locError ? " (ปรับตำแหน่งไม่สำเร็จ: " + res.locError + ")" : ""));
       if (onCancelled) onCancelled();
     } else {
-      pushToast("ออร์เดอร์นี้ไม่มีสินค้าที่ระบุ SKU หรือคืนสต็อกไปแล้ว — ยกเลิกที่หน้าจัดส่งสินค้าแทน");
+      pushToast("ออร์เดอร์นี้ไม่ได้ตัดสต็อกผ่านระบบ หรือคืนสต็อกไปแล้ว — ยกเลิกที่หน้าจัดส่งสินค้าแทน");
     }
   };
 

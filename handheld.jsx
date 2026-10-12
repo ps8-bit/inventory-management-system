@@ -1197,7 +1197,7 @@ function MOutbound({ ctx }) {
   // Cancel = delete + put every piece back on the shelf the sale took it from.
   const bulkCancelRestock = async () => {
     const sel = orders.filter(o => selected[o.id]);
-    const pieces = sel.reduce((s, o) => s + ((typeof packLinesForOrder === "function") ? packLinesForOrder(o) : []).reduce((n, l) => n + l.qty, 0), 0);
+    const pieces = sel.reduce((s, o) => s + ((typeof restockLinesForOrder === "function") ? restockLinesForOrder(o) : []).reduce((n, l) => n + l.qty, 0), 0);
     if (!confirm(`ยกเลิก ${selectedCount} ออร์เดอร์ และคืนสต็อก ${pieces} ชิ้นกลับเข้าตำแหน่งเดิม?`)) return;
     const r = await cancelOrdersAndRestock(sel);
     if (r.blocked) { ctx.pushToast("ยกเลิกไม่ได้ — ต้องมีสิทธิ์ลบข้อมูล"); return; }
