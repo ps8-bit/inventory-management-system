@@ -18,10 +18,20 @@ function loadSenders() {
   return [];
 }
 function saveSenders(list) {
-  window._DB_SENDERS = list;
-  try { localStorage.setItem("ims_senders", JSON.stringify(list)); } catch (e) {}
-  if (window.dbSaveState) dbSaveState("senders", list).catch(() => {});
-  window.dispatchEvent(new CustomEvent("ims-senders-change"));
+  const prev = loadSenders();
+  const mirror = (l) => {
+    window._DB_SENDERS = l;
+    try { localStorage.setItem("ims_senders", JSON.stringify(l)); } catch (e) {}
+    window.dispatchEvent(new CustomEvent("ims-senders-change"));
+  };
+  mirror(list);
+  if (!window.dbSaveState) return;
+  // A rejected save rolls the local copy back, or it would revert at the next reload.
+  const fail = (res) => {
+    if (typeof cloudWriteFailed === "function") cloudWriteFailed(res, "ผู้ส่ง");
+    if (window._DB_SENDERS === list) mirror(prev);
+  };
+  dbSaveState("senders", list).then(res => { if (res && res.error) fail(res); }).catch(e => fail({ error: String(e) }));
 }
 
 /* Chips to pick a saved sender (store = primary), or save the current one.

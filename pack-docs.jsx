@@ -1271,7 +1271,8 @@ function openPackChecklist(orders, pushToast) {
   // The phone's back button must close the sheet, not change the screen under
   // it — same same-URL history entry as openProductImageViewer.
   let closed = false, pushed = false;
-  const onPop = () => teardown();
+  // See openPackLabelBatch: a pop back onto our own entry = a layer above closed.
+  const onPop = () => { if (history.state && history.state.__imsPackList) return; teardown(); };
   const teardown = () => {
     if (closed) return;
     closed = true; _pclClose = null;
@@ -1605,7 +1606,9 @@ function openPackLabelBatch(orders, pushToast, preset) {
   }
   if (_plbClose) _plbClose(true);
   let closed = false, pushed = false;
-  const onPop = () => teardown();
+  // Back landing on OUR entry means a layer above (the iPhone PDF viewer) just
+  // closed — stay open; only a pop below our entry closes the dialog.
+  const onPop = () => { if (history.state && history.state.__imsLabelBatch) return; teardown(); };
   const teardown = () => {
     if (closed) return;
     closed = true; _plbClose = null;
@@ -1961,7 +1964,9 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   };
   const cancel = async () => {
     const pcs = (lines || []).reduce((n, l) => n + (Number(l.qty) || 0), 0);
-    const note = prompt(`ลูกค้ายกเลิกออร์เดอร์ ${order.id}?\nสินค้า ${pcs} ชิ้นจะถูกคืนเข้าตำแหน่งเดิม\n\nเหตุผล (ไม่บังคับ):`, "ลูกค้ายกเลิก");
+    const note = (typeof askText === "function")
+      ? await askText(`ยกเลิกออร์เดอร์ ${order.id}?`, "ลูกค้ายกเลิก", { label: "เหตุผล (ไม่บังคับ)", message: `สินค้า ${pcs} ชิ้นจะถูกคืนเข้าตำแหน่งเดิม`, okLabel: "ยกเลิก + คืนสต็อก" })
+      : (confirm(`ยกเลิกออร์เดอร์ ${order.id}? สินค้า ${pcs} ชิ้นจะถูกคืนเข้าตำแหน่งเดิม`) ? "ลูกค้ายกเลิก" : null);
     if (note === null) return;
     setBusy(true);
     const res = (typeof cancelOrdersAndRestock === "function") ? await cancelOrdersAndRestock([order], note) : { ok: false };

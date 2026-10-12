@@ -25,7 +25,9 @@ function setProductImage(sku, dataUrl) {
   catch (e) { console.warn("Image storage failed", e); } // quota — cloud still has it
   // Sync to Supabase (per-SKU app_state row); null clears it for every device.
   if (typeof dbSaveState === "function") {
-    dbSaveState("img:" + sku, (dataUrl === undefined ? null : dataUrl)).catch(() => {});
+    dbSaveState("img:" + sku, (dataUrl === undefined ? null : dataUrl))
+      .then(r => { if (typeof cloudWriteFailed === "function") cloudWriteFailed(r, "รูปสินค้า"); })
+      .catch(e => { if (typeof cloudWriteFailed === "function") cloudWriteFailed({ error: String(e) }, "รูปสินค้า"); });
   }
   window.dispatchEvent(new CustomEvent("ims-images-change"));
 }
@@ -43,7 +45,9 @@ function setProductImagesBulk(map) {
     const url = map[sku];
     if (!url) return;
     m[sku] = url; n++;
-    if (typeof dbSaveState === "function") dbSaveState("img:" + sku, url).catch(() => {});
+    if (typeof dbSaveState === "function") dbSaveState("img:" + sku, url)
+      .then(r => { if (typeof cloudWriteFailed === "function") cloudWriteFailed(r, "รูปสินค้า"); })
+      .catch(e => { if (typeof cloudWriteFailed === "function") cloudWriteFailed({ error: String(e) }, "รูปสินค้า"); });
   });
   if (!n) return 0;
   window._DB_PRODUCT_IMAGES = m;
@@ -107,7 +111,9 @@ function setLocationImage(code, dataUrl) {
   try { localStorage.setItem(LI_KEY, JSON.stringify(m)); }
   catch (e) { console.warn("Loc image storage failed", e); } // quota — cloud still has it
   if (typeof dbSaveState === "function") {
-    dbSaveState("locimg:" + code, (dataUrl === undefined ? null : dataUrl)).catch(() => {});
+    dbSaveState("locimg:" + code, (dataUrl === undefined ? null : dataUrl))
+      .then(r => { if (typeof cloudWriteFailed === "function") cloudWriteFailed(r, "รูปตำแหน่ง"); })
+      .catch(e => { if (typeof cloudWriteFailed === "function") cloudWriteFailed({ error: String(e) }, "รูปตำแหน่ง"); });
   }
   window.dispatchEvent(new CustomEvent("ims-location-images-change"));
 }
