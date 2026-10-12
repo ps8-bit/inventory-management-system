@@ -1560,6 +1560,15 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
     </div>
   ) : null;
 
+  // Leaving by mistake (backdrop click, ✕, ยกเลิก, back) must not silently throw
+  // away the cart, label, address, note and photos. Blocked while sending.
+  const requestClose = () => {
+    if (busy || sendingRef.current) return;
+    const dirty = cart.length || file || paste.trim() || note.trim() || extras.length;
+    if (dirty && !confirm("ปิดหน้านี้? ข้อมูลที่เลือก/พิมพ์ไว้ (สินค้า ใบปะหน้า ที่อยู่ โน้ต รูป) จะหายทั้งหมด")) return;
+    onClose();
+  };
+
   const sendAdd = async () => {
     if (!canSend || typeof addItemsToPackOrder !== "function" || sendingRef.current) return;
     sendingRef.current = true;
@@ -1710,7 +1719,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
     return (
       <>
         <div className="m-topbar">
-          <button className="m-back" onClick={onClose}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
+          <button className="m-back" onClick={requestClose}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
           <div className="m-title-sub">{addTo ? "เพิ่มรายการ " + addTo.id : "สั่งแพ็คใหม่"}</div>
           <span style={{ width: 30 }}/>
         </div>
@@ -1732,7 +1741,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
   const onDrop = (e) => { e.preventDefault(); setOver(false); const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]; if (f) pick({ target: { files: [f], value: "" } }); };
   return (
     <>
-      <div className="drawer-backdrop" onClick={onClose} style={{ zIndex: 90 }}/>
+      <div className="drawer-backdrop" onClick={requestClose} style={{ zIndex: 90 }}/>
       <div className="modal pn-modal" role="dialog" aria-modal="true" aria-label={addTo ? "เพิ่มรายการ" : "สั่งแพ็คใหม่"} style={{ zIndex: 91 }}>
         <div className="pn-head">
           <span className="pn-head-icon"><Icons.Box size={24}/></span>
@@ -1740,7 +1749,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
             <div className="pn-title">{addTo ? <>เพิ่มรายการ <span className="mono">{addTo.id}</span></> : "สั่งแพ็คใหม่"}</div>
             <div className="pn-sub">{addTo ? ((addTo.customer ? addTo.customer + " · " : "") + "ระบบจะตัดสต็อกเฉพาะรายการที่เพิ่ม") : "เลือกสินค้าและเพิ่มข้อมูลจัดส่ง"}</div>
           </div>
-          <button type="button" className="pn-close" onClick={onClose} aria-label="ปิด"><Icons.X size={20}/></button>
+          <button type="button" className="pn-close" onClick={requestClose} aria-label="ปิด"><Icons.X size={20}/></button>
         </div>
 
         <div className={"pn-body" + (addTo ? " is-single" : "")}>
@@ -1845,7 +1854,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
             <span className="pn-status-icon">{status.tone === "ok" ? <Icons.Check size={16}/> : status.tone === "danger" || status.tone === "warn" ? <Icons.Warn size={16}/> : "i"}</span>
             <span><b>{status.title}</b><span>{status.sub}</span></span>
           </div>
-          <button type="button" className="btn pn-btn" onClick={onClose}>ยกเลิก</button>
+          <button type="button" className="btn pn-btn" onClick={requestClose} disabled={busy}>ยกเลิก</button>
           <button type="button" className="btn btn-accent pn-btn" disabled={!canSend} onClick={send}>
             {busy ? "กำลังส่ง…" : addTo ? "เพิ่มเข้าออร์เดอร์" : "สร้างรายการแพ็ค"}
           </button>
