@@ -1183,6 +1183,15 @@ async function sendOrderPush(body) {
   try {
     const { data: { session } } = await sb.auth.getSession();
     if (!session) return { error: 'no session' };
+    // Tell the server which device is sending so only THIS one is skipped —
+    // the same account's other devices (owner's phone) still get the alert.
+    if (body && !body.mode) {
+      try {
+        const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+        const sub = reg && reg.pushManager && await reg.pushManager.getSubscription();
+        if (sub) body = { ...body, endpoint: sub.endpoint };
+      } catch (e) {}
+    }
     const res = await fetch(SUPABASE_URL + '/functions/v1/order-push', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + session.access_token },
