@@ -153,15 +153,17 @@ function StatusBar() {
 /* Bottom tabs → the nav id each one maps to. "more" is always available (it's
    how you reach everything else and holds logout); the others are real nav ids
    and must honour the role's page list, or the permission editor's chips would
-   be a no-op on the phone. "home" is the dashboard — a role without it (the
-   pack-only พนักงานแพ็ค) gets no home screen at all.
+   be a no-op on the phone. "home" is the dashboard — a role without it but with
+   แพ็คสินค้า (the พนักงานแพ็ค) gets the pack home (MPackHome) instead.
    `role` is passed explicitly where known: window.__currentUser is set by a
    parent effect, which runs AFTER this subtree's first render. */
 const M_TAB_NAV_ID = { home: "dashboard", inbound: "inbound", outbound: "outbound", inventory: "inventory" };
 function mTabAllowed(tabId, role) {
   const navId = M_TAB_NAV_ID[tabId];
   if (!navId) return true;
-  return typeof canOpenPage !== "function" || canOpenPage(navId, role);
+  if (typeof canOpenPage !== "function") return true;
+  if (tabId === "home") return canOpenPage("dashboard", role) || canOpenPage("pack", role);
+  return canOpenPage(navId, role);
 }
 /* Where the phone app opens: the first allowed tab, else straight into
    แพ็คสินค้า when that's the role's page, else the More menu. */
@@ -255,7 +257,10 @@ function Screen({ ctx }) {
   if (route.view === "users")     return <MUsers ctx={ctx}/>;
   if (route.view === "settings")  return <MSettings ctx={ctx}/>;
   // tabs
-  if (route.tab === "home")      return <MHome ctx={ctx}/>;
+  if (route.tab === "home") {
+    if (typeof canOpenPage === "function" && !canOpenPage("dashboard", role)) return <MPackHome ctx={ctx}/>;
+    return <MHome ctx={ctx}/>;
+  }
   if (route.tab === "inbound")   return <MInbound ctx={ctx}/>;
   if (route.tab === "outbound")  return <MOutbound ctx={ctx}/>;
   if (route.tab === "inventory") return <MInventory ctx={ctx}/>;
@@ -286,6 +291,146 @@ function MNoAccess({ ctx }) {
 }
 
 /* =============== HOME =============== */
+
+/* Home for a role with แพ็คสินค้า but no dashboard (พนักงานแพ็ค): today's pack
+   work at a glance + one tap into the queue. Shows no stock/sales figures. */
+function MPackHome({ ctx }) {
+  const [tick, setTick] = useStateM(0);
+  useEffectM(() => {
+    const refresh = () => setTick(t => t + 1);
+    const evs = ["ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-products-change"];
+    evs.forEach(e => window.addEventListener(e, refresh));
+    return () => evs.forEach(e => window.removeEventListener(e, refresh));
+  }, []);
+  const orders = useMemoM(() => (typeof packQueue === "function") ? packQueue() : [], [tick]);
+  const progress = useMemoM(() => (typeof loadPackProgress === "function") ? loadPackProgress() : {}, [tick]);
+  const packed = useMemoM(() => (typeof packedRecent === "function") ? packedRecent(3) : [], [tick]);
+  // Packed today counts every order packed today, also ones already shipped —
+  // packedRecent() keeps only still-"packed" orders, so it drops as parcels leave.
+  const packedToday = useMemoM(() => {
+    const today = new Date().toDateString();
+    const list = (typeof buildOrders === "function") ? buildOrders() : [];
+    return list.filter(o => o && o.packedAt && o.status !== "cancelled" && new Date(o.packedAt).toDateString() === today).length;
+  }, [tick]);
+  // Pieces still to pick — ticked lines are already in hand.
+  const pieces = useMemoM(() => orders.reduce((n, o) => {
+    const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
+    if (typeof packLineTotals === "function") return n + packLineTotals(lines, progress[o.id]).remaining;
+    return n + lines.reduce((s, l) => s + (l.qty || 0), 0);
+  }, 0), [orders, progress]);
+  const waves = Object.keys(progress).filter(k => k.indexOf("batch:") === 0);
+  // An order already in an open wave is picked there — opening it alone would
+  // fetch the same pieces twice (same rule as MPack).
+  const waveOf = {};
+  waves.forEach(id => ((progress[id] || {}).orderIds || []).forEach(oid => { waveOf[oid] = id; }));
+  const started = orders.filter(o => progress[o.id]);
+  const next = (started.length ? started : orders).slice(0, 5);
+  const late = orders.filter(o => typeof packLateDays === "function" && packLateDays(o) > 0).length;
+  const firstName = ((ctx.user && ctx.user.name) || "").split(" ")[0];
+  const d = new Date();
+  const days = ["อาทิตย์","จันทร์","อังคาร","พุธ","พฤหัสบดี","ศุกร์","เสาร์"];
+  const months = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+  const custOf = (o) => typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(o.customer) ? "ลูกค้า " + o.customer : (o.customer || "—");
+
+  const initials = (((ctx.user && ctx.user.name) || "").trim().slice(0, 2) || "?").toUpperCase();
+  const empty = orders.length === 0;
+  const tiles = [
+    { label: "รอแพ็ค",          val: orders.length, unit: "ออร์เดอร์", icon: <Icons.Box size={22}/>,     tone: "accent" },
+    { label: "รวมชิ้นที่ต้องหยิบ", val: pieces,        unit: "ชิ้น",      icon: <Icons.Box size={22}/>,     tone: "info" },
+    { label: "แพ็คเสร็จวันนี้",    val: packedToday,   unit: "ออร์เดอร์", icon: <Icons.Check size={22}/>,   tone: "success" },
+    { label: "ค้างเกินกำหนด",    val: late,          unit: "ออร์เดอร์", icon: <Icons.History size={22}/>, tone: late ? "danger" : "muted" }
+  ];
+
+  return (
+    <>
+      <div className="m-content ph">
+        <div className="ph-head">
+          <div style={{ minWidth: 0 }}>
+            <div className="ph-eyebrow">ภาพรวมวันนี้</div>
+            <div className="ph-hello">สวัสดี{firstName ? ", " + firstName : ""}</div>
+            <div className="ph-date">{`วัน${days[d.getDay()]}ที่ ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear() + 543}`}</div>
+          </div>
+          <div className="ph-avatar" aria-hidden="true">{initials}</div>
+        </div>
+
+        <button type="button" className={"ph-hero" + (empty ? " is-done" : " is-work")} onClick={() => ctx.push("pack")}>
+          <svg className="ph-hero-art" viewBox="0 0 120 110" aria-hidden="true">
+            <ellipse cx="60" cy="58" rx="56" ry="48" className="ph-blob"/>
+            <path d="M22 18l5 7M33 12l1 9M14 30l8 3" className="ph-spark"/>
+            <path d="M30 44l32-14 32 14v36l-32 16-32-16z" className="ph-box"/>
+            <path d="M30 44l32 15 32-15M62 59v37" className="ph-box-line"/>
+            <path d="M46 37l32 14v10" className="ph-tape"/>
+            {empty
+              ? <g><circle cx="88" cy="80" r="16" className="ph-badge"/><path d="M80 80l6 6 10-11" className="ph-badge-mark"/></g>
+              : <g><circle cx="88" cy="80" r="16" className="ph-badge"/><text x="88" y="86" textAnchor="middle" className="ph-badge-num">{orders.length > 99 ? "99+" : orders.length}</text></g>}
+          </svg>
+          <span className="ph-hero-text">
+            <span className="ph-hero-title">{empty ? "ไม่มีออร์เดอร์รอแพ็ค" : `มี ${orders.length} ออร์เดอร์รอแพ็ค`}</span>
+            <span className="ph-hero-sub">{empty ? <>วันนี้แพ็คเสร็จแล้ว <b className="tnum">{packedToday}</b> ออร์เดอร์</> : <>เหลือ <b className="tnum">{pieces}</b> ชิ้นที่ต้องหยิบ</>}</span>
+            <span className="ph-hero-pill">{empty ? <><Icons.Check size={13}/> ไม่มีงานค้าง</> : late ? <><Icons.Warn size={13}/> ค้างเกินกำหนด {late}</> : <><Icons.Box size={13}/> แตะเพื่อเริ่มแพ็ค</>}</span>
+          </span>
+        </button>
+
+        <div className="ph-section">สรุปงานวันนี้</div>
+        <div className="ph-grid">
+          {tiles.map(t => (
+            <button key={t.label} type="button" className={"ph-tile tone-" + t.tone} onClick={() => ctx.push("pack")}>
+              <span className="ph-tile-icon">{t.icon}</span>
+              <span className="ph-tile-body">
+                <span className="ph-tile-label">{t.label}</span>
+                <span className="ph-tile-val tnum">{t.val}</span>
+                <span className="ph-tile-unit">{t.unit}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <button type="button" className="ph-cta" onClick={() => ctx.push("pack")}>
+          <Icons.Box size={22}/><span>{empty ? "เปิดหน้าแพ็คสินค้า" : "เริ่มแพ็คสินค้า"}</span><Icons.Chev size={18} className="ph-cta-chev"/>
+        </button>
+        {packed.length > 0 && (
+          <button type="button" className="ph-link" onClick={() => ctx.push("pack", { view: "done" })}>
+            ดูรายการที่แพ็คเสร็จแล้ว <Icons.Chev size={13}/>
+          </button>
+        )}
+
+        {waves.length > 0 && (
+          <div className="mp-cards" style={{ margin: "14px 0 0" }}>
+            {waves.map(id => (
+              <button key={id} type="button" className="mp-card mp-card-info" onClick={() => ctx.push("pack-wave", { batchId: id })}>
+                <span className="mp-card-top">
+                  <span className="mp-cust">หยิบรวม {((progress[id] || {}).orderIds || []).length} ออร์เดอร์ — ทำต่อ</span>
+                  <Icons.Chev size={15}/>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {next.length > 0 && (
+          <>
+            <div className="ph-section">{started.length ? "กำลังแพ็คค้างอยู่" : "ออร์เดอร์ถัดไป"}</div>
+            <div className="mp-cards">
+              {next.map(o => (
+                <button key={o.id} type="button" className="mp-card" onClick={() => waveOf[o.id] ? ctx.push("pack-wave", { batchId: waveOf[o.id] }) : ctx.push("pack-order", { id: o.id })}>
+                  <span className="mp-card-top">
+                    <span className="mp-id mono">{o.id}</span>
+                    {typeof packOrderTime === "function" && <span className="mp-time">{packOrderTime(o)}</span>}
+                  </span>
+                  <span className="mp-cust">{custOf(o)}</span>
+                  {waveOf[o.id] && <span className="mp-wave">กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</span>}
+                  {typeof PackLateBadge === "function" && typeof packLateDays === "function" && packLateDays(o) > 0 && <span><PackLateBadge order={o} compact/></span>}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {typeof OrderPushNudge === "function" && <div style={{ marginTop: 16 }}><OrderPushNudge/></div>}
+      </div>
+    </>
+  );
+}
 
 // A .m-kpi rendered as a <button> needs the button chrome reset to keep the tile look.
 const KPI_TAP = { textAlign: "left", font: "inherit", fontFamily: "inherit", cursor: "pointer", width: "100%", display: "block" };
@@ -6840,7 +6985,7 @@ function MPack({ ctx }) {
   const [selecting, setSelecting] = useStateM(false);
   const [sel, setSel] = useStateM({});
   const [labelCfg, setLabelCfg] = useStateM(false);   // ⚙ ตั้งค่าใบปะหน้า — shop-wide
-  const [view, setView] = useStateM("open");           // "open" = กำลังแพ็ค · "done" = แพ็คเสร็จแล้ว (reopen label/address)
+  const [view, setView] = useStateM(() => (ctx.route.params && ctx.route.params.view === "done") ? "done" : "open");           // "open" = กำลังแพ็ค · "done" = แพ็คเสร็จแล้ว (reopen label/address)
   const [showN, setShowN] = useStateM(30);               // long queues render in pages
   const [plat, setPlat] = useStateM("");                // platform filter ("" = all)
 

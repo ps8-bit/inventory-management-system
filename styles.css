@@ -2724,3 +2724,48 @@ button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft
 .opt-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .opt-actions:empty { display: none; }
 [data-mobile="1"] .opt-actions .btn-primary { flex: 1; height: 40px; justify-content: center; font-size: 13.5px; }
+
+/* ===== พนักงานแพ็ค home (MPackHome) ===== */
+.ph { padding-top: 18px; }
+/* No .m-topbar on this screen — clear the notch / OS status bar ourselves. */
+.mobile-fullscreen .ph { padding-top: max(18px, calc(env(safe-area-inset-top) + 10px)); }
+.ph-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 16px; }
+.ph-eyebrow { font-size: 13px; color: var(--muted); }
+.ph-hello { font-size: 26px; font-weight: 800; line-height: 1.25; color: var(--fg); }
+.ph-date { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.ph-avatar { flex-shrink: 0; width: 46px; height: 46px; border-radius: 999px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 800; font-size: 16px; }
+.ph-hero { display: flex; align-items: center; gap: 12px; width: 100%; padding: 16px 14px; border-radius: 18px; text-align: left; font-family: inherit; cursor: pointer; border: 1px solid var(--border); box-shadow: var(--elev-1); }
+.ph-hero.is-done { background: var(--success-soft); --ph-c: var(--success); }
+.ph-hero.is-work { background: var(--accent-soft); --ph-c: var(--accent); }
+.ph-hero-art { width: 96px; flex-shrink: 0; }
+.ph-blob { fill: var(--surface); opacity: .65; }
+.ph-spark { stroke: var(--ph-c); stroke-width: 3; stroke-linecap: round; fill: none; }
+.ph-box { fill: var(--surface); stroke: var(--fg); stroke-width: 3; stroke-linejoin: round; }
+.ph-box-line { stroke: var(--fg); stroke-width: 3; fill: none; stroke-linejoin: round; }
+.ph-tape { stroke: var(--accent); stroke-width: 6; fill: none; }
+.ph-badge { fill: var(--ph-c); stroke: var(--surface); stroke-width: 3; }
+.ph-badge-mark { stroke: #fff; stroke-width: 3.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.ph-badge-num { fill: #fff; font-weight: 800; font-size: 15px; font-family: inherit; }
+.ph-hero-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ph-hero-title { font-size: 19px; font-weight: 800; color: var(--ph-c); line-height: 1.3; }
+.ph-hero-sub { font-size: 14px; color: var(--fg); }
+.ph-hero-sub b { color: var(--ph-c); }
+.ph-hero-pill { align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; margin-top: 4px; padding: 4px 10px; border-radius: 999px; background: var(--surface); color: var(--ph-c); font-size: 12px; font-weight: 700; }
+.ph-section { font-size: 17px; font-weight: 800; margin: 20px 2px 10px; color: var(--fg); }
+.ph-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ph-tile { display: flex; gap: 10px; align-items: flex-start; padding: 14px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--elev-1); text-align: left; font-family: inherit; cursor: pointer; min-width: 0; }
+.ph-tile-icon { flex-shrink: 0; width: 40px; height: 40px; border-radius: 999px; display: grid; place-items: center; }
+.ph-tile-body { display: flex; flex-direction: column; min-width: 0; }
+.ph-tile-label { font-size: 12px; color: var(--muted); line-height: 1.3; }
+.ph-tile-val { font-size: 26px; font-weight: 800; line-height: 1.2; color: var(--fg); }
+.ph-tile-unit { font-size: 12px; color: var(--muted); }
+.ph-tile.tone-accent .ph-tile-icon { background: var(--accent-soft); color: var(--accent); }
+.ph-tile.tone-info .ph-tile-icon { background: var(--info-soft); color: var(--info); }
+.ph-tile.tone-success .ph-tile-icon { background: var(--success-soft); color: var(--success); }
+.ph-tile.tone-success .ph-tile-val { color: var(--success); }
+.ph-tile.tone-danger .ph-tile-icon { background: var(--danger-soft); color: var(--danger); }
+.ph-tile.tone-danger .ph-tile-val { color: var(--danger); }
+.ph-tile.tone-muted .ph-tile-icon { background: var(--surface-2, var(--bg)); color: var(--muted); }
+.ph-cta { display: flex; align-items: center; justify-content: center; gap: 10px; position: relative; width: 100%; margin-top: 16px; padding: 16px; border: 0; border-radius: 16px; background: var(--accent); color: #fff; font-size: 17px; font-weight: 800; font-family: inherit; cursor: pointer; box-shadow: var(--elev-2); }
+.ph-cta-chev { position: absolute; right: 16px; }
+.ph-link { display: flex; align-items: center; justify-content: center; gap: 4px; width: 100%; margin-top: 10px; padding: 6px; background: none; border: 0; color: var(--accent); font-size: 14px; font-weight: 600; font-family: inherit; cursor: pointer; }
