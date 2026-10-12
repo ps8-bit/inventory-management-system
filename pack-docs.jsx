@@ -1420,15 +1420,29 @@ function printOrderFile(file) {
    Each PDF page is rasterised with pdf.js at ~300 dpi so barcodes stay
    scannable; a landscape page is turned to fit the portrait roll. "Printed"
    is remembered per device only — it is a convenience, not shared state. */
-const LABEL_PRINTED_KEY = "ims_label_printed_v1";
+/* Kept PER ACCOUNT (owner's rule): two people sharing one phone/PC each see only
+   what THEY printed. Keyed by the signed-in user's id; the old shared key
+   (ims_label_printed_v1, one list per device) is dropped, not inherited, since
+   it can't be told whose prints it held. */
+const LABEL_PRINTED_KEY = "ims_label_printed_v2";
+function _labelPrintedKey() {
+  const u = window.__currentUser || {};
+  const who = String(u.id || u.email || "").trim();
+  return who ? LABEL_PRINTED_KEY + ":" + who : "";
+}
 function labelPrintedMap() {
-  try { return JSON.parse(localStorage.getItem(LABEL_PRINTED_KEY) || "{}") || {}; } catch (e) { return {}; }
+  const k = _labelPrintedKey();
+  if (!k) return {};
+  try { return JSON.parse(localStorage.getItem(k) || "{}") || {}; } catch (e) { return {}; }
 }
 function markLabelsPrinted(ids) {
+  const k = _labelPrintedKey();
+  if (!k) return;
   const m = labelPrintedMap(), now = Date.now(), cutoff = now - 30 * 86400000;
-  Object.keys(m).forEach(k => { if (!(m[k] > cutoff)) delete m[k]; });
+  Object.keys(m).forEach(id => { if (!(m[id] > cutoff)) delete m[id]; });
   (ids || []).forEach(id => { m[id] = now; });
-  try { localStorage.setItem(LABEL_PRINTED_KEY, JSON.stringify(m)); } catch (e) {}
+  try { localStorage.setItem(k, JSON.stringify(m)); } catch (e) {}
+  try { localStorage.removeItem("ims_label_printed_v1"); } catch (e) {}
 }
 function _loadImg(src) {
   return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("เปิดรูปไม่ได้")); i.src = src; });
@@ -1746,7 +1760,7 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
           </div>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, cursor: "pointer", minHeight: 32 }}>
             <input type="checkbox" checked={onlyNew} disabled={!!busy} onChange={e => setOnlyNew(e.target.checked)} style={{ width: 18, height: 18 }}/>
-            เฉพาะใบที่ยังไม่เคยพิมพ์ (จากเครื่องนี้)
+            เฉพาะใบที่ฉันยังไม่เคยพิมพ์ (บัญชีนี้ บนเครื่องนี้)
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer", minHeight: 32, lineHeight: 1.5 }}>
             <input type="checkbox" checked={useAddr} disabled={!!busy} style={{ width: 18, height: 18, marginTop: 1, flex: "none" }}
