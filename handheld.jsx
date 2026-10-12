@@ -411,7 +411,7 @@ function MHome({ ctx }) {
               <ActivityDot type={auditTone(e)}/>
               <div className="m-row-main">
                 <div className="m-row-title" style={{ fontSize: 13, fontWeight: 400, whiteSpace: "normal" }}>{e.summary || e.entityId || "เปลี่ยนแปลง"}</div>
-                <div className="m-row-sub">{thaiDayLabel(bangkokDateOf(e.ts))} {bangkokTimeOf(e.ts)} · {e.user?.name || "ระบบ"}</div>
+                <div className="m-row-sub">{thaiDayLabel(bangkokDateOf(e.ts))} {bangkokTimeOf(e.ts)} · {typeof ActorName === "function" ? <ActorName entry={e}/> : (e.user?.name || "ระบบ")}</div>
               </div>
             </div>
           ))}
@@ -7791,7 +7791,7 @@ function MHistory({ ctx }) {
                       {/* The day header above carries the date, so today's rows
                           show the friendlier relative time and older ones the clock. */}
                       <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-                        {dayKey === today ? mFormatTime(e.ts) : bangkokTimeOf(e.ts)} · {e.user?.name || "ระบบ"}
+                        {dayKey === today ? mFormatTime(e.ts) : bangkokTimeOf(e.ts)} · {typeof ActorName === "function" ? <ActorName entry={e}/> : (e.user?.name || "ระบบ")}
                       </div>
                     </div>
                     {open && <Icons.Chev size={14} style={{ color: "var(--muted)", flexShrink: 0, alignSelf: "center" }}/>}
