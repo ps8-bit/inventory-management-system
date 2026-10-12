@@ -3160,7 +3160,9 @@ function MSell({ ctx }) {
         });
       }
     });
-    if (typeof deductManyAndPersist === "function") deductManyAndPersist(allDeductions, "ขายสินค้า (มือถือ) · " + (ship.name || "ลูกค้าใหม่"));
+    // The order number exists BEFORE the stock moves (see SellProductModal).
+    const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
+    if (typeof deductManyAndPersist === "function") deductManyAndPersist(allDeductions, "ขายสินค้า (มือถือ) · " + (ship.name || "ลูกค้าใหม่") + " · ออร์เดอร์ " + orderId);
     // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
     if (typeof applyLocPicks === "function") {
       const locRes = await applyLocPicks(locPicks);
@@ -3169,14 +3171,13 @@ function MSell({ ctx }) {
       }
     }
 
-    const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
     const stamp = (typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
     const createdAt = stamp && stamp.backdated ? stamp.createdAt : undefined;
     const backLabel = createdAt ? stockOutStampLabel(stamp) : "";
 
     if (typeof recordChange === "function") {
       recordChange({
-        entity: "order", action: "create",
+        entity: "order", entityId: orderId, action: "create",
         summary: `ขายสินค้า ${cart.length} รายการ → ${ship.name} (${ship.carrier}) (มือถือ)`,
         count: cartTotal,
         changes: cart.map(item => ({
@@ -7619,8 +7620,12 @@ function mFormatTime(iso) {
   return d.toLocaleDateString("th-TH", { day: "numeric", month: "short", year: "numeric" });
 }
 
+function mCanOpenAny(ids) {
+  return typeof canOpenPage !== "function" || ids.some(id => canOpenPage(id));
+}
 function MHistory({ ctx }) {
   const [logKey, setLogKey] = useStateM(0);
+  const [sel, setSel] = useStateM(null);         // entry open in the detail sheet
   const [filter, setFilter] = useStateM("all");
   const [q, setQ] = useStateM("");
   const [day, setDay] = useStateM(null);          // null = ล่าสุด (ทุกวัน)
@@ -7765,7 +7770,10 @@ function MHistory({ ctx }) {
             <div className="m-list">
               {entries.map((e, i) => {
                 // Entries that name a record they changed become tappable and open it.
-                const open = openTarget(e);
+                // Every entry with something to show opens the detail sheet; the
+                // sheet links on to the order / product itself.
+                const open = (typeof AuditEntryDetail === "function" && ((e.changes && e.changes.length) || e.note || (typeof auditEntryMovesStock === "function" && auditEntryMovesStock(e))))
+                  ? (() => setSel(e)) : openTarget(e);
                 const Row = open ? "button" : "div";
                 return (
                   <Row key={e.id || (dayKey + i)} className="m-row"
@@ -7799,6 +7807,26 @@ function MHistory({ ctx }) {
             <Icons.History size={22} style={{ opacity: 0.4, marginBottom: 6 }}/>
             <div>{busy ? "กำลังโหลด…" : day ? `ไม่มีกิจกรรมใน${thaiDayLabel(day)}` : "ยังไม่มีประวัติการแก้ไข"}</div>
           </div>
+        )}
+
+        {sel && (
+          <>
+            <div className="m-sheet-backdrop" onClick={() => setSel(null)}/>
+            <div className="m-sheet" style={{ maxHeight: "82vh", display: "flex", flexDirection: "column" }}>
+              <div className="m-sheet-grabber"/>
+              <div className="m-sheet-head" style={{ flexShrink: 0 }}>
+                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>รายละเอียดกิจกรรม</h3>
+                <button className="m-action" onClick={() => setSel(null)}><Icons.X size={14}/></button>
+              </div>
+              <div className="m-sheet-body" style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", background: "var(--surface-2)" }}>
+                {/* The order editor is the ติดตามพัสดุ / จัดส่ง screen's — only roles
+                    that have one of those pages may jump into it from here. */}
+                <AuditEntryDetail entry={sel} compact
+                  onOpenOrder={mCanOpenAny(["tracking", "outbound"]) ? (o => { setSel(null); ctx.push("track-edit", o); }) : null}
+                  onOpenProduct={mCanOpenAny(["inventory", "finder"]) ? (sku => { setSel(null); ctx.push("product", { sku }); }) : null}/>
+              </div>
+            </div>
+          </>
         )}
 
         {/* Older rows stay in the DB until asked for. */}
@@ -8654,6 +8682,13 @@ function MTrackEdit({ ctx }) {
             );
           })}
         </div>
+
+        {typeof OrderHistory === "function" && (
+          <>
+            <div className="m-section-label" style={{ padding: "18px 4px 8px" }}>ประวัติออร์เดอร์ / งานที่สั่ง</div>
+            <OrderHistory order={o} compact/>
+          </>
+        )}
       </div>
     </>
   );
