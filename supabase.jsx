@@ -1174,6 +1174,19 @@ async function dbRegisterPush(sub, role) {
   });
   return error ? { error: error.message } : { ok: true };
 }
+// Signing out must stop this device's order alerts (customer names / phone /
+// address changes on the lock screen). Only the DB row goes — the browser keeps
+// its subscription and the "on" flag, so the next sign-in re-registers it under
+// whoever signs in (refreshOrderPush). Capped at 3 s so an offline sign-out is
+// never blocked; order-push also skips signed-out / suspended users server-side.
+async function _dropDevicePush() {
+  try {
+    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
+    const sub = reg && reg.pushManager && await reg.pushManager.getSubscription();
+    if (!sub) return;
+    await Promise.race([dbUnregisterPush(sub.endpoint), new Promise(r => setTimeout(r, 3000))]);
+  } catch (e) {}
+}
 async function dbUnregisterPush(endpoint) {
   if (!endpoint) return { ok: true };
   const { error } = await sb.from('push_subscriptions').delete().eq('endpoint', endpoint);
@@ -1609,7 +1622,7 @@ Object.assign(window, {
   // mid-session force-out so an OFFLINE kick still lands on a clean login
   // screen); no arg = default global scope (used by the deliberate logout
   // button so it revokes the refresh token server-side on shared devices).
-  authSignOut:       (scope)           => sb.auth.signOut(scope ? { scope } : undefined),
+  authSignOut:       async (scope)     => { await _dropDevicePush(); return sb.auth.signOut(scope ? { scope } : undefined); },
   authResetPassword: (email)           => sb.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin }),
   authUpdatePassword:(password)        => sb.auth.updateUser({ password }),
   // Consume a token_hash carried by a recovery/invite email link. Newer Supabase
