@@ -1321,7 +1321,12 @@ async function _orderFilePages(file, size) {
   if (f.type !== "application/pdf") {
     const im = await _loadImg(f.dataUrl);
     const c = _labelCanvasFrom(im, im.naturalWidth, im.naturalHeight, portrait);
-    return [{ dataUrl: c.toDataURL("image/jpeg", 0.92), fmt: "JPEG", w: c.width, h: c.height }];
+    // A real label photo is ~1000 px+ (readOrderFile keeps up to 1600). Far less
+    // is usually a screenshot / product picture put in the label slot by mistake.
+    const page = { dataUrl: c.toDataURL("image/jpeg", 0.92), fmt: "JPEG", w: c.width, h: c.height,
+      lowRes: Math.min(im.naturalWidth, im.naturalHeight) < 500 };
+    c.width = c.height = 0;
+    return [page];
   }
   const lib = await _loadPdfJs();
   lib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + "pdf.worker.min.js";
@@ -1344,6 +1349,9 @@ async function _orderFilePages(file, size) {
       await page.render({ canvasContext: g, viewport: vp }).promise;
       const r = _labelCanvasFrom(c, c.width, c.height, portrait);
       out.push({ dataUrl: r.toDataURL("image/png"), fmt: "PNG", w: r.width, h: r.height });
+      // iOS Safari keeps a canvas's memory until it is shrunk — a long batch of
+      // 300-dpi pages otherwise hits its canvas budget and renders blank.
+      c.width = c.height = 0; r.width = r.height = 0;
     }
   } finally { doc.destroy(); }
   return out;
@@ -1354,8 +1362,14 @@ function _labelBatchName(groupName, count) {
   return `ใบปะหน้า_${clean}_${count}ใบ_${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}`;
 }
 /* Fetch + rasterise, 3 files at a time. onProgress(done, total).
-   Returns { pages:[{dataUrl,fmt,w,h}], okIds, failed:[order] } in list order. */
-async function collectOrderLabelPages(orders, size, onProgress) {
+   An order with NO attached file but an address in the system (Facebook / LINE /
+   walk-in — no marketplace label exists) gets the system's own ใบปะหน้า
+   (buildPackLabelHtml, the same one พิมพ์ที่อยู่ prints) when `addrFallback`.
+   A file that exists but won't load is a failure, never swapped for the address
+   label — the attached one may carry the courier's barcode.
+   Returns { pages:[{dataUrl,fmt,w,h} | {html}], okIds, failed:[order], fromAddr } in list order. */
+async function collectOrderLabelPages(orders, size, onProgress, opts) {
+  const addrFallback = !opts || opts.addrFallback !== false;
   const res = new Array(orders.length);
   let next = 0, done = 0;
   const work = async () => {
@@ -1364,7 +1378,11 @@ async function collectOrderLabelPages(orders, size, onProgress) {
       const o = orders[i];
       try {
         const file = await loadOrderFile(o.id);
-        res[i] = file ? { o, pages: await _orderFilePages(file, size) } : { o, pages: [] };
+        if (file) res[i] = { o, pages: await _orderFilePages(file, size) };
+        else if (addrFallback && (packRecipientFor(o) || {}).addr) {
+          const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
+          res[i] = { o, pages: [{ html: buildPackLabelHtml(o, lines, size) }], addr: true };
+        } else res[i] = { o, pages: [] };
       } catch (e) { res[i] = { o, pages: [] }; }
       done++;
       if (onProgress) onProgress(done, orders.length);
@@ -1372,26 +1390,58 @@ async function collectOrderLabelPages(orders, size, onProgress) {
   };
   await Promise.all([work(), work(), work()]);
   const pages = [], okIds = [], failed = [];
-  res.forEach(r => { if (r.pages.length) { pages.push(...r.pages); okIds.push(r.o.id); } else failed.push(r.o); });
-  return { pages, okIds, failed };
+  let fromAddr = 0;
+  const lowRes = [];
+  res.forEach(r => {
+    if (!r.pages.length) { failed.push(r.o); return; }
+    pages.push(...r.pages); okIds.push(r.o.id);
+    if (r.addr) fromAddr++;
+    if (r.pages.some(p => p.lowRes)) lowRes.push(r.o);
+  });
+  return { pages, okIds, failed, fromAddr, lowRes };
 }
-function printLabelPages(pages, size, name) {
+/* A generated address label → PNG at the label's size, laid out off-screen in
+   Sarabun and fitted first (the same steps as _pdLabelPdf), via labels.jsx's
+   iOS-safe rasteriser. */
+async function _addrLabelPng(html, size) {
+  if (typeof rasterizeLabel !== "function") throw new Error("ไม่มีตัวแปลงฉลาก");
+  const host = document.createElement("div");
+  host.setAttribute("style", "position:fixed;left:-10000px;top:0;background:#fff;color:#000;letter-spacing:normal;font-family:'Sarabun','Leelawadee UI',Tahoma,sans-serif");
+  host.innerHTML = html;
+  document.body.appendChild(host);
+  try {
+    try { await document.fonts.ready; } catch (e) {}
+    fitPackLabel(host);
+    const lbl = host.firstElementChild;
+    const mm = (typeof MM_TO_PX !== "undefined") ? MM_TO_PX : 96 / 25.4;
+    return await rasterizeLabel(lbl, Math.round(size.w * mm), Math.round(size.h * mm), 4);
+  } finally { host.remove(); }
+}
+/* Returns how many pages went out (phone PDF may drop a page that won't rasterise). */
+async function printLabelPages(pages, size, name) {
   if (_pdIsPhone() && window.jspdf) {
     const { jsPDF } = window.jspdf;
     const orient = size.w > size.h ? "landscape" : "portrait";
     const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h], orientation: orient });
-    pages.forEach((p, i) => {
-      if (i) pdf.addPage([size.w, size.h], orient);
-      const k = Math.min(size.w / p.w, size.h / p.h);
-      const w = p.w * k, h = p.h * k;
-      pdf.addImage(p.dataUrl, p.fmt, (size.w - w) / 2, (size.h - h) / 2, w, h);
-    });
-    pdf.save(name + ".pdf");
-    return;
+    let added = 0;
+    for (const p of pages) {
+      let img = p;
+      if (p.html) {
+        try { img = { dataUrl: await _addrLabelPng(p.html, size), fmt: "PNG", w: size.w, h: size.h }; }
+        catch (e) { console.error("[label-batch] address label", e); continue; }
+      }
+      if (added) pdf.addPage([size.w, size.h], orient);
+      const k = Math.min(size.w / img.w, size.h / img.h);
+      const w = img.w * k, h = img.h * k;
+      pdf.addImage(img.dataUrl, img.fmt, (size.w - w) / 2, (size.h - h) / 2, w, h);
+      added++;
+    }
+    if (added) pdf.save(name + ".pdf");
+    return added;
   }
   const html = pages.map((p, i) =>
-    `<div style="width:${size.w}mm;height:${size.h}mm;display:flex;align-items:center;justify-content:center;overflow:hidden;${i < pages.length - 1 ? "break-after:page;page-break-after:always;" : ""}">` +
-      `<img src="${_escPD(p.dataUrl)}" alt="" style="max-width:100%;max-height:100%;object-fit:contain;display:block"></div>`).join("");
+    `<div class="__plbPg" style="width:${size.w}mm;height:${size.h}mm;display:flex;align-items:center;justify-content:center;overflow:hidden;${i < pages.length - 1 ? "break-after:page;page-break-after:always;" : ""}">` +
+      (p.html ? p.html : `<img src="${_escPD(p.dataUrl)}" alt="" style="max-width:100%;max-height:100%;object-fit:contain;display:block">`) + `</div>`).join("");
   // The browser's "Save as PDF" names the file after document.title.
   const prevTitle = document.title;
   let restored = false;
@@ -1399,7 +1449,16 @@ function printLabelPages(pages, size, name) {
   document.title = name;
   window.addEventListener("afterprint", restore);
   setTimeout(restore, 120000);
-  _printPDHtml(html, size);
+  // Fit every generated label (fitPackLabel handles one .__pdLbl per root): show
+  // the hidden print root off-screen so each page can be measured, then hide it.
+  _printPDHtml(html, size, (root) => {
+    const pgs = Array.from(root.querySelectorAll(".__plbPg")).filter(pg => pg.querySelector(".__pdLbl"));
+    if (!pgs.length) return;
+    root.setAttribute("style", "display:block;position:fixed;left:-10000px;top:0");
+    pgs.forEach(pg => fitPackLabel(pg));
+    root.removeAttribute("style");
+  });
+  return pages.length;
 }
 
 /* Self-mounting dialog (same pattern as openPackChecklist), so any order list on
@@ -1440,8 +1499,12 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
   const ids = useOrderFileIds();
   const [sizeId, setSizeId] = useStatePD(() => packLabelSize().id);
   const [onlyNew, setOnlyNew] = useStatePD(false);
+  // No file attached but the system has the address (Facebook / LINE …) → print
+  // the system's own ใบปะหน้า for it. Remembered per device.
+  const [useAddr, setUseAddr] = useStatePD(() => { try { return localStorage.getItem("ims_label_batch_addr") !== "0"; } catch (e) { return true; } });
   const [busy, setBusy] = useStatePD(null);        // null | { key, done, total }
   const [printedRev, setPrintedRev] = useStatePD(0);
+  const [warn, setWarn] = useStatePD("");
   const size = PACK_LABEL_SIZES.find(s => s.id === sizeId) || PACK_LABEL_SIZES[0];
   const printed = React.useMemo(() => labelPrintedMap(), [printedRev]);
   useEffectPD(() => {
@@ -1462,10 +1525,18 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
     if (preset) arr.sort((a, b) => (b.name === preset) - (a.name === preset));
     return arr;
   }, [orders, preset]);
+  const hasAddr = React.useMemo(() => {
+    const m = {};
+    orders.forEach(o => { m[o.id] = !!(packRecipientFor(o) || {}).addr; });
+    return m;
+  }, [orders]);
   const stat = (os) => {
     const withFile = os.filter(o => ids.has(o.id));
-    const todo = onlyNew ? withFile.filter(o => !printed[o.id]) : withFile;
-    return { withFile, todo, missing: os.filter(o => !ids.has(o.id)), done: withFile.filter(o => printed[o.id]).length };
+    const withAddr = os.filter(o => !ids.has(o.id) && hasAddr[o.id]);
+    const printable = useAddr ? os.filter(o => ids.has(o.id) || hasAddr[o.id]) : withFile;
+    const todo = onlyNew ? printable.filter(o => !printed[o.id]) : printable;
+    const pset = new Set(printable.map(o => o.id));
+    return { withFile, withAddr, printable, todo, missing: os.filter(o => !pset.has(o.id)), done: printable.filter(o => printed[o.id]).length };
   };
   const allStat = stat(orders);
 
@@ -1474,18 +1545,26 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
     if (todo.length > 80 && !confirm(`พิมพ์ใบปะหน้า ${todo.length} ใบในครั้งเดียว?\nจำนวนมากอาจใช้เวลาสักครู่`)) return;
     setBusy({ key, done: 0, total: todo.length });
     let r;
-    try { r = await collectOrderLabelPages(todo, size, (d, t) => setBusy({ key, done: d, total: t })); }
-    catch (e) { setBusy(null); pushToast("เตรียมใบปะหน้าไม่สำเร็จ: " + (e.message || e)); return; }
+    try {
+      r = await collectOrderLabelPages(todo, size, (d, t) => setBusy({ key, done: d, total: t }), { addrFallback: useAddr });
+      if (r.pages.length) {
+        if (sizeId !== packLabelSize().id) setPackLabelSize(sizeId);
+        r.sent = await printLabelPages(r.pages, size, _labelBatchName(name, r.okIds.length));
+      }
+    } catch (e) { setBusy(null); pushToast("เตรียมใบปะหน้าไม่สำเร็จ: " + (e.message || e)); return; }
     setBusy(null);
-    if (!r.pages.length) { pushToast("เปิดใบปะหน้าไม่ได้ — ลองใหม่อีกครั้ง"); return; }
-    if (setPackLabelSize && sizeId !== packLabelSize().id) setPackLabelSize(sizeId);
-    printLabelPages(r.pages, size, _labelBatchName(name, r.okIds.length));
+    if (!r.pages.length || !r.sent) { pushToast("เปิดใบปะหน้าไม่ได้ — ลองใหม่อีกครั้ง"); return; }
     markLabelsPrinted(r.okIds);
     setPrintedRev(x => x + 1);
     const short = (o) => (typeof orderShortId === "function") ? orderShortId(o) : o.id;
-    pushToast(r.failed.length
-      ? `${name}: เตรียม ${r.okIds.length} ใบ · เปิดไม่ได้ ${r.failed.length} (${r.failed.slice(0, 3).map(short).join(", ")}${r.failed.length > 3 ? "…" : ""})`
-      : `${name}: เตรียมใบปะหน้า ${r.okIds.length} ใบแล้ว`);
+    const lost = r.pages.length - r.sent;
+    pushToast(`${name}: เตรียมใบปะหน้า ${r.sent} ใบ` + (r.fromAddr ? ` (จากที่อยู่ในระบบ ${r.fromAddr})` : "") +
+      (r.failed.length ? ` · เปิดไม่ได้ ${r.failed.length} (${r.failed.slice(0, 3).map(short).join(", ")}${r.failed.length > 3 ? "…" : ""})` : "") +
+      (lost > 0 ? ` · สร้างไม่สำเร็จ ${lost} ใบ` : ""));
+    // Say it in the dialog too — a toast is gone before anyone reads the ids.
+    setWarn(r.lowRes.length
+      ? `รูปที่แนบความละเอียดต่ำ ${r.lowRes.length} ใบ — อาจไม่ใช่ใบปะหน้า (เช่น รูปสินค้า/ภาพหน้าจอ) ตรวจก่อนแปะ: ${r.lowRes.slice(0, 6).map(short).join(", ")}${r.lowRes.length > 6 ? "…" : ""}`
+      : "");
   };
 
   const row = (key, name, st, icon) => {
@@ -1496,16 +1575,17 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 14.5 }}>{name}</div>
           <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
-            มีใบปะหน้า <b className="tnum" style={{ color: "var(--fg)" }}>{st.withFile.length}</b>
+            แนบไฟล์ <b className="tnum" style={{ color: "var(--fg)" }}>{st.withFile.length}</b>
+            {useAddr && st.withAddr.length > 0 && <> · จากที่อยู่ <b className="tnum" style={{ color: "var(--fg)" }}>{st.withAddr.length}</b></>}
             {st.done > 0 && <> · พิมพ์แล้ว <span className="tnum">{st.done}</span></>}
-            {st.missing.length > 0 && <> · <span style={{ color: "var(--warning, var(--danger))" }}>ยังไม่แนบ <span className="tnum">{st.missing.length}</span></span></>}
+            {st.missing.length > 0 && <> · <span style={{ color: "var(--warning, var(--danger))" }}>ไม่มีใบปะหน้า <span className="tnum">{st.missing.length}</span></span></>}
           </div>
         </div>
         <button className={"btn" + (key === "_all" || !st.todo.length ? "" : " btn-primary")} disabled={!!busy || !st.todo.length}
           onClick={() => run(key, name, st.todo)} style={{ minHeight: 40, whiteSpace: "nowrap", opacity: st.todo.length ? 1 : 0.5 }}>
           {running ? `กำลังเตรียม ${busy.done}/${busy.total}`
             : st.todo.length ? <><Icons.Print size={15}/> พิมพ์ {st.todo.length} ใบ</>
-            : (onlyNew && st.withFile.length ? "พิมพ์ครบแล้ว" : "ไม่มีใบปะหน้า")}
+            : (onlyNew && st.printable.length ? "พิมพ์ครบแล้ว" : "ไม่มีใบปะหน้า")}
         </button>
       </div>
     );
@@ -1535,15 +1615,23 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
             <input type="checkbox" checked={onlyNew} disabled={!!busy} onChange={e => setOnlyNew(e.target.checked)} style={{ width: 18, height: 18 }}/>
             เฉพาะใบที่ยังไม่เคยพิมพ์ (จากเครื่องนี้)
           </label>
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer", minHeight: 32, lineHeight: 1.5 }}>
+            <input type="checkbox" checked={useAddr} disabled={!!busy} style={{ width: 18, height: 18, marginTop: 1, flex: "none" }}
+              onChange={e => { setUseAddr(e.target.checked); try { localStorage.setItem("ims_label_batch_addr", e.target.checked ? "1" : "0"); } catch (x) {} }}/>
+            <span>ออร์เดอร์ที่ไม่ได้แนบไฟล์ ให้พิมพ์ใบปะหน้าจากที่อยู่ในระบบแทน<br/><span style={{ fontSize: 11.5, color: "var(--muted)" }}>เช่น Facebook / LINE ที่ไม่มีใบปะหน้าจากแพลตฟอร์ม</span></span>
+          </label>
           {groups.length > 1 && row("_all", "ทุกแพลตฟอร์ม", allStat, <span className="pp-icon pp-icon-all pp-icon-lg"><Icons.Grid size={18}/></span>)}
           {groups.map(g => {
             const m = (typeof channelMark === "function") ? channelMark(g.name) : null;
             const icon = (typeof MarkTile === "function" && m) ? <MarkTile m={m} size={36}/> : <span className="pp-icon pp-icon-lg"/>;
             return row(g.name, g.name, stat(g.orders), icon);
           })}
+          {warn && (
+            <div role="alert" style={{ fontSize: 12.5, lineHeight: 1.6, padding: "8px 10px", borderRadius: 10, background: "var(--warning-soft, var(--danger-soft))", color: "var(--warning, var(--danger))", fontWeight: 600 }}>⚠ {warn}</div>
+          )}
           {missingAll.length > 0 && (
             <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, padding: "8px 10px", borderRadius: 10, background: "var(--surface-2)" }}>
-              ยังไม่แนบใบปะหน้า: <span className="mono">{missingAll.slice(0, 8).map(o => (typeof orderShortId === "function") ? orderShortId(o) : o.id).join(", ")}{missingAll.length > 8 ? ` และอีก ${missingAll.length - 8}` : ""}</span>
+              ไม่มีใบปะหน้าและไม่มีที่อยู่: <span className="mono">{missingAll.slice(0, 8).map(o => (typeof orderShortId === "function") ? orderShortId(o) : o.id).join(", ")}{missingAll.length > 8 ? ` และอีก ${missingAll.length - 8}` : ""}</span>
             </div>
           )}
           <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.6 }}>
