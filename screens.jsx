@@ -2006,10 +2006,11 @@ function Outbound({ goTo, pushToast, focus }) {
           <button className={"btn" + ((filterCh !== "all" || filterQ) ? " btn-accent" : "")} onClick={() => setFilterOpen(o => !o)}>
             <Icons.Filter/> ตัวกรอง{(filterCh !== "all" || filterQ) ? " •" : ""}
           </button>
-          <button className="btn" onClick={() => {
-            const toPrint = pickedCount > 0 ? orders.filter(o => picked[o.id]) : tabOrders.filter(o => o.status === "picking");
-            if (typeof openPickListWindow === "function") openPickListWindow(toPrint, pushToast);
-          }}><Icons.Print/> รายการหยิบสินค้า</button>
+          <button className="btn" title={pickedCount > 0 ? "ใบรายการสินค้าของออร์เดอร์ที่เลือก" : "ใบรายการสินค้าของทุกออร์เดอร์ในแท็บนี้"} onClick={() => {
+            const toPrint = pickedCount > 0 ? orders.filter(o => picked[o.id]) : tabOrders;
+            if (typeof openPackChecklist === "function") openPackChecklist(toPrint, pushToast);
+            else if (typeof openPickListWindow === "function") openPickListWindow(toPrint, pushToast);
+          }}><Icons.Print/> {pickedCount > 0 ? `พิมพ์ใบรายการ (${pickedCount})` : `พิมพ์ใบรายการทั้งหมด (${tabOrders.length})`}</button>
           <button className="btn" onClick={() => setIssueOpen(true)}><Icons.Out size={14}/> ตัดสต็อก</button>
           <button className="btn btn-primary" onClick={() => goTo("labels")}><Icons.Tag/> สร้างฉลากส่ง</button>
         </div>
@@ -2271,7 +2272,10 @@ function Outbound({ goTo, pushToast, focus }) {
                   <td>{o.carrier ? <CarrierMark carrier={o.carrier} label/> : <span style={{ color: "var(--faint)" }}>—</span>}</td>
                   <td className="t-mono">{o.tracking}</td>
                   <td><span className={"badge " + stCls}><span className="dot"/>{stLab}</span></td>
-                  <td><button className="btn btn-ghost btn-icon" title="สร้างฉลากจัดส่ง" onClick={() => { queueLabelsAndGo(o, goTo); pushToast(`สร้างฉลาก ${o.id}`); }}><Icons.Tag size={14}/></button></td>
+                  <td style={{ whiteSpace: "nowrap" }}>
+                    {typeof openPackChecklist === "function" && <button className="btn btn-ghost btn-icon" title="ใบรายการสินค้า" aria-label="ใบรายการสินค้า" onClick={() => openPackChecklist([o], pushToast)}><Icons.Print size={14}/></button>}
+                    <button className="btn btn-ghost btn-icon" title="สร้างฉลากจัดส่ง" onClick={() => { queueLabelsAndGo(o, goTo); pushToast(`สร้างฉลาก ${o.id}`); }}><Icons.Tag size={14}/></button>
+                  </td>
                 </tr>
               );
             })}
@@ -6858,6 +6862,13 @@ function PackQueue({ pushToast, goTo, user }) {
   useEffect(() => { setPage(0); }, [plat, q, stage]);
   const initials = (n) => String(n || "").trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "?";
 
+  // ใบรายการแพ็ค (pack-docs.jsx) — A4 check sheet, in the queue's current order.
+  const printList = (ids) => {
+    if (typeof openPackChecklist !== "function") return;
+    const want = new Set(ids);
+    openPackChecklist(rows.filter(r => want.has(r.o.id)).map(r => r.o), pushToast);
+  };
+
   const resetProgress = (id) => {
     if (!confirm("ล้างความคืบหน้าการหยิบของออร์เดอร์นี้?")) return;
     if (typeof clearPackEntry === "function") clearPackEntry(id);
@@ -6896,6 +6907,11 @@ function PackQueue({ pushToast, goTo, user }) {
           downloading / copying / printing the label. Reopens PackShipDocs only. */}
       {view === "done" ? (
           <div className="card card-tight">
+            {packed.length > 0 && typeof openPackChecklist === "function" && (
+              <div className="row" style={{ justifyContent: "flex-end", padding: "10px 12px 0" }}>
+                <button className="btn" onClick={() => openPackChecklist(packed, pushToast)}><Icons.Print size={15}/> พิมพ์ใบรายการทั้งหมด ({packed.length})</button>
+              </div>
+            )}
             <table className="t">
               <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th style={{ width: 1 }}/></tr></thead>
               <tbody>
@@ -6909,7 +6925,10 @@ function PackQueue({ pushToast, goTo, user }) {
                         <td style={{ fontSize: 12, color: "var(--muted)" }}>{o.channel || "—"}</td>
                         <td style={{ fontSize: 12 }}>{new Date(o.packedAt).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</td>
                         <td style={{ fontSize: 11.5, color: "var(--muted)" }}>{o.packedBy || "—"}</td>
-                        <td><button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button></td>
+                        <td style={{ whiteSpace: "nowrap" }}>
+                          {typeof openPackChecklist === "function" && <button className="btn btn-sm btn-ghost" style={{ marginRight: 6 }} title="ใบรายการสินค้า" aria-label="ใบรายการสินค้า" onClick={e => { e.stopPropagation(); openPackChecklist([o], pushToast); }}><Icons.Print size={14}/></button>}
+                          <button className="btn btn-sm">{isOpen ? "ซ่อน" : "ใบปะหน้า"}</button>
+                        </td>
                       </tr>
                       {isOpen && (
                         <tr><td colSpan="6" style={{ background: "var(--surface-2)", padding: "14px 18px" }}>
@@ -6946,6 +6965,7 @@ function PackQueue({ pushToast, goTo, user }) {
           <span style={{ fontSize: 13, fontWeight: 500 }}>เลือก {selIds.length} ออร์เดอร์</span>
           <button onClick={() => setSel({})} style={{ background: "transparent", border: "none", color: "oklch(0.85 0.005 250)", fontSize: 12, cursor: "pointer", textDecoration: "underline" }}>ล้างการเลือก</button>
           <div className="spacer"/>
+          <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์ใบรายการ" onClick={() => printList(selIds)}/>
           <BulkBtn icon={<Icons.Check size={13}/>} label="พร้อมส่ง" onClick={() => markPacked(selIds)}/>
         </div>
       )}
@@ -6959,6 +6979,11 @@ function PackQueue({ pushToast, goTo, user }) {
               <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหาเลขออร์เดอร์หรือลูกค้า" aria-label="ค้นหาออร์เดอร์"/>
               {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
             </div>
+            {typeof openPackChecklist === "function" && filtered.length > 0 && (
+              <button className="btn" onClick={() => printList(filtered.map(r => r.o.id))} title="พิมพ์ใบรายการสินค้าของออร์เดอร์ที่แสดงอยู่ เพื่อเช็คจำนวนตอนแพ็ค">
+                <Icons.Print size={15}/> {(plat || q || stage) ? "พิมพ์ใบรายการ" : "พิมพ์ใบรายการทั้งหมด"} ({filtered.length})
+              </button>
+            )}
             {typeof PACK_SORTS !== "undefined" && (
               <select className="input pq-sort" value={packSortMode()} onChange={e => setPackSortMode(e.target.value)} aria-label="เรียงออร์เดอร์">
                 {PACK_SORTS.map(x => <option key={x.id} value={x.id}>{x.label}</option>)}
@@ -7045,6 +7070,9 @@ function PackQueue({ pushToast, goTo, user }) {
                         )}
                         <button className="btn btn-sm pq-act-done" onClick={() => markPacked([r.o.id])} title="ทำเครื่องหมายพร้อมส่ง">
                           <Icons.Check size={13}/> แพ็คเสร็จ
+                        </button>
+                        <button className="btn btn-sm btn-ghost" onClick={() => printList([r.o.id])} title="พิมพ์ใบรายการออร์เดอร์นี้" aria-label="พิมพ์ใบรายการออร์เดอร์นี้">
+                          <Icons.Print size={14}/>
                         </button>
                         <button className="btn btn-sm btn-ghost" aria-label={isOpen ? "ซ่อนรายละเอียด" : "ดูรายละเอียด"} onClick={() => setOpen(isOpen ? null : r.o.id)}>
                           <Icons.Chev size={14} style={isOpen ? { transform: "rotate(90deg)" } : undefined}/>
