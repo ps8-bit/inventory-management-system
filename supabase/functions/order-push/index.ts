@@ -3,7 +3,7 @@
 // The browser that makes an order change (new / edited / cancelled) posts the
 // alert records it computed (tracking.jsx _orderAlertDiff — before/after per
 // line and per field). This function signs and sends one push per alert to
-// every row in push_subscriptions except the sender's own, so a locked Android
+// every row in push_subscriptions except the sending device, so a locked Android
 // phone or a Home-Screen iPhone shows it in the notification tray. The service
 // worker stores each payload so the app can show the full before/after review
 // when it is opened.
@@ -140,8 +140,13 @@ Deno.serve(async (req) => {
     : (Array.isArray(body?.alerts) ? body.alerts : []).slice(0, MAX_ALERTS);
   if (!alerts.length) return json({ ok: true, sent: 0 });
 
+  // Skip only the DEVICE that made the change (its own endpoint), not the whole
+  // account: the owner edits on the desktop and must still get the alert on
+  // their phone. A sender without push on (no endpoint) skips nothing.
+  const self = typeof body?.endpoint === "string" ? body.endpoint : "";
   let q = admin.from("push_subscriptions").select("endpoint, p256dh, auth, role, user_id");
-  q = test ? q.eq("user_id", user.id) : q.neq("user_id", user.id);
+  if (test) q = q.eq("user_id", user.id);
+  else if (self) q = q.neq("endpoint", self);
   const { data: subs, error } = await q;
   if (error) return json({ ok: false, error: error.message }, 500);
   const targets = (subs || []).filter((s: any) => s.role !== "viewer");
