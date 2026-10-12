@@ -7107,6 +7107,9 @@ function PackQueue({ pushToast, goTo, user, focus }) {
               {packed.length > 0 && typeof openPackChecklist === "function" && (
                 <button className="btn" onClick={() => openPackChecklist(packed, pushToast)}><Icons.Print size={15}/> พิมพ์ใบรายการทั้งหมด ({packed.length})</button>
               )}
+              {packed.length > 0 && typeof openPackLabelBatch === "function" && (
+                <button className="btn" onClick={() => openPackLabelBatch(packed, pushToast)}><Icons.Print size={15}/> พิมพ์ใบปะหน้ารวม</button>
+              )}
             </div>
             <table className="t">
               <thead><tr><th>เลขที่ออร์เดอร์</th><th>ลูกค้า</th><th>ช่องทาง</th><th>แพ็คเสร็จ</th><th>ผู้แพ็ค</th><th>สถานะ</th><th style={{ width: 1 }}/></tr></thead>
@@ -7165,6 +7168,7 @@ function PackQueue({ pushToast, goTo, user, focus }) {
           <button onClick={() => setSel({})} style={{ background: "transparent", border: "none", color: "oklch(0.85 0.005 250)", fontSize: 12, cursor: "pointer", textDecoration: "underline" }}>ล้างการเลือก</button>
           <div className="spacer"/>
           <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์ใบรายการ" onClick={() => printList(selIds)}/>
+          {typeof openPackLabelBatch === "function" && <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์ใบปะหน้า" onClick={() => openPackLabelBatch(rows.filter(r => sel[r.o.id]).map(r => r.o), pushToast)}/>}
           <BulkBtn icon={<Icons.Check size={13}/>} label="พร้อมส่ง" onClick={() => markPacked(selIds)}/>
         </div>
       )}
@@ -7181,6 +7185,11 @@ function PackQueue({ pushToast, goTo, user, focus }) {
             {typeof openPackChecklist === "function" && filtered.length > 0 && (
               <button className="btn" onClick={() => printList(filtered.map(r => r.o.id))} title="พิมพ์ใบรายการสินค้าของออร์เดอร์ที่แสดงอยู่ เพื่อเช็คจำนวนตอนแพ็ค">
                 <Icons.Print size={15}/> {(plat || q || stage) ? "พิมพ์ใบรายการ" : "พิมพ์ใบรายการทั้งหมด"} ({filtered.length})
+              </button>
+            )}
+            {typeof openPackLabelBatch === "function" && filtered.length > 0 && (
+              <button className="btn btn-primary" onClick={() => openPackLabelBatch(filtered.map(r => r.o), pushToast, plat)} title="พิมพ์ใบปะหน้าที่แนบไว้ทั้งหมดในครั้งเดียว แยกตามแพลตฟอร์ม">
+                <Icons.Print size={15}/> พิมพ์ใบปะหน้ารวม
               </button>
             )}
             {typeof PACK_SORTS !== "undefined" && (

@@ -57,11 +57,25 @@ async function saveOrderFile(id, file) {
     return (data && data.length) ? { ok: true } : { error: "ไม่มีสิทธิ์ลบไฟล์" };
   }
   if (!safeOrderFile(file)) return { error: "ไฟล์ไม่ถูกต้อง" };
+  file = await nameOrderFileByOrderNo(file);
   const { data, error } = await sb.from("order_files")
     .upsert({ id, name: file.name || "", type: file.type, data_url: file.dataUrl, updated_at: new Date().toISOString() })
     .select("id");
   if (error) return { error: /row-level security/i.test(error.message) ? "ไม่มีสิทธิ์แนบไฟล์" : error.message };
   return (data && data.length) ? { ok: true } : { error: "ไม่มีสิทธิ์แนบไฟล์" };
+}
+/* A marketplace PDF label is stored under its own order number ("261006VVEJ5G05.pdf"),
+   so a downloaded / shared / batch-printed file says which order it is. Every
+   label upload passes through saveOrderFile, so this is the one place. A label
+   whose number can't be read keeps the name it was uploaded with. */
+async function nameOrderFileByOrderNo(file) {
+  if (!file || file.type !== "application/pdf") return file;
+  try {
+    const c = await extractLabelCodes(file);
+    const no = c && String(c.orderNo || "").replace(/[^0-9A-Za-z_-]+/g, "");
+    if (no) return { ...file, name: no + ".pdf" };
+  } catch (e) {}
+  return file;
 }
 /* Images → 1600px JPEG (canvas JPEG encoding works everywhere incl. iOS Safari,
    which can't encode WebP); PDFs kept as-is under the size cap. */
@@ -1269,6 +1283,278 @@ function printOrderFile(file) {
   _printPDHtml(img, size);
 }
 
+/* ── พิมพ์ใบปะหน้ารวม ── every attached label (order_files) of a list of orders,
+   grouped by platform, printed in ONE run: a multi-page print on desktop, an
+   exact-size multi-page PDF on phones (same @page problem as printOrderFile).
+   Each PDF page is rasterised with pdf.js at ~300 dpi so barcodes stay
+   scannable; a landscape page is turned to fit the portrait roll. "Printed"
+   is remembered per device only — it is a convenience, not shared state. */
+const LABEL_PRINTED_KEY = "ims_label_printed_v1";
+function labelPrintedMap() {
+  try { return JSON.parse(localStorage.getItem(LABEL_PRINTED_KEY) || "{}") || {}; } catch (e) { return {}; }
+}
+function markLabelsPrinted(ids) {
+  const m = labelPrintedMap(), now = Date.now(), cutoff = now - 30 * 86400000;
+  Object.keys(m).forEach(k => { if (!(m[k] > cutoff)) delete m[k]; });
+  (ids || []).forEach(id => { m[id] = now; });
+  try { localStorage.setItem(LABEL_PRINTED_KEY, JSON.stringify(m)); } catch (e) {}
+}
+function _loadImg(src) {
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("เปิดรูปไม่ได้")); i.src = src; });
+}
+/* Draw onto a white canvas, rotated 90° when the source is landscape and the
+   paper is portrait (or the other way round). */
+function _labelCanvasFrom(src, sw, sh, portrait) {
+  const rotate = portrait ? sw > sh * 1.05 : sh > sw * 1.05;
+  const c = document.createElement("canvas");
+  c.width = rotate ? sh : sw; c.height = rotate ? sw : sh;
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+  if (rotate) { g.translate(c.width, 0); g.rotate(Math.PI / 2); }
+  g.drawImage(src, 0, 0, sw, sh);
+  return c;
+}
+async function _orderFilePages(file, size) {
+  const f = safeOrderFile(file);
+  if (!f) return [];
+  const portrait = size.h >= size.w;
+  if (f.type !== "application/pdf") {
+    const im = await _loadImg(f.dataUrl);
+    const c = _labelCanvasFrom(im, im.naturalWidth, im.naturalHeight, portrait);
+    return [{ dataUrl: c.toDataURL("image/jpeg", 0.92), fmt: "JPEG", w: c.width, h: c.height }];
+  }
+  const lib = await _loadPdfJs();
+  lib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + "pdf.worker.min.js";
+  const bin = atob(f.dataUrl.split(",")[1] || "");
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  const doc = await lib.getDocument({ data: arr, isEvalSupported: false }).promise;
+  const out = [];
+  try {
+    for (let n = 1; n <= Math.min(doc.numPages, 4); n++) {
+      const page = await doc.getPage(n);
+      const base = page.getViewport({ scale: 1 });
+      // ~300 dpi, but never a canvas over 2400 px on its long side (phone memory).
+      const scale = Math.min(300 / 72, 2400 / Math.max(base.width, base.height));
+      const vp = page.getViewport({ scale });
+      const c = document.createElement("canvas");
+      c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+      const g = c.getContext("2d");
+      g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: g, viewport: vp }).promise;
+      const r = _labelCanvasFrom(c, c.width, c.height, portrait);
+      out.push({ dataUrl: r.toDataURL("image/png"), fmt: "PNG", w: r.width, h: r.height });
+    }
+  } finally { doc.destroy(); }
+  return out;
+}
+function _labelBatchName(groupName, count) {
+  const d = new Date(), z = (n) => String(n).padStart(2, "0");
+  const clean = String(groupName || "").replace(/[\\/:*?"<>|#%\s]+/g, "-");
+  return `ใบปะหน้า_${clean}_${count}ใบ_${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}`;
+}
+/* Fetch + rasterise, 3 files at a time. onProgress(done, total).
+   Returns { pages:[{dataUrl,fmt,w,h}], okIds, failed:[order] } in list order. */
+async function collectOrderLabelPages(orders, size, onProgress) {
+  const res = new Array(orders.length);
+  let next = 0, done = 0;
+  const work = async () => {
+    while (next < orders.length) {
+      const i = next++;
+      const o = orders[i];
+      try {
+        const file = await loadOrderFile(o.id);
+        res[i] = file ? { o, pages: await _orderFilePages(file, size) } : { o, pages: [] };
+      } catch (e) { res[i] = { o, pages: [] }; }
+      done++;
+      if (onProgress) onProgress(done, orders.length);
+    }
+  };
+  await Promise.all([work(), work(), work()]);
+  const pages = [], okIds = [], failed = [];
+  res.forEach(r => { if (r.pages.length) { pages.push(...r.pages); okIds.push(r.o.id); } else failed.push(r.o); });
+  return { pages, okIds, failed };
+}
+function printLabelPages(pages, size, name) {
+  if (_pdIsPhone() && window.jspdf) {
+    const { jsPDF } = window.jspdf;
+    const orient = size.w > size.h ? "landscape" : "portrait";
+    const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h], orientation: orient });
+    pages.forEach((p, i) => {
+      if (i) pdf.addPage([size.w, size.h], orient);
+      const k = Math.min(size.w / p.w, size.h / p.h);
+      const w = p.w * k, h = p.h * k;
+      pdf.addImage(p.dataUrl, p.fmt, (size.w - w) / 2, (size.h - h) / 2, w, h);
+    });
+    pdf.save(name + ".pdf");
+    return;
+  }
+  const html = pages.map((p, i) =>
+    `<div style="width:${size.w}mm;height:${size.h}mm;display:flex;align-items:center;justify-content:center;overflow:hidden;${i < pages.length - 1 ? "break-after:page;page-break-after:always;" : ""}">` +
+      `<img src="${_escPD(p.dataUrl)}" alt="" style="max-width:100%;max-height:100%;object-fit:contain;display:block"></div>`).join("");
+  // The browser's "Save as PDF" names the file after document.title.
+  const prevTitle = document.title;
+  let restored = false;
+  const restore = () => { if (restored) return; restored = true; document.title = prevTitle; window.removeEventListener("afterprint", restore); };
+  document.title = name;
+  window.addEventListener("afterprint", restore);
+  setTimeout(restore, 120000);
+  _printPDHtml(html, size);
+}
+
+/* Self-mounting dialog (same pattern as openPackChecklist), so any order list on
+   either fork can open it. `preset` = a platform name to highlight. */
+let _plbRoot = null, _plbHost = null, _plbClose = null;
+function openPackLabelBatch(orders, pushToast, preset) {
+  const list = (orders || []).filter(Boolean);
+  if (!list.length) { (pushToast || _pdToast)("ไม่มีออร์เดอร์"); return; }
+  if (!_plbHost) {
+    _plbHost = document.createElement("div");
+    _plbHost.id = "__plbHost";
+    document.body.appendChild(_plbHost);
+    _plbRoot = ReactDOM.createRoot(_plbHost);
+  }
+  if (_plbClose) _plbClose(true);
+  let closed = false, pushed = false;
+  const onPop = () => teardown();
+  const teardown = () => {
+    if (closed) return;
+    closed = true; _plbClose = null;
+    window.removeEventListener("popstate", onPop);
+    _plbRoot.render(null);
+  };
+  const close = (keepEntry) => {
+    if (closed) return;
+    const ours = pushed && history.state && history.state.__imsLabelBatch;
+    teardown();
+    if (ours && !keepEntry) history.back();
+  };
+  _plbClose = close;
+  try {
+    if (!(history.state && history.state.__imsLabelBatch)) history.pushState({ ...(history.state || {}), __imsLabelBatch: 1 }, "");
+    pushed = true; window.addEventListener("popstate", onPop);
+  } catch (e) {}
+  _plbRoot.render(<PackLabelBatch key={Date.now()} orders={list} preset={preset || ""} pushToast={pushToast || _pdToast} onClose={() => close(false)}/>);
+}
+function PackLabelBatch({ orders, preset, pushToast, onClose }) {
+  const ids = useOrderFileIds();
+  const [sizeId, setSizeId] = useStatePD(() => packLabelSize().id);
+  const [onlyNew, setOnlyNew] = useStatePD(false);
+  const [busy, setBusy] = useStatePD(null);        // null | { key, done, total }
+  const [printedRev, setPrintedRev] = useStatePD(0);
+  const size = PACK_LABEL_SIZES.find(s => s.id === sizeId) || PACK_LABEL_SIZES[0];
+  const printed = React.useMemo(() => labelPrintedMap(), [printedRev]);
+  useEffectPD(() => {
+    const esc = (e) => { if (e.key === "Escape" && !busy) onClose(); };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [busy]);
+
+  // Platform groups in queue order; the preset platform first.
+  const groups = React.useMemo(() => {
+    const m = new Map();
+    orders.forEach(o => {
+      const k = packPlatformOf(o);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(o);
+    });
+    const arr = [...m.entries()].map(([name, os]) => ({ name, orders: os }));
+    if (preset) arr.sort((a, b) => (b.name === preset) - (a.name === preset));
+    return arr;
+  }, [orders, preset]);
+  const stat = (os) => {
+    const withFile = os.filter(o => ids.has(o.id));
+    const todo = onlyNew ? withFile.filter(o => !printed[o.id]) : withFile;
+    return { withFile, todo, missing: os.filter(o => !ids.has(o.id)), done: withFile.filter(o => printed[o.id]).length };
+  };
+  const allStat = stat(orders);
+
+  const run = async (key, name, todo) => {
+    if (busy || !todo.length) return;
+    if (todo.length > 80 && !confirm(`พิมพ์ใบปะหน้า ${todo.length} ใบในครั้งเดียว?\nจำนวนมากอาจใช้เวลาสักครู่`)) return;
+    setBusy({ key, done: 0, total: todo.length });
+    let r;
+    try { r = await collectOrderLabelPages(todo, size, (d, t) => setBusy({ key, done: d, total: t })); }
+    catch (e) { setBusy(null); pushToast("เตรียมใบปะหน้าไม่สำเร็จ: " + (e.message || e)); return; }
+    setBusy(null);
+    if (!r.pages.length) { pushToast("เปิดใบปะหน้าไม่ได้ — ลองใหม่อีกครั้ง"); return; }
+    if (setPackLabelSize && sizeId !== packLabelSize().id) setPackLabelSize(sizeId);
+    printLabelPages(r.pages, size, _labelBatchName(name, r.okIds.length));
+    markLabelsPrinted(r.okIds);
+    setPrintedRev(x => x + 1);
+    const short = (o) => (typeof orderShortId === "function") ? orderShortId(o) : o.id;
+    pushToast(r.failed.length
+      ? `${name}: เตรียม ${r.okIds.length} ใบ · เปิดไม่ได้ ${r.failed.length} (${r.failed.slice(0, 3).map(short).join(", ")}${r.failed.length > 3 ? "…" : ""})`
+      : `${name}: เตรียมใบปะหน้า ${r.okIds.length} ใบแล้ว`);
+  };
+
+  const row = (key, name, st, icon) => {
+    const running = busy && busy.key === key;
+    return (
+      <div key={key} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 12, border: "1px solid var(--line, var(--border))", background: key === "_all" ? "var(--surface-2)" : "var(--surface)" }}>
+        {icon}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: 14.5 }}>{name}</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+            มีใบปะหน้า <b className="tnum" style={{ color: "var(--fg)" }}>{st.withFile.length}</b>
+            {st.done > 0 && <> · พิมพ์แล้ว <span className="tnum">{st.done}</span></>}
+            {st.missing.length > 0 && <> · <span style={{ color: "var(--warning, var(--danger))" }}>ยังไม่แนบ <span className="tnum">{st.missing.length}</span></span></>}
+          </div>
+        </div>
+        <button className={"btn" + (key === "_all" || !st.todo.length ? "" : " btn-primary")} disabled={!!busy || !st.todo.length}
+          onClick={() => run(key, name, st.todo)} style={{ minHeight: 40, whiteSpace: "nowrap", opacity: st.todo.length ? 1 : 0.5 }}>
+          {running ? `กำลังเตรียม ${busy.done}/${busy.total}`
+            : st.todo.length ? <><Icons.Print size={15}/> พิมพ์ {st.todo.length} ใบ</>
+            : (onlyNew && st.withFile.length ? "พิมพ์ครบแล้ว" : "ไม่มีใบปะหน้า")}
+        </button>
+      </div>
+    );
+  };
+  const missingAll = allStat.missing;
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="พิมพ์ใบปะหน้ารวม" onClick={() => { if (!busy) onClose(); }}
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: "max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom))" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 560, maxHeight: "100%", display: "flex", flexDirection: "column", background: "var(--surface)", color: "var(--fg)", borderRadius: 14, overflow: "hidden", boxShadow: "var(--shadow-lg)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderBottom: "1px solid var(--line, var(--border))" }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>พิมพ์ใบปะหน้ารวม</div>
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>ใบปะหน้าที่แนบไว้ แยกตามแพลตฟอร์ม · {orders.length} ออร์เดอร์</div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose} disabled={!!busy} aria-label="ปิด"><Icons.X size={16}/></button>
+        </div>
+        <div style={{ flex: 1, overflow: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 10, WebkitOverflowScrolling: "touch" }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>ขนาดกระดาษ</span>
+            {PACK_LABEL_SIZES.map(s => (
+              <button key={s.id} type="button" className={"btn btn-sm" + (s.id === sizeId ? " btn-primary" : "")} disabled={!!busy} onClick={() => setSizeId(s.id)}>{s.label}</button>
+            ))}
+          </div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, cursor: "pointer", minHeight: 32 }}>
+            <input type="checkbox" checked={onlyNew} disabled={!!busy} onChange={e => setOnlyNew(e.target.checked)} style={{ width: 18, height: 18 }}/>
+            เฉพาะใบที่ยังไม่เคยพิมพ์ (จากเครื่องนี้)
+          </label>
+          {groups.length > 1 && row("_all", "ทุกแพลตฟอร์ม", allStat, <span className="pp-icon pp-icon-all pp-icon-lg"><Icons.Grid size={18}/></span>)}
+          {groups.map(g => {
+            const m = (typeof channelMark === "function") ? channelMark(g.name) : null;
+            const icon = (typeof MarkTile === "function" && m) ? <MarkTile m={m} size={36}/> : <span className="pp-icon pp-icon-lg"/>;
+            return row(g.name, g.name, stat(g.orders), icon);
+          })}
+          {missingAll.length > 0 && (
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, padding: "8px 10px", borderRadius: 10, background: "var(--surface-2)" }}>
+              ยังไม่แนบใบปะหน้า: <span className="mono">{missingAll.slice(0, 8).map(o => (typeof orderShortId === "function") ? orderShortId(o) : o.id).join(", ")}{missingAll.length > 8 ? ` และอีก ${missingAll.length - 8}` : ""}</span>
+            </div>
+          )}
+          <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.6 }}>
+            {_pdIsPhone() ? "มือถือ: ระบบสร้างไฟล์ PDF ขนาดตรงกับกระดาษ — เปิดไฟล์แล้วสั่งพิมพ์" : "คอมพิวเตอร์: เปิดหน้าต่างพิมพ์ทีเดียวทุกใบ — เลือกเครื่องพิมพ์ฉลาก หรือ \"บันทึกเป็น PDF\""}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 /* ONE shop-wide setting for every printed ใบปะหน้า — opened from the แพ็คสินค้า
    page header (desktop PackQueue + mobile MPack), never per order. Shows a live
@@ -2205,7 +2491,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 }
 
 Object.assign(window, {
-  loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile,
+  loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile, nameOrderFileByOrderNo, openPackLabelBatch, markLabelsPrinted,
   packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
