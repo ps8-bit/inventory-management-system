@@ -4167,10 +4167,14 @@ function deliverFile(blob, filename) {
   _plainDownload(blob, name);
   return "download";
 }
-/* Drop-in for jsPDF's pdf.save(filename). */
+/* Drop-in for jsPDF's pdf.save(filename). On iOS the PDF opens in the in-app
+   viewer (pack-docs.jsx openFileViewer) — staff want to SEE it, then พิมพ์ /
+   แชร์ from there; the share sheet alone read as "save the file". */
 function savePdf(pdf, filename) {
   if (!isIOSDevice()) { pdf.save(filename); return "download"; }
-  return deliverFile(pdf.output("blob"), filename);
+  const blob = pdf.output("blob");
+  if (typeof openFileViewer === "function") { openFileViewer(blob, filename); return "view"; }
+  return deliverFile(blob, filename);
 }
 
 Object.assign(window, {

@@ -109,9 +109,9 @@ function openOrderFile(file) {
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   const blob = new Blob([arr], { type: f.type });
   // iOS: a blob opened in a new tab / downloaded REPLACES the installed app's page,
-  // and closing the PDF reloads the app — hand it to the share sheet instead.
+  // and closing the PDF reloads the app — show it in the in-app viewer instead.
   if (typeof isIOSDevice === "function" && isIOSDevice()) {
-    deliverFile(blob, f.name || (f.type === "application/pdf" ? "label.pdf" : "label.jpg"));
+    openFileViewer(blob, f.name || (f.type === "application/pdf" ? "label.pdf" : "label.jpg"));
     return;
   }
   const url = URL.createObjectURL(blob);
@@ -127,6 +127,128 @@ function openOrderFile(file) {
     window.dispatchEvent(new CustomEvent("ims-toast", { detail: "ดาวน์โหลดใบปะหน้าแล้ว — เปิดไฟล์เพื่อพิมพ์" }));
   }
   setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+/* In-app viewer for a PDF / image (iOS). Opening the file any "native" way
+   makes the installed app navigate to it and reload when it's closed; the share
+   sheet works but reads as "save", not "view". So the pages are drawn here with
+   pdf.js, over the app, and "พิมพ์ / แชร์" hands the file to the share sheet from
+   a fresh tap (AirPrint, Save to Files, label-printer apps). Back closes it. */
+let _fvClose = null;
+function openFileViewer(blob, filename) {
+  if (_fvClose) _fvClose(true);
+  const name = String(filename || "file");
+  const isPdf = blob.type === "application/pdf" || /\.pdf$/i.test(name);
+  const urls = [];
+  const wrap = document.createElement("div");
+  wrap.setAttribute("role", "dialog");
+  wrap.setAttribute("aria-modal", "true");
+  wrap.setAttribute("aria-label", name);
+  wrap.style.cssText = "position:fixed;inset:0;z-index:2147482000;background:#2b2b2b;display:flex;flex-direction:column;color:#fff;font-family:inherit";
+  const bar = document.createElement("div");
+  bar.style.cssText = "display:flex;align-items:center;gap:8px;padding:calc(8px + env(safe-area-inset-top)) 10px 8px;background:#1c1c1c;flex:none";
+  const mkBtn = (text, primary) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = text;
+    b.style.cssText = "min-height:44px;padding:0 14px;border-radius:10px;font-size:15px;font-weight:700;font-family:inherit;white-space:nowrap;" +
+      (primary ? "border:none;background:var(--accent,#f60);color:#fff" : "border:1px solid rgba(255,255,255,.3);background:transparent;color:#fff");
+    return b;
+  };
+  const closeBtn = mkBtn("✕ ปิด");
+  const title = document.createElement("div");
+  title.textContent = name;
+  title.style.cssText = "flex:1;min-width:0;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85";
+  const shareBtn = mkBtn("พิมพ์ / แชร์", true);
+  bar.append(closeBtn, title, shareBtn);
+  const body = document.createElement("div");
+  body.style.cssText = "flex:1;overflow:auto;-webkit-overflow-scrolling:touch;padding:12px 10px calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;align-items:center;gap:12px";
+  const status = document.createElement("div");
+  status.textContent = "กำลังเปิดไฟล์…";
+  status.style.cssText = "font-size:14px;opacity:.8;padding:24px";
+  body.appendChild(status);
+  wrap.append(bar, body);
+  document.body.appendChild(wrap);
+
+  // Tap a page to zoom 2× (the app shell blocks pinch-zoom); tap again to fit.
+  let zoomed = false;
+  const addPage = (src) => {
+    const img = document.createElement("img");
+    img.src = src; img.alt = "";
+    img.style.cssText = "width:100%;max-width:900px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.4);display:block;flex:none";
+    img.onclick = () => {
+      zoomed = !zoomed;
+      body.querySelectorAll("img").forEach(i => { i.style.width = zoomed ? "200%" : "100%"; i.style.maxWidth = zoomed ? "none" : "900px"; });
+      body.style.alignItems = zoomed ? "flex-start" : "center";
+    };
+    body.appendChild(img);
+  };
+  let closed = false, pushed = false;
+  const onPop = () => teardown();
+  const teardown = () => {
+    if (closed) return;
+    closed = true; _fvClose = null;
+    window.removeEventListener("popstate", onPop);
+    wrap.remove();
+    urls.forEach(u => URL.revokeObjectURL(u));
+  };
+  const close = (keepEntry) => {
+    if (closed) return;
+    const ours = pushed && history.state && history.state.__imsFileView;
+    teardown();
+    if (ours && !keepEntry) history.back();
+  };
+  _fvClose = close;
+  try {
+    if (!(history.state && history.state.__imsFileView)) history.pushState({ ...(history.state || {}), __imsFileView: 1 }, "");
+    pushed = true; window.addEventListener("popstate", onPop);
+  } catch (e) {}
+  closeBtn.onclick = () => close(false);
+  shareBtn.onclick = () => {
+    let file = null;
+    try { file = new File([blob], name, { type: blob.type || (isPdf ? "application/pdf" : "image/jpeg") }); } catch (e) {}
+    if (file && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file] }).catch(() => {});
+    } else if (typeof deliverFile === "function") deliverFile(blob, name);
+  };
+
+  (async () => {
+    try {
+      if (!isPdf) {
+        const u = URL.createObjectURL(blob); urls.push(u);
+        status.remove(); addPage(u);
+        return;
+      }
+      const lib = await _loadPdfJs();
+      lib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + "pdf.worker.min.js";
+      const doc = await lib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false }).promise;
+      try {
+        const n = doc.numPages;
+        // Sharp on a retina phone without blowing iOS's canvas budget.
+        const target = Math.min(1400, Math.round(Math.min(body.clientWidth - 20, 900) * Math.min(window.devicePixelRatio || 1, 2)));
+        for (let i = 1; i <= n && !closed; i++) {
+          status.textContent = `กำลังเปิดหน้า ${i}/${n}…`;
+          const page = await doc.getPage(i);
+          const base = page.getViewport({ scale: 1 });
+          const vp = page.getViewport({ scale: target / base.width });
+          const c = document.createElement("canvas");
+          c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+          const g = c.getContext("2d");
+          g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+          await page.render({ canvasContext: g, viewport: vp }).promise;
+          const pb = await new Promise(res => c.toBlob(res, "image/jpeg", 0.9));
+          c.width = c.height = 0;   // free the canvas now (iOS keeps it otherwise)
+          if (closed) break;
+          const u = URL.createObjectURL(pb); urls.push(u);
+          addPage(u);
+          body.appendChild(status);
+        }
+        status.textContent = n > 1 ? `${n} หน้า` : "";
+        if (n <= 1) status.remove();
+      } finally { doc.destroy(); }
+    } catch (e) {
+      status.textContent = "เปิดไฟล์ไม่ได้ — กด \"พิมพ์ / แชร์\" เพื่อเปิดด้วยแอปอื่น";
+    }
+  })();
 }
 
 /* Save the file to the device. Phones (iOS especially) ignore <a download> on
@@ -2587,7 +2709,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 }
 
 Object.assign(window, {
-  loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile, nameOrderFileByOrderNo, openPackLabelBatch, markLabelsPrinted,
+  loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile, openFileViewer, nameOrderFileByOrderNo, openPackLabelBatch, markLabelsPrinted,
   packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
