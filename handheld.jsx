@@ -111,6 +111,17 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
 
   const ctx = { route, switchTab, push, back, pushToast, user, onLogout, onSwitchUser, fullscreen, pendingSync };
 
+  /* Order alert → the screen where the goods get checked: the pick list for an
+     order still รอแพ็ค, otherwise the order's own detail. */
+  const openAlertOrder = (a) => {
+    const role = user && user.role;
+    const can = (id) => typeof canOpenPage !== "function" || canOpenPage(id, role);
+    if (a.status === "picking" && can("pack")) { push("pack-order", { id: a.id }); return; }
+    const o = (typeof buildOrders === "function" ? buildOrders() : []).find(x => x.id === a.id);
+    if (o && (can("outbound") || can("tracking"))) push("track-edit", o);
+    else if (can("pack")) push("pack-order", { id: a.id });
+  };
+
   return (
     <div className="m-app">
       <StatusBar/>
@@ -119,6 +130,7 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
       </ErrorBoundary>
       <TabBar tab={route.tab} onSwitch={switchTab} role={user && user.role}/>
       {typeof PackSendPrompt === "function" && <PackSendPrompt pushToast={pushToast} mobile/>}
+      {typeof OrderAlerts === "function" && <OrderAlerts mobile onOpen={openAlertOrder}/>}
     </div>
   );
 }
@@ -7238,6 +7250,7 @@ function MPackOrder({ ctx }) {
           </div>
           {order.note && <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 11.5 }}>โน้ต: {order.note}</div>}
           <MPackOrderNote orderId={order.id} user={ctx.user}/>
+          {typeof OrderChangeBanner === "function" && <OrderChangeBanner orderId={order.id}/>}
           {typeof PackAddedBanner === "function" && <PackAddedBanner order={order}/>}
           {typeof canDo === "function" && canDo("sell") && order.status === "picking" && (
             <button className="btn" style={{ width: "100%", justifyContent: "center", marginTop: 10 }} onClick={() => ctx.push("pack-add", { id: order.id })}>
@@ -8646,6 +8659,7 @@ function MTrackEdit({ ctx }) {
         <button className="m-action accent" onClick={save}><Icons.Check size={14}/></button>
       </div>
       <div className="m-content">
+        {typeof OrderChangeBanner === "function" && <OrderChangeBanner orderId={o.id}/>}
         <div className="m-section-label" style={{ padding: "0 4px 6px" }}>ข้อมูลลูกค้า / ออร์เดอร์</div>
         <input className="m-input" value={customer} onChange={e => setCustomer(e.target.value)} placeholder="ชื่อลูกค้า / ผู้รับ" style={{ marginBottom: 8 }}/>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>

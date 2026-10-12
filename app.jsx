@@ -1066,6 +1066,12 @@ function App({ user, onLogout, onSwitchUser }) {
 
       <ToastView toast={toast} onClose={closeToast}/>
 
+      {/* New / edited / cancelled orders from other devices → "check the goods" alert. */}
+      {typeof OrderAlerts === "function" && <OrderAlerts onOpen={(a) => {
+        if (allowed.has("tracking") || allowed.has("outbound")) goToOrder(a.id);
+        else if (allowed.has("pack")) goTo("pack");
+      }}/>}
+
       {typeof PackSendPrompt === "function" && <PackSendPrompt pushToast={pushToast}/>}
 
       {sellOpen && (

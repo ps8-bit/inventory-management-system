@@ -935,7 +935,9 @@ async function _rtReloadOrders() {
   const fresh = await dbLoadOrders();
   if (_rtStale('orders', seq)) return;
   if (fresh) window._DB_ORDERS = fresh;
-  window.dispatchEvent(new CustomEvent('ims-orders-change'));
+  // remote:true = this came from ANOTHER device (or a catch-up) — the order-alert
+  // watcher only alerts on these; local writes fire the plain event.
+  window.dispatchEvent(new CustomEvent('ims-orders-change', { detail: { remote: true } }));
 }
 async function _rtReloadAudit() {
   // Reload at least as deep as the user has already paged back with
@@ -970,7 +972,7 @@ function refreshLiveData() {
     if (v != null) window._DB_PACK_PROGRESS = v;
     if (n != null) window._DB_PACK_LOC_NOTES = n;
     if (o != null) window._DB_PACK_ORDER_NOTES = o;
-    if (v != null || n != null || o != null) window.dispatchEvent(new CustomEvent('ims-pack-change'));
+    if (v != null || n != null || o != null) window.dispatchEvent(new CustomEvent('ims-pack-change', { detail: { remote: true } }));
   });
 }
 let _liveFocusHooked = false;
@@ -1010,7 +1012,7 @@ function setupRealtimeSync() {
       const fresh = await dbLoadLabels();
       if (_rtStale('labels', seq)) return;
       if (fresh) window._DB_LABELS = fresh;
-      window.dispatchEvent(new CustomEvent('ims-labels-change'));
+      window.dispatchEvent(new CustomEvent('ims-labels-change', { detail: { remote: true } }));
     })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'store_settings' }, async () => {
       const fresh = await dbLoadStoreSettings();
@@ -1070,7 +1072,7 @@ function setupRealtimeSync() {
             else localStorage.setItem('ims_role_perms', JSON.stringify(v));
           } catch (e) {}
         }
-        window.dispatchEvent(new CustomEvent(map[k][1]));
+        window.dispatchEvent(new CustomEvent(map[k][1], { detail: { remote: true } }));
       }
     })
     .subscribe((status) => {
