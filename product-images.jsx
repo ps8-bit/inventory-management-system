@@ -191,12 +191,34 @@ const fmtBytes = (n) => {
 
 /* ============ Thumbnail component ============ */
 
-function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel }) {
+/* Full-screen photo so a packer can check colour/model before picking. Mounted
+   in its own root (like askForm) so it works from any screen; tap or Esc closes. */
+function openProductImageViewer(url, caption) {
+  if (!url) return;
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = ReactDOM.createRoot(host);
+  const close = () => { document.removeEventListener("keydown", onKey); setTimeout(() => { try { root.unmount(); } catch (e) {} host.remove(); }, 0); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  root.render(
+    <div onClick={close} role="dialog" aria-label="ดูรูปสินค้า" style={{ position: "fixed", inset: 0, zIndex: 10000, background: "rgba(0,0,0,.88)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 16, cursor: "zoom-out" }}>
+      <img src={url} alt={caption || ""} style={{ maxWidth: "100%", maxHeight: "calc(100% - 60px)", objectFit: "contain", borderRadius: 8, background: "#fff" }}/>
+      {caption && <div className="mono" style={{ color: "#fff", fontSize: 13, marginTop: 10, textAlign: "center", wordBreak: "break-word" }}>{caption}</div>}
+      <div style={{ color: "rgba(255,255,255,.7)", fontSize: 12, marginTop: 6 }}>แตะเพื่อปิด</div>
+    </div>
+  );
+}
+
+/* zoom: tap opens the full-size photo (stops the tap reaching the row under it). */
+function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel, zoom, caption }) {
   const images = useProductImages();
   const url = resolveProductImage(sku, images);
   if (url) {
+    const open = zoom ? (e) => { e.stopPropagation(); e.preventDefault(); openProductImageViewer(url, caption || sku); } : undefined;
     return (
-      <div style={{
+      <div onClick={open} role={zoom ? "button" : undefined} title={zoom ? "แตะเพื่อดูรูปใหญ่" : undefined} style={{
+        cursor: zoom ? "zoom-in" : undefined,
         width: size, height: size,
         borderRadius: radius,
         overflow: "hidden",
@@ -517,6 +539,7 @@ Object.assign(window, {
   useProductImages,
   ProductImageUpload,
   ProductImageThumb,
+  openProductImageViewer,
   setLocationImage,
   loadLocationImages,
   moveLocationImage,

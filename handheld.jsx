@@ -6683,7 +6683,7 @@ function MPackLine({ line, picked, short, onSet, onShort, sub }) {
           style={{ width: 40, height: 40, flexShrink: 0, borderRadius: 10, border: "1.5px solid " + (full ? "var(--success)" : "var(--border)"), background: full ? "var(--success)" : "transparent", color: full ? "#fff" : "var(--muted)", display: "grid", placeItems: "center", cursor: "pointer", padding: 0 }}>
           {full ? <Icons.Check size={19}/> : short ? <Icons.Warn size={16}/> : null}
         </button>
-        <ProductImageThumb sku={line.sku} size={34} radius={7}/>
+        <ProductImageThumb sku={line.sku} size={44} radius={8} zoom caption={line.sku + (line.name ? " · " + line.name : "")}/>
         <div className="m-row-main" style={{ minWidth: 0 }}>
           <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: tone, textDecoration: full ? "line-through" : "none" }}>{line.name}</div>
           <div className="m-row-sub mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{line.sku}</div>
@@ -7572,7 +7572,7 @@ function MPackWave({ ctx }) {
                   <div style={{ borderTop: "1px solid var(--border)" }}>
                     {oLines.map(l => (
                       <div key={l.key} className="row" style={{ gap: 10, padding: "8px 14px", borderBottom: "1px solid var(--border)" }}>
-                        <ProductImageThumb sku={l.sku} size={28} radius={6}/>
+                        <ProductImageThumb sku={l.sku} size={36} radius={6} zoom caption={l.sku + (l.name ? " · " + l.name : "")}/>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.name}</div>
                           <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{l.sku}</div>

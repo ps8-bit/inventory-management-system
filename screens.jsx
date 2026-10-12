@@ -7101,7 +7101,7 @@ function PackQueue({ pushToast, goTo, user }) {
                                             : <button className="btn btn-ghost btn-sm" onClick={edit} style={{ fontSize: 10.5, padding: "0 4px", height: 20, marginTop: 2, fontFamily: "var(--font-sans, inherit)", fontWeight: 400 }}>+ โน้ตช่องนี้</button>;
                                         })()}
                                       </td>
-                                      <td className="mono" style={{ fontSize: 11.5 }}>{l.sku}</td>
+                                      <td className="mono" style={{ fontSize: 11.5 }}><div className="row" style={{ gap: 8 }}>{typeof ProductImageThumb === "function" && <ProductImageThumb sku={l.sku} size={40} radius={7} zoom caption={l.sku + (l.name ? " · " + l.name : "")}/>}<span>{l.sku}</span></div></td>
                                       <td style={{ fontSize: 12.5 }}>
                                         {l.name}
                                         {l.addedQty > 0 && <span style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 700, color: "#fff", background: "var(--info)", borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" }}>＋ เพิ่มใหม่{l.addedQty < l.qty ? " " + l.addedQty + " ชิ้น" : ""}</span>}
