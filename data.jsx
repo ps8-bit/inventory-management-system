@@ -1989,6 +1989,162 @@ function loadSalesRecords() {
   const orders = (typeof loadOrders === "function" ? loadOrders() : []) || [];
   return orders.concat(saleMoveOrders());
 }
+/* ── ต้องจัดการ: per-SKU action board (วิเคราะห์ยอดขาย) ─────────────────────────
+   Turns sales history into ONE segment + action per SKU: restock the sellers
+   that are about to run out, push the rising ones, bundle/discount the slow and
+   dead ones. Plain arithmetic over loadSalesRecords() (orders + ปรับสต็อก sales)
+   and receive dates — no schema. History only exists since the shop started
+   recording, so velocity divides by the days actually OBSERVED (never the full
+   window) and stock received recently is "new", not dead. */
+let _receiveDates = null;          // sku → { first, last } (ms)
+let _receiveInflight = null;
+function refreshReceiveDates() {
+  if (typeof dbLoadReceiveDates !== "function") return Promise.resolve();
+  if (_receiveInflight) return _receiveInflight;
+  const since = new Date(Date.now() - SALE_MOVES_DAYS * 86400000).toISOString();
+  _receiveInflight = dbLoadReceiveDates(since).then(rows => {
+    if (!Array.isArray(rows)) return;
+    const m = new Map();
+    for (const r of rows) {
+      const ms = Date.parse(r && r.created_at) || 0;
+      if (!r || !r.sku || !ms) continue;
+      const e = m.get(r.sku);
+      if (!e) m.set(r.sku, { first: ms, last: ms });
+      else { if (ms < e.first) e.first = ms; if (ms > e.last) e.last = ms; }
+    }
+    _receiveDates = m;
+    window.dispatchEvent(new CustomEvent("ims-sales-change"));
+  }).catch(() => {}).then(() => { _receiveInflight = null; });
+  return _receiveInflight;
+}
+
+const SKU_SEGMENTS = [
+  { id: "restock", label: "ขายดี · ใกล้หมด", tone: "danger",  action: "สั่งเพิ่มก่อนของขาด — ของขาดคือยอดขายที่หายไปทันที" },
+  { id: "rising",  label: "กำลังมาแรง",      tone: "info",    action: "เร่งโปรโมต และกันสต็อกไว้ให้พอ" },
+  { id: "star",    label: "ขายดี",            tone: "success", action: "ลงขายให้ครบทุกช่องทาง และใช้เป็นตัวหลักในชุดสินค้า" },
+  { id: "ok",      label: "ปกติ",             tone: "neutral", action: "ขายสม่ำเสมอ สต็อกพอดี" },
+  { id: "slow",    label: "ขายช้า",           tone: "warning", action: "จัดชุดคู่กับสินค้าขายดี หรือทำโปรเล็กน้อย" },
+  { id: "dead",    label: "ไม่มียอดขาย",      tone: "danger",  action: "เช็กรูป / ที่จัดเก็บ / การลงขาย แล้วลดราคาเป็นขั้น หรือจัดชุด" },
+  { id: "new",     label: "สินค้าใหม่",       tone: "neutral", action: "เพิ่งรับเข้า ยังเร็วเกินไปที่จะตัดสิน" }
+];
+
+function buildSkuInsights(opts) {
+  const o = Object.assign({ days: 60, coverLow: 14, coverHigh: 90, newDays: 30, targetCover: 30 }, opts || {});
+  const DAY = 86400000;
+  const today = todayIso();
+  const todayMs = Date.parse(today + "T00:00:00+07:00");
+  const ageOf = (iso) => Math.round((todayMs - Date.parse(iso + "T00:00:00+07:00")) / DAY); // 0 = today
+
+  const records = (loadSalesRecords() || []).filter(r => r && r.dateIso && r.status !== "cancelled");
+  let oldest = 0;
+  for (const r of records) { const a = ageOf(r.dateIso); if (a > oldest) oldest = a; }
+  const observed = Math.max(1, Math.min(o.days, oldest + 1));   // days of history inside the window
+  const half = Math.min(30, Math.floor(observed / 2));           // recent vs previous block for the trend
+
+  const per = new Map();
+  const chTotals = new Map();
+  for (const r of records) {
+    const age = ageOf(r.dateIso);
+    if (!Array.isArray(r.lineItems) || !(age >= 0)) continue;
+    for (const li of r.lineItems) {
+      const qty = Number(li && li.qty) || 0;
+      if (!li || !li.sku || qty <= 0) continue;
+      let a = per.get(li.sku);
+      if (!a) { a = { win: 0, revenue: 0, priced: false, recent: 0, prev: 0, lastAge: Infinity, ch: new Map() }; per.set(li.sku, a); }
+      if (age < a.lastAge) a.lastAge = age;
+      if (age >= observed) continue;
+      a.win += qty;
+      if (li.price != null) { a.revenue += qty * (Number(li.price) || 0); a.priced = true; }
+      if (age < half) a.recent += qty; else if (age < half * 2) a.prev += qty;
+      const ch = String(li.ch || r.channel || "").trim();
+      if (ch && ch !== "ฉลาก") { a.ch.set(ch, (a.ch.get(ch) || 0) + qty); chTotals.set(ch, (chTotals.get(ch) || 0) + qty); }
+    }
+  }
+  // Channels that carry real volume — a best seller missing from one of them is a listing gap.
+  const allUnits = [...chTotals.values()].reduce((s, v) => s + v, 0);
+  const mainChannels = [...chTotals.entries()].filter(([, v]) => v >= allUnits * 0.1).map(([k]) => k);
+
+  const rows = [];
+  for (const p of PRODUCTS) {
+    const a = per.get(p.sku);
+    const qty = Math.max(0, Number(p.qty) || 0);
+    if (qty <= 0 && !(a && a.win)) continue;                    // nothing on hand, nothing selling
+    const units = a ? a.win : 0;
+    const price = Number(p.price) || 0;
+    const revenue = a ? (a.priced ? a.revenue : units * price) : 0;
+    const perDay = units / observed;
+    const cover = perDay > 0 ? qty / perDay : Infinity;
+    const rec = _receiveDates && _receiveDates.get(p.sku);
+    const firstAge = rec ? Math.floor((Date.now() - rec.first) / DAY) : null;
+    const lastSaleAge = a && a.lastAge !== Infinity ? a.lastAge : null;
+    const cost = p.cost != null && p.cost !== "" ? Number(p.cost) : null;
+    rows.push({
+      sku: p.sku, name: p.name, cat: p.cat, qty, price, cost,
+      units, revenue, perDay, cover, lastSaleAge, firstAge,
+      recent: a ? a.recent : 0, prev: a ? a.prev : 0,
+      channels: a ? [...a.ch.entries()].sort((x, y) => y[1] - x[1]).map(([k]) => k) : [],
+      tiedUp: cost != null ? qty * cost : null,
+      stockValue: qty * price,
+      stored: typeof productIsStored === "function" ? productIsStored(p) : true
+    });
+  }
+
+  // Best sellers = the SKUs that together make 80% of revenue in the window.
+  const byRev = rows.filter(r => r.revenue > 0).sort((x, y) => y.revenue - x.revenue);
+  const totalRev = byRev.reduce((s, r) => s + r.revenue, 0);
+  const stars = new Set();
+  let cum = 0;
+  for (const r of byRev) { if (cum >= totalRev * 0.8) break; stars.add(r.sku); cum += r.revenue; }
+
+  for (const r of rows) {
+    const isNew = r.firstAge != null && r.firstAge < o.newDays;
+    if (r.units > 0 && r.cover < o.coverLow) r.seg = "restock";
+    else if (r.units === 0) r.seg = isNew ? "new" : "dead";
+    else if (half >= 7 && r.recent >= 3 && r.recent >= r.prev * 1.5) r.seg = "rising";
+    else if (stars.has(r.sku)) r.seg = "star";
+    else if (r.cover > o.coverHigh) r.seg = isNew ? "new" : "slow";
+    else r.seg = "ok";
+    r.isStar = stars.has(r.sku);
+    r.reorder = r.perDay > 0 ? Math.max(0, Math.ceil(r.perDay * o.targetCover - r.qty)) : 0;
+    r.missingChannels = (r.isStar || r.seg === "rising") ? mainChannels.filter(c => !r.channels.includes(c)) : [];
+    // Discount ladder for stock that isn't moving — never below cost + 5% when cost is known.
+    const idle = r.lastSaleAge != null ? r.lastSaleAge : Math.max(observed, r.firstAge || 0);
+    r.idleDays = idle;
+    r.discountPct = (r.seg === "dead" || r.seg === "slow") ? (idle >= 90 ? 20 : idle >= 45 ? 10 : 0) : 0;
+    r.promoPrice = r.discountPct && r.price > 0
+      ? Math.max(Math.round(r.price * (1 - r.discountPct / 100)), r.cost != null ? Math.ceil(r.cost * 1.05) : 0)
+      : null;
+    if (r.promoPrice != null && r.promoPrice >= r.price) r.promoPrice = null;  // no room above cost
+  }
+  // Bundle partner for slow/dead items: the best seller in the same category.
+  const topByCat = new Map();
+  for (const r of byRev) if (r.cat && !topByCat.has(r.cat)) topByCat.set(r.cat, r);
+  for (const r of rows) {
+    if (r.seg !== "slow" && r.seg !== "dead") continue;
+    const t = topByCat.get(r.cat) || byRev[0];
+    r.partner = t && t.sku !== r.sku ? { sku: t.sku, name: t.name } : null;
+  }
+
+  const segs = SKU_SEGMENTS.map(s => {
+    const list = rows.filter(r => r.seg === s.id);
+    return Object.assign({}, s, {
+      count: list.length,
+      qty: list.reduce((n, r) => n + r.qty, 0),
+      tiedUp: list.reduce((n, r) => n + (r.tiedUp || 0), 0),
+      stockValue: list.reduce((n, r) => n + r.stockValue, 0)
+    });
+  });
+  const key = {
+    restock: (r) => r.cover, rising: (r) => -(r.recent - r.prev), star: (r) => -r.revenue, ok: (r) => -r.revenue,
+    slow: (r) => -(r.tiedUp != null ? r.tiedUp : r.stockValue), dead: (r) => -(r.tiedUp != null ? r.tiedUp : r.stockValue),
+    new: (r) => (r.firstAge || 0)
+  };
+  const segOrder = Object.fromEntries(SKU_SEGMENTS.map((s, i) => [s.id, i]));
+  rows.sort((x, y) => (segOrder[x.seg] - segOrder[y.seg]) || (key[x.seg](x) - key[y.seg](y)));
+  const startIso = records.length ? new Date(todayMs - oldest * DAY + 7 * 3600000).toISOString().slice(0, 10) : null;
+  return { rows, segs, observed, startIso, mainChannels, opts: o };
+}
+
 /* Today's sales per channel — what the "ออร์เดอร์ตามช่องทาง" cards show.
    Returns CHANNEL_LIST rows with { sales, units, pct } (pct of today's units). */
 function channelToday() {
@@ -4235,6 +4391,7 @@ function cloudWriteFailed(res, what) {
 
 Object.assign(window, {
   cloudWriteFailed,
+  refreshReceiveDates, buildSkuInsights, SKU_SEGMENTS,
   isIOSDevice, deliverFile, savePdf,
   STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,
   skuBrandPrefix, guessBrandFromSku,

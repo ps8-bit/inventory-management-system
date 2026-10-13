@@ -79,6 +79,7 @@ function buildAnalyticsWindow(period, todayIso) {
 
 function AnalyticsPage({ pushToast }) {
   const [period, setPeriod] = useStateAn("month");
+  const [view, setView] = useStateAn("overview"); // overview | actions (ต้องจัดการ)
   const [open, setOpen] = useStateAn(null);
   const [metric, setMetric] = useStateAn("orders"); // chart metric: orders (real now) | revenue
   const [pv, setPv] = useStateAn(0); // bumps when the catalog OR orders change → recompute
@@ -219,14 +220,19 @@ function AnalyticsPage({ pushToast }) {
         </div>
         <div className="row">
           <div className="seg">
+            <button className={view === "overview" ? "on" : ""} onClick={() => setView("overview")}>ภาพรวม</button>
+            <button className={view === "actions" ? "on" : ""} onClick={() => setView("actions")}>ต้องจัดการ</button>
+          </div>
+          {view === "overview" && <div className="seg">
             {PERIODS.map(p => (
               <button key={p.id} className={period === p.id ? "on" : ""} onClick={() => setPeriod(p.id)}>{p.label}</button>
             ))}
-          </div>
-          {canDo("exportData") && <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const head = showCost ? "SKU,สินค้า,จำนวนขาย,ยอดขาย,ต้นทุน,กำไร,มาร์จิน%" : "SKU,สินค้า,จำนวนขาย,ยอดขาย"; const rows = data.map(p => (showCost ? [p.sku, p.name, p.units, p.revenue, p.costTotal, p.profit, (p.margin * 100).toFixed(1)] : [p.sku, p.name, p.units, p.revenue]).map(esc).join(",")); const totalRow = (showCost ? ["รวม", "", total.units, total.revenue, total.cost, total.profit, (totalMargin * 100).toFixed(1)] : ["รวม", "", total.units, total.revenue]).map(esc).join(","); const csv = [head, ...rows, totalRow].join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `analytics-${period}.csv`; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
+          </div>}
+          {view === "overview" && canDo("exportData") && <button className="btn" onClick={() => { const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`; const head = showCost ? "SKU,สินค้า,จำนวนขาย,ยอดขาย,ต้นทุน,กำไร,มาร์จิน%" : "SKU,สินค้า,จำนวนขาย,ยอดขาย"; const rows = data.map(p => (showCost ? [p.sku, p.name, p.units, p.revenue, p.costTotal, p.profit, (p.margin * 100).toFixed(1)] : [p.sku, p.name, p.units, p.revenue]).map(esc).join(",")); const totalRow = (showCost ? ["รวม", "", total.units, total.revenue, total.cost, total.profit, (totalMargin * 100).toFixed(1)] : ["รวม", "", total.units, total.revenue]).map(esc).join(","); const csv = [head, ...rows, totalRow].join("\n"); const blob = new Blob(["﻿" + csv], {type: "text/csv;charset=utf-8"}); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = `analytics-${period}.csv`; a.click(); URL.revokeObjectURL(url); }}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
         </div>
       </div>
 
+      {view === "actions" ? <SkuActionBoard showCost={showCost}/> : <>
       {/* KPI cards */}
       <div className="kpi-grid">
         <div className="kpi">
@@ -411,6 +417,7 @@ function AnalyticsPage({ pushToast }) {
           </tbody>
         </table>
       </div>
+      </>}
     </div>
   );
 }
@@ -424,4 +431,153 @@ function SummaryCell({ label, value, accent }) {
   );
 }
 
-Object.assign(window, { AnalyticsPage, buildAnalyticsWindow, _todayBkkIso });
+
+/* ============ ต้องจัดการ — per-SKU action board ============ */
+const BOARD_WINDOWS = [30, 60, 90];
+
+/* Days of stock left, capped so a 12,000-day cover reads as "> 1 ปี". */
+function fmtCover(c) { return !isFinite(c) ? "—" : c > 365 ? "> 1 ปี" : Math.round(c) + " วัน"; }
+
+/* One-line "what to do" for a row; shared with the mobile fork. */
+function skuInsightTip(r, showCost) {
+  const bits = [];
+  if (r.seg === "restock") bits.push(r.qty <= 0 ? "ของหมดแล้ว" : `เหลือพอขาย ~${Math.max(0, Math.round(r.cover))} วัน`, r.reorder > 0 ? `แนะนำสั่ง ${r.reorder} ชิ้น` : "");
+  if (r.seg === "rising") bits.push(`ช่วงหลัง ${r.recent} ชิ้น vs ก่อนหน้า ${r.prev} ชิ้น`);
+  if ((r.isStar || r.seg === "rising") && r.missingChannels && r.missingChannels.length) bits.push("ยังไม่มียอดบน " + r.missingChannels.join(", "));
+  if (r.seg === "slow") bits.push("สต็อกพอขาย " + fmtCover(r.cover));
+  if (r.seg === "dead" || r.seg === "slow") {
+    if (!r.stored) bits.push("ยังไม่จัดเก็บ — หาของไม่เจอ = ขายไม่ได้");
+    if (r.partner) bits.push("จัดชุดคู่กับ " + r.partner.sku);
+    if (showCost && r.promoPrice) bits.push(`ลด ${r.discountPct}% → ฿${Math.round(r.promoPrice).toLocaleString("th-TH")}`);
+  }
+  if (r.seg === "new" && r.firstAge != null) bits.push(`รับเข้า ${r.firstAge} วันก่อน`);
+  return bits.filter(Boolean).join(" · ");
+}
+
+function skuInsightsCsv(ins, showCost) {
+  const segLabel = Object.fromEntries(SKU_SEGMENTS.map(s => [s.id, s.label]));
+  const head = ["กลุ่ม", "SKU", "สินค้า", "หมวด", "คงเหลือ", `ขาย ${ins.observed} วัน`, "ขาย/วัน", "พอขาย (วัน)", "ขายล่าสุด (วันก่อน)", "แนะนำสั่ง", "คำแนะนำ"]
+    .concat(showCost ? ["ทุนจม", "ราคาโปร"] : []);
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = ins.rows.map(r => [segLabel[r.seg], r.sku, r.name, r.cat, r.qty, r.units, r.perDay.toFixed(2),
+    isFinite(r.cover) ? Math.round(r.cover) : "", r.lastSaleAge ?? "", r.reorder || "", skuInsightTip(r, showCost)]
+    .concat(showCost ? [r.tiedUp != null ? Math.round(r.tiedUp) : "", r.promoPrice || ""] : []).map(esc).join(","));
+  return "﻿" + [head.map(esc).join(","), ...lines].join("\n");
+}
+
+function SkuActionBoard({ showCost }) {
+  const [days, setDays] = useStateAn(60);
+  const [seg, setSeg] = useStateAn("restock");
+  const [q, setQ] = useStateAn("");
+  const [showN, setShowN] = useStateAn(60);
+  const [pv, setPv] = useStateAn(0);
+  useEffectAn(() => {
+    const refresh = () => setPv(v => v + 1);
+    window.addEventListener("ims-products-change", refresh);
+    window.addEventListener("ims-orders-change", refresh);
+    window.addEventListener("ims-sales-change", refresh);
+    if (typeof refreshReceiveDates === "function") refreshReceiveDates();
+    return () => {
+      window.removeEventListener("ims-products-change", refresh);
+      window.removeEventListener("ims-orders-change", refresh);
+      window.removeEventListener("ims-sales-change", refresh);
+    };
+  }, []);
+  const ins = useMemoAn(() => buildSkuInsights({ days }), [days, pv]);
+  useEffectAn(() => setShowN(60), [seg, days, q]);
+
+  const needle = q.trim().toLowerCase();
+  const list = ins.rows.filter(r => r.seg === seg && (!needle || (r.sku + " " + r.name).toLowerCase().includes(needle)));
+  const cur = ins.segs.find(s => s.id === seg) || ins.segs[0];
+  const exportCsv = () => {
+    const blob = new Blob([skuInsightsCsv(ins, showCost)], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `sku-actions-${days}d.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="stack" style={{ gap: 16 }}>
+      <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ fontSize: 13, color: "var(--muted)" }}>
+          คิดจากยอดขาย {ins.observed} วันล่าสุด{ins.startIso && ins.observed < days ? ` (มีข้อมูลตั้งแต่ ${ins.startIso})` : ""} · "ไม่มียอดขาย" = ไม่ขายเลยในช่วงนี้
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <div className="seg">
+            {BOARD_WINDOWS.map(d => <button key={d} className={days === d ? "on" : ""} onClick={() => setDays(d)}>{d} วัน</button>)}
+          </div>
+          {canDo("exportData") && <button className="btn" onClick={exportCsv}><Icons.Pkg size={14}/> ส่งออก CSV</button>}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+        {ins.segs.map(s => (
+          <button key={s.id} onClick={() => setSeg(s.id)} className="card" style={{
+            textAlign: "left", padding: "12px 14px", cursor: "pointer",
+            outline: seg === s.id ? "2px solid var(--accent)" : "none", outlineOffset: -2
+          }}>
+            <div className="row" style={{ gap: 6 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 99, background: `var(--${s.tone === "neutral" ? "muted" : s.tone})` }}/>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>{s.label}</span>
+            </div>
+            <div className="tnum" style={{ fontSize: 22, fontWeight: 600, marginTop: 4 }}>{fmt(s.count)} <span style={{ fontSize: 12, fontWeight: 400, color: "var(--muted)" }}>SKU</span></div>
+            <div className="tnum" style={{ fontSize: 11, color: "var(--muted)" }}>
+              {fmt(s.qty)} ชิ้น{showCost && s.tiedUp > 0 ? ` · ทุน ${fmtMoney(s.tiedUp)}` : ""}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div className="card card-tight">
+        <div className="card-head">
+          <div>
+            <h3>{cur.label} · {fmt(list.length)} SKU</h3>
+            <div className="sub">{cur.action}</div>
+          </div>
+          <input className="input" placeholder="ค้นหา SKU / ชื่อ" value={q} onChange={e => setQ(e.target.value)} style={{ width: 200 }}/>
+        </div>
+        {list.length === 0
+          ? <div style={{ padding: 32, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่มีสินค้าในกลุ่มนี้</div>
+          : <table className="t">
+              <thead><tr>
+                <th>สินค้า</th>
+                <th className="t-num">คงเหลือ</th>
+                <th className="t-num">ขาย {ins.observed} วัน</th>
+                <th className="t-num">พอขาย</th>
+                <th className="t-num">ขายล่าสุด</th>
+                {showCost && <th className="t-num">ทุนจม</th>}
+                <th>ควรทำ</th>
+              </tr></thead>
+              <tbody>
+                {list.slice(0, showN).map(r => (
+                  <tr key={r.sku}>
+                    <td>
+                      <div className="row" style={{ gap: 10 }}>
+                        <ProductImageThumb sku={r.sku} size={32} radius={6}/>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 13 }}>{r.name}</div>
+                          <div className="t-mono" style={{ marginTop: 2 }}>{r.sku} · {r.cat}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="t-num tnum">{fmt(r.qty)}</td>
+                    <td className="t-num tnum">{fmt(r.units)}</td>
+                    <td className="t-num tnum">{fmtCover(r.cover)}</td>
+                    <td className="t-num tnum" style={{ color: "var(--muted)" }}>{r.lastSaleAge == null ? "ไม่เคย" : r.lastSaleAge === 0 ? "วันนี้" : r.lastSaleAge + " วันก่อน"}</td>
+                    {showCost && <td className="t-num tnum">{r.tiedUp != null ? fmtMoney(r.tiedUp) : "—"}</td>}
+                    <td style={{ fontSize: 12, maxWidth: 340 }}>{skuInsightTip(r, showCost) || <span style={{ color: "var(--muted)" }}>—</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>}
+        {list.length > showN && (
+          <div style={{ padding: 12, textAlign: "center" }}>
+            <button className="btn" onClick={() => setShowN(n => n + 60)}>ดูเพิ่ม ({fmt(list.length - showN)})</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { AnalyticsPage, buildAnalyticsWindow, _todayBkkIso, SkuActionBoard, skuInsightTip, skuInsightsCsv, fmtCover });

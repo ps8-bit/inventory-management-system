@@ -347,6 +347,19 @@ async function dbInsertStockAdjustment(entries) {
    `sinceIso`. Staff record almost every sale this way, so analytics and the
    per-channel cards read these alongside real orders (see saleMoveOrders in
    data.jsx). Read-only; null on error so callers keep the previous cache. */
+/* Receive history (positive รับ… moves) — sku + time only. Feeds stock age on the
+   ต้องจัดการ board so a product that just arrived isn't flagged as dead stock. */
+async function dbLoadReceiveDates(sinceIso) {
+  let q = sb.from('stock_adjustments').select('sku, created_at')
+    .like('reason', 'รับ%')
+    .gt('delta', 0)
+    .order('created_at', { ascending: false })
+    .limit(20000);
+  if (sinceIso) q = q.gte('created_at', sinceIso);
+  const { data, error } = await q;
+  if (error) { console.error('[DB] load receive dates:', error.message); return null; }
+  return data || [];
+}
 async function dbLoadSaleAdjustments(sinceIso) {
   // ONLY the ปรับสต็อก sale reasons. ขายสินค้า / ตัดสต็อก / ขายชุดสินค้า also write
   // history rows ("ขายสินค้า · …", "ขายชุดสินค้า …") but they already exist as
@@ -1606,7 +1619,7 @@ Object.assign(window, {
   dbInit, setupRealtimeSync, refreshLiveData,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,     dbRenameSku,
-  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments, dbLoadLedgerFor, dbLoadAuditForOrder, dbLoadQtys, dbActorNames,
+  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments, dbLoadReceiveDates, dbLoadLedgerFor, dbLoadAuditForOrder, dbLoadQtys, dbActorNames,
   dbLoadProductLocs,   dbSaveProductLocs,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,
