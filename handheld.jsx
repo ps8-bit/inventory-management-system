@@ -6370,6 +6370,7 @@ const mMoney = (n) => "฿" + Math.round(n).toLocaleString("th-TH");
 
 function MAnalytics({ ctx }) {
   const [period, setPeriod] = useStateM("month");
+  const [view, setView] = useStateM("overview"); // overview | actions (ต้องจัดการ)
   const [open, setOpen] = useStateM(null);
   const [metric, setMetric] = useStateM("orders"); // orders (real now) | revenue
   const [pv, setPv] = useStateM(0);
@@ -6490,9 +6491,14 @@ function MAnalytics({ ctx }) {
       <div className="m-topbar">
         <button className="m-back" onClick={ctx.back}><Icons.Chev size={16} style={{ transform: "rotate(180deg)" }}/></button>
         <div className="m-title-sub">วิเคราะห์ยอดขาย</div>
-        {canDo("exportData") && <button className="m-action" onClick={exportCsv}><Icons.Pkg size={14}/></button>}
+        {view === "overview" && canDo("exportData") && <button className="m-action" onClick={exportCsv}><Icons.Pkg size={14}/></button>}
       </div>
       <div className="m-content">
+        <div className="seg" style={{ display: "flex", marginBottom: 10 }}>
+          <button style={{ flex: 1 }} className={view === "overview" ? "on" : ""} onClick={() => setView("overview")}>ภาพรวม</button>
+          <button style={{ flex: 1 }} className={view === "actions" ? "on" : ""} onClick={() => setView("actions")}>ต้องจัดการ</button>
+        </div>
+        {view === "actions" ? <MSkuActions ctx={ctx}/> : <>
         <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
           {M_PERIODS.map(p => (
             <button key={p.id} className={"m-chip" + (period === p.id ? " on" : "")} onClick={() => setPeriod(p.id)}>{p.label}</button>
@@ -6615,7 +6621,93 @@ function MAnalytics({ ctx }) {
             );
           })}
         </div>
+      </>}
       </div>
+    </>
+  );
+}
+
+/* ต้องจัดการ — mobile fork of the desktop SkuActionBoard (analytics.jsx). Same
+   buildSkuInsights() data and the same skuInsightTip() wording. */
+function MSkuActions({ ctx }) {
+  const showCost = canDo("viewCost");
+  const [days, setDays] = useStateM(60);
+  const [seg, setSeg] = useStateM("restock");
+  const [q, setQ] = useStateM("");
+  const [showN, setShowN] = useStateM(40);
+  const [pv, setPv] = useStateM(0);
+  useEffectM(() => {
+    const refresh = () => setPv(v => v + 1);
+    window.addEventListener("ims-products-change", refresh);
+    window.addEventListener("ims-orders-change", refresh);
+    window.addEventListener("ims-sales-change", refresh);
+    if (typeof refreshReceiveDates === "function") refreshReceiveDates();
+    return () => {
+      window.removeEventListener("ims-products-change", refresh);
+      window.removeEventListener("ims-orders-change", refresh);
+      window.removeEventListener("ims-sales-change", refresh);
+    };
+  }, []);
+  const ins = useMemoM(() => (typeof buildSkuInsights === "function" ? buildSkuInsights({ days }) : { rows: [], segs: [], observed: 0 }), [days, pv]);
+  useEffectM(() => setShowN(40), [seg, days, q]);
+  const tip = (r) => (typeof skuInsightTip === "function" ? skuInsightTip(r, showCost) : "");
+  const needle = q.trim().toLowerCase();
+  const list = ins.rows.filter(r => r.seg === seg && (!needle || (r.sku + " " + r.name).toLowerCase().includes(needle)));
+  const cur = ins.segs.find(s => s.id === seg);
+
+  return (
+    <>
+      <div className="m-chips-scroll" style={{ marginBottom: 8 }}>
+        {[30, 60, 90].map(d => <button key={d} className={"m-chip" + (days === d ? " on" : "")} onClick={() => setDays(d)}>{d} วัน</button>)}
+      </div>
+      <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10 }}>
+        คิดจากยอดขาย {ins.observed} วันล่าสุด{ins.startIso && ins.observed < days ? ` (มีข้อมูลตั้งแต่ ${ins.startIso})` : ""}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+        {ins.segs.map(s => (
+          <button key={s.id} className="m-card" onClick={() => setSeg(s.id)} style={{
+            margin: 0, textAlign: "left", padding: "10px 12px",
+            outline: seg === s.id ? "2px solid var(--accent)" : "none", outlineOffset: -2
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--muted)" }}>
+              <span style={{ width: 7, height: 7, borderRadius: 99, background: `var(--${s.tone === "neutral" ? "muted" : s.tone})` }}/>{s.label}
+            </div>
+            <div style={{ fontSize: 18, fontWeight: 600, marginTop: 2 }}>{mFmt(s.count)} <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>SKU</span></div>
+            <div style={{ fontSize: 10, color: "var(--muted)" }}>{mFmt(s.qty)} ชิ้น{showCost && s.tiedUp > 0 ? ` · ทุน ${mMoney(s.tiedUp)}` : ""}</div>
+          </button>
+        ))}
+      </div>
+      {cur && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}><b style={{ color: "var(--fg)" }}>{cur.label}</b> — {cur.action}</div>}
+      <div className="m-search" style={{ marginBottom: 10 }}>
+        <Icons.Search size={14}/>
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา SKU, ชื่อสินค้า"/>
+        {q && <Icons.X size={13} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => setQ("")}/>}
+      </div>
+      {list.length === 0
+        ? <div className="m-card" style={{ textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่มีสินค้าในกลุ่มนี้</div>
+        : list.slice(0, showN).map(r => (
+          <div key={r.sku} className="m-card" style={{ padding: 12 }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <ProductImageThumb sku={r.sku} size={40} radius={8}/>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{r.sku}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 12, fontSize: 11, color: "var(--muted)", marginTop: 8, flexWrap: "wrap" }}>
+              <span>คงเหลือ <b style={{ color: "var(--fg)" }}>{mFmt(r.qty)}</b></span>
+              <span>ขาย {ins.observed} วัน <b style={{ color: "var(--fg)" }}>{mFmt(r.units)}</b></span>
+              <span>ขายล่าสุด {r.lastSaleAge == null ? "ไม่เคย" : r.lastSaleAge === 0 ? "วันนี้" : r.lastSaleAge + " วันก่อน"}</span>
+              {showCost && r.tiedUp != null && <span>ทุน {mMoney(r.tiedUp)}</span>}
+            </div>
+            {tip(r) && <div style={{ fontSize: 12, marginTop: 6 }}>{tip(r)}</div>}
+          </div>
+        ))}
+      {list.length > showN && (
+        <button className="m-btn-big outline" style={{ marginTop: 10 }} onClick={() => setShowN(n => n + 40)}>
+          ดูเพิ่ม — แสดง {showN} จาก {list.length}
+        </button>
+      )}
     </>
   );
 }
