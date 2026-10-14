@@ -6946,6 +6946,14 @@ function PackHome({ goTo, user }) {
    ═══════════════════════════════════════════════════════════════════ */
 function PackQueue({ pushToast, goTo, user, focus }) {
   const [newOpen, setNewOpen] = useState(false);   // สั่งแพ็คใหม่ — one-page form (pack-docs.jsx)
+  const removeLine = async (o, l) => {
+    if (typeof removeItemFromPackOrder !== "function") return;
+    if (!confirm(`ลบ ${l.sku} × ${l.qty} ออกจากออร์เดอร์นี้?
+สต็อกจะถูกคืนกลับ${l.loc ? "ที่ " + l.loc : ""}`)) return;
+    const res = await removeItemFromPackOrder(o, l, (user && user.name) || "");
+    if (!res.ok) { if (res.error) pushToast({ msg: res.error, type: "error" }); return; }
+    pushToast(`ลบรายการแล้ว · คืนสต็อก ${res.pieces} ชิ้น` + (res.locError ? " (อัปเดตชั้นไม่สำเร็จ)" : ""));
+  };
   const [addTo, setAddTo] = useState(null);        // เพิ่มรายการ — same form, bound to one queued order
   const [labelCfg, setLabelCfg] = useState(false);  // ⚙ ตั้งค่าใบปะหน้า — shop-wide, all labels
   const [tick, setTick] = useState(0);
@@ -7325,7 +7333,7 @@ function PackQueue({ pushToast, goTo, user, focus }) {
                             <table className="t" style={{ background: "var(--surface)", borderRadius: 8 }}>
                               <thead><tr>
                                 <th>ตำแหน่ง</th><th>SKU</th><th>ชื่อสินค้า</th>
-                                <th className="t-num">ต้องหยิบ</th><th className="t-num">หยิบแล้ว</th><th className="t-num">ในชั้น</th><th>หมายเหตุ</th>
+                                <th className="t-num">ต้องหยิบ</th><th className="t-num">หยิบแล้ว</th><th className="t-num">ในชั้น</th><th>หมายเหตุ</th>{canDo("sell") && <th></th>}
                               </tr></thead>
                               <tbody>
                                 {r.lines.map(l => {
@@ -7364,6 +7372,13 @@ function PackQueue({ pushToast, goTo, user, focus }) {
                                           ? <span style={{ color: "var(--warning)" }}>{short}</span>
                                           : thin ? <span style={{ color: "var(--danger)" }}>ในชั้นไม่พอ</span> : ""}
                                       </td>
+                                      {canDo("sell") && (
+                                        <td style={{ width: 1 }}>
+                                          <button className="btn btn-sm btn-ghost" style={{ color: "var(--danger)" }} title="ลบรายการนี้ออกจากออร์เดอร์ (คืนสต็อก)" aria-label="ลบรายการ" onClick={() => removeLine(r.o, l)}>
+                                            <Icons.Trash size={14}/>
+                                          </button>
+                                        </td>
+                                      )}
                                     </tr>
                                   );
                                 })}
