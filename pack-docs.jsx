@@ -2508,7 +2508,11 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
                 <div className="pn-cart-list">
                   {cart.map(x => (
                     <div key={x.key} className="pn-cart-row">
-                      <span className="pn-cart-name">{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
+                      {x.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={x.sku} size={40} radius={8} zoom caption={x.sku + (x.name ? " · " + x.name : "")}/> : <span className="pn-thumb">📦</span>}
+                      <span className="pn-cart-name">
+                        {x.type === "bundle" ? "ชุด: " : ""}{x.name}
+                        {x.type === "sku" && <span className="mono" style={{ display: "block", fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>{x.sku}</span>}
+                      </span>
                       <button type="button" className="pn-qty" onClick={() => setQty(x.key, x.qty - 1)} aria-label="ลดจำนวน">−</button>
                       <span className="tnum pn-qty-n">{x.qty}</span>
                       <button type="button" className="pn-qty" onClick={() => setQty(x.key, x.qty + 1)} aria-label="เพิ่มจำนวน">＋</button>

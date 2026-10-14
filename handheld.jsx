@@ -7059,7 +7059,7 @@ function MPackOrderNote({ orderId, user, compact }) {
 
 /* One pick line. `picked` / `short` come from the caller's progress record so the
    same row serves a single order and a wave without owning any state itself. */
-function MPackLine({ line, picked, short, onSet, onShort, sub }) {
+function MPackLine({ line, picked, short, onSet, onShort, sub, onRemove }) {
   const full = picked >= line.qty;
   const tone = short ? "var(--warning)" : full ? "var(--success)" : "var(--fg)";
   // The split says this shelf holds fewer than the line needs — surface it BEFORE
@@ -7085,6 +7085,11 @@ function MPackLine({ line, picked, short, onSet, onShort, sub }) {
           )}
         </div>
         <span className="tnum" style={{ fontSize: 15, fontWeight: 700, flexShrink: 0, color: tone }}>{picked}/{line.qty}</span>
+        {onRemove && (
+          <button className="btn btn-ghost btn-sm" onClick={onRemove} title="ลบรายการนี้ออกจากออร์เดอร์ (คืนสต็อก)" aria-label="ลบรายการ" style={{ flexShrink: 0, color: "var(--danger)", padding: "0 6px" }}>
+            <Icons.Trash size={16}/>
+          </button>
+        )}
       </div>
 
       <div className="row" style={{ gap: 8, marginTop: 8, justifyContent: "space-between" }}>
@@ -7483,6 +7488,14 @@ function MPackOrder({ ctx }) {
   const [entry, setEntry] = useStateM(() => (typeof packEntry === "function") ? packEntry(orderId) : { done: {}, short: {} });
   const [camOpen, setCamOpen] = useStateM(false);
   const [shortLine, setShortLine] = useStateM(null);
+  const removeLine = async (l) => {
+    if (!order) return;
+    if (!confirm(`ลบ ${l.sku} × ${l.qty} ออกจากออร์เดอร์นี้?
+สต็อกจะถูกคืนกลับ${l.loc ? "ที่ " + l.loc : ""}`)) return;
+    const res = await removeItemFromPackOrder(order, l, (ctx.user && ctx.user.name) || "");
+    if (!res.ok) { if (res.error) ctx.pushToast({ msg: res.error, type: "error" }); return; }
+    ctx.pushToast(`ลบรายการแล้ว · คืนสต็อก ${res.pieces} ชิ้น` + (res.locError ? " (อัปเดตชั้นไม่สำเร็จ)" : ""));
+  };
 
   useEffectM(() => {
     const refresh = () => { setTick(t => t + 1); setEntry(packEntry(orderId)); };
@@ -7684,7 +7697,8 @@ function MPackOrder({ ctx }) {
                   picked={entry.done[l.key] || 0}
                   short={entry.short[l.key] || ""}
                   onSet={v => setPicked(l, v)}
-                  onShort={() => setShortLine(l)}/>
+                  onShort={() => setShortLine(l)}
+                  onRemove={typeof canDo === "function" && canDo("sell") && typeof removeItemFromPackOrder === "function" ? () => removeLine(l) : undefined}/>
               ))}
             </div>
           </div>

@@ -3083,6 +3083,87 @@ async function addItemsToPackOrder(order, lines, who) {
   }
   return { ok: true, pieces, lineCount: plan.lineCount, locError };
 }
+/* ── ลบรายการ that was keyed into an order by mistake ──
+   The reverse of addItemsToPackOrder for ONE pick line (sku × shelf): every
+   source row behind that line is dropped from the order, and its pieces go back
+   to the shelf the sale took them from through the receive choke point, so the
+   ledger records what the server really added. Only rows a sale really debited
+   are removable — the orders row's lineItems and override addedItems. Items that
+   live only on a label never moved stock, so there is nothing to put back.
+   The last line can't be removed: that is ยกเลิกออร์เดอร์ + คืนสต็อก.
+   Returns { ok, pieces, locError? } | { ok:false, error }. */
+async function removeItemFromPackOrder(order, line, who) {
+  if (!order || !order.id || !line || !line.key) return { ok: false, error: "ไม่พบรายการ" };
+  const keyOf = (li) => {
+    const p = PRODUCTS.find(x => x.sku === li.sku);
+    return packKey(li.sku, li.loc || defaultPickLoc(p) || "");
+  };
+  const hit = (li) => li && li.sku && keyOf(li) === line.key;
+  const row = loadOrders().find(o => o.id === order.id);
+  const overrides = (typeof loadOrderOverrides === "function") ? loadOrderOverrides() : {};
+  const ov = overrides[order.id] || {};
+  const rowItems = row && Array.isArray(row.lineItems) ? row.lineItems : [];
+  const addItems = Array.isArray(ov.addedItems) ? ov.addedItems : [];
+  const removed = rowItems.filter(hit).concat(addItems.filter(hit));
+  if (!removed.length) return { ok: false, error: "รายการนี้มาจากฉลาก ไม่ได้ตัดสต็อก — แก้ที่หน้าฉลากแทน" };
+  if (packLinesForOrder(order).filter(l => l.key !== line.key).length === 0) {
+    return { ok: false, error: "เป็นรายการสุดท้ายของออร์เดอร์ — ใช้ ยกเลิกออร์เดอร์ + คืนสต็อก แทน" };
+  }
+  const pieces = removed.reduce((s, li) => s + Math.max(0, Math.round(Number(li.qty) || 0)), 0);
+  const ckey = commitFingerprint("pack-remove:" + order.id + ":" + line.key, [{ sku: line.sku, qty: pieces }]);
+  if (!claimCommit(ckey)) { duplicateCommitToast(); return { ok: false, error: "" }; }
+
+  const at = new Date().toISOString();
+  const patch = {
+    removedLog: (Array.isArray(ov.removedLog) ? ov.removedLog : []).concat([{ at, by: who || "", sku: line.sku, loc: line.loc || "", qty: pieces }])
+  };
+  if (addItems.some(hit)) patch.addedItems = addItems.filter(li => !hit(li));
+
+  if (row && rowItems.some(hit)) {
+    const gone = rowItems.filter(hit);
+    const deductions = (Array.isArray(row.deductions) ? row.deductions : []).map(d => ({ ...d }));
+    gone.forEach(li => {
+      const d = li.ch && deductions.find(x => x.id === li.ch);
+      if (d) d.qty = Math.max(0, (Number(d.qty) || 0) - (Number(li.qty) || 0));
+    });
+    const next = {
+      ...row,
+      lineItems: rowItems.filter(li => !hit(li)),
+      items: Math.max(0, (Number(row.items) || 0) - gone.length),
+      deductions: deductions.filter(d => (Number(d.qty) || 0) > 0)
+    };
+    const list = [next, ...loadOrders().filter(o => o.id !== order.id)];
+    try { localStorage.setItem("ims_orders", JSON.stringify(list)); } catch (e) {}
+    window._DB_ORDERS = list;
+    if (typeof dbUpsertOrders === "function") {
+      try {
+        const res = await dbUpsertOrders([next]);
+        if (res && res.error && typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("orders", [next]);
+      } catch (e) {
+        if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("orders", [next]);
+      }
+    }
+  }
+  if (typeof setOrderField === "function") setOrderField(order.id, patch);
+
+  // Same tick: applyReceiveLocs must see the new p.qty (the _planLocRows contract).
+  const back = [{ sku: line.sku, qty: pieces, loc: line.loc || "" }];
+  receiveStockAndRecord(back, `ลบรายการออกจากออร์เดอร์ ${order.id} — คืนสต็อก`);
+  let locError = "";
+  const r = await applyReceiveLocs(back);
+  if (r && r.errors && r.errors.length) locError = r.errors[0].error;
+
+  if (typeof recordChange === "function") {
+    recordChange({
+      entity: "order", entityId: order.id, action: "update",
+      summary: `ลบรายการออกจากออร์เดอร์ ${order.id} — ${line.sku} ${pieces} ชิ้น (คืนสต็อก)`,
+      count: 1,
+      changes: [{ label: line.name || line.sku, to: `-${pieces} ชิ้น · คืน${line.loc ? " → " + line.loc : "สต็อก"}` }],
+      note: `ออร์เดอร์ ${order.id}`
+    });
+  }
+  return { ok: true, pieces, locError };
+}
 /* Summary for the "มีการเพิ่มรายการ" banner: total added pieces + the latest add. */
 function packOrderAdds(order) {
   const log = (order && Array.isArray(order.addedLog)) ? order.addedLog.filter(Boolean) : [];
@@ -4563,7 +4644,7 @@ Object.assign(window, {
   skuBrandPrefix, guessBrandFromSku,
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem, buildIssuePlan,
-  lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, addItemsToPackOrder, packOrderAdds, ISSUE_CARRIERS, issueOrderDate,
+  lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, addItemsToPackOrder, removeItemFromPackOrder, packOrderAdds, ISSUE_CARRIERS, issueOrderDate,
   nowBkkLocal, stockOutStamp, stockOutStampLabel,
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
