@@ -101,7 +101,16 @@ function newBundleId(bundles) {
    diffs-and-deletes): append locally, upsert just this row, roll back on a
    rejected write. Used by the ต้องจัดการ board's "สร้างชุด" action. */
 async function createBundle(data) {
-  const list = loadBundles() || [];
+  /* The id must come from the SERVER's list, not this device's copy: dbUpsertBundles
+     upserts by id and then replaces that id's bundle_items, so an id taken from a
+     stale list would silently overwrite a bundle another device just created.
+     No fresh list (offline / error) → refuse rather than guess. */
+  const fresh = window.dbLoadBundles ? await dbLoadBundles() : null;
+  if (!Array.isArray(fresh)) return { ok: false, error: "สร้างชุดสินค้าไม่สำเร็จ: โหลดรายการชุดล่าสุดไม่ได้ — ตรวจสอบอินเทอร์เน็ต" };
+  const local = loadBundles() || [];
+  const freshIds = new Set(fresh.map(b => b.id));
+  // Keep any local-only bundle still in flight so its id isn't reused either.
+  const list = fresh.concat(local.filter(b => b && !freshIds.has(b.id)));
   const nb = Object.assign({ desc: "" }, data, { id: newBundleId(list), createdAt: new Date().toISOString().slice(0, 10) });
   const next = list.concat([nb]);
   window._DB_BUNDLES = next;
