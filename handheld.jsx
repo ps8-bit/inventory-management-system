@@ -6315,7 +6315,7 @@ function MLineAlertRow({ ctx }) {
   };
   const runPreview = async (cmd, label) => {
     setPreview({ cmd: label, loading: true });
-    const { data, error } = await lineBotPreview(cmd);
+    const { data, error } = cmd === "weekly" ? await lineTest("weekly-preview") : await lineBotPreview(cmd);
     setPreview({ cmd: label, text: error ? "⚠️ " + error : (data?.text || "(ไม่มีข้อมูล)") });
   };
   const CMDS = [
@@ -6323,6 +6323,7 @@ function MLineAlertRow({ ctx }) {
     { cmd: "สต็อก", label: "สต็อกรวม" },
     { cmd: "ออเดอร์", label: "ออเดอร์" },
     { cmd: "ยอดขาย", label: "ยอดขาย" },
+    { cmd: "weekly", label: "ดูตัวอย่างสรุปรายสัปดาห์" },
   ];
   return (
     <div className="m-card" style={{ padding: 14 }}>

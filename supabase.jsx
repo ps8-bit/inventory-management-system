@@ -1154,7 +1154,7 @@ async function redeemInviteCode(payload) {
 
 // Send a LINE test broadcast via the line-alert Edge Function (admin-only).
 // Confirms the LINE Messaging API wiring once LINE_CHANNEL_ACCESS_TOKEN is set.
-async function lineTest() {
+async function lineTest(mode) {
   const { data: { session } } = await sb.auth.getSession();
   if (!session) return { error: 'กรุณาเข้าสู่ระบบใหม่' };
   try {
@@ -1164,7 +1164,7 @@ async function lineTest() {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ' + session.access_token,
       },
-      body: JSON.stringify({ mode: 'test' }),
+      body: JSON.stringify({ mode: mode || 'test' }),
     });
     const json = await res.json().catch(() => ({}));
     if (!res.ok) return { error: json.error || json.detail || 'ส่งทดสอบไม่สำเร็จ' };
