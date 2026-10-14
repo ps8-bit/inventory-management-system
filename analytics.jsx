@@ -522,6 +522,8 @@ async function insightCreateBundle(r) {
     items: [{ sku: partner.sku, qty: 1 }, { sku: r.sku, qty: 1 }]
   });
   _insightToast(res.ok ? `สร้างชุด "${name}" แล้ว (${res.bundle.id})` : res.error, res.ok ? undefined : "error");
+  // Track it: the bundle is the action taken for the slow/dead item.
+  if (res.ok && typeof addSalesAction === "function") addSalesAction({ sku: r.sku, kind: "bundle", note: `${name} (${res.bundle.id}) คู่กับ ${partner.sku}`, price });
 }
 /* Reorder list — the restock group with a suggested quantity. */
 function exportReorderList(ins) {
@@ -538,6 +540,100 @@ function exportPromoList(ins) {
   _saveCsv([["SKU", "สินค้า", "คงเหลือ", "ไม่มียอด (วัน)", "ราคาปัจจุบัน", "ลด %", "ราคาโปร"]]
     .concat(rows.map(r => [r.sku, r.name, r.qty, r.idleDays, r.price, r.discountPct, r.promoPrice])),
     `promo-${todayIso()}.csv`);
+}
+
+/* ── ติดตามผล (shared by desktop + mobile) ── */
+async function insightLogAction(r) {
+  if (!r || typeof addSalesAction !== "function") return;
+  const labels = SALES_ACTION_KINDS.map(k => k.label);
+  const ans = await askForm({
+    title: "บันทึกสิ่งที่ทำ",
+    message: `${r.sku} · ${r.name}\nระบบจะเทียบยอดขาย 14 วันก่อน กับหลังจากวันนี้ ให้ดูในแท็บ "ติดตามผล"`,
+    fields: [
+      { key: "kind", label: "ทำอะไร", value: labels[0], options: labels },
+      { key: "note", label: "รายละเอียด (ไม่บังคับ)", value: "", required: false, placeholder: "เช่น Shopee ลด 10% ถึงสิ้นเดือน" },
+      { key: "price", label: "ราคาขายใหม่ (ถ้ามี)", value: "", type: "number", required: false }
+    ],
+    okLabel: "บันทึก"
+  });
+  if (!ans) return;
+  const kind = (SALES_ACTION_KINDS.find(k => k.label === ans.kind) || { id: "other" }).id;
+  const note = kind === "other" && ans.kind !== "อื่นๆ" ? [ans.kind, ans.note].filter(Boolean).join(" · ") : ans.note;
+  const res = await addSalesAction({ sku: r.sku, kind, note, price: ans.price });
+  if (res.ok) _insightToast("บันทึกแล้ว — ดูผลได้ในแท็บ ติดตามผล");
+}
+async function insightRemoveAction(a) {
+  if (!a || typeof removeSalesAction !== "function") return;
+  if (!(await askForm({ title: "ลบรายการติดตามผล?", message: `${a.sku} · ${salesActionKindLabel(a.kind)}`, fields: [], okLabel: "ลบ" }))) return;
+  const res = await removeSalesAction(a.id);
+  if (res.ok) _insightToast("ลบแล้ว");
+}
+function fmtRate(v) { return v >= 10 ? Math.round(v).toString() : v.toFixed(1); }
+function actionLiftText(a) {
+  if (a.verdict === "wait") return `ผ่านมา ${a.afterDays} วัน — ต้องรออย่างน้อย 7 วัน`;
+  const pct = a.bRate > 0 ? Math.round((a.aRate / a.bRate - 1) * 100) : null;
+  return `${fmtRate(a.bRate)} → ${fmtRate(a.aRate)} ชิ้น/วัน` + (pct != null ? ` (${pct >= 0 ? "+" : ""}${pct}%)` : a.aRate > 0 ? " (จากไม่เคยขาย)" : "");
+}
+function useActionResults(useStateX, useEffectX, useMemoX) {
+  const [v, setV] = useStateX(0);
+  useEffectX(() => {
+    const bump = () => setV(x => x + 1);
+    ["ims-sales-actions-change", "ims-sales-change", "ims-orders-change", "ims-products-change"].forEach(e => window.addEventListener(e, bump));
+    if (typeof refreshSalesActions === "function") refreshSalesActions();
+    return () => ["ims-sales-actions-change", "ims-sales-change", "ims-orders-change", "ims-products-change"].forEach(e => window.removeEventListener(e, bump));
+  }, []);
+  return useMemoX(() => (typeof buildActionResults === "function" ? buildActionResults() : []), [v]);
+}
+
+function ActionResultsPanel({ results }) {
+  if (!results.length) return (
+    <div className="card" style={{ padding: 32, textAlign: "center", color: "var(--muted)", fontSize: 13, lineHeight: 1.7 }}>
+      ยังไม่มีรายการติดตามผล<br/>กด "บันทึกสิ่งที่ทำ" ที่สินค้าในกลุ่มใดก็ได้ (เช่น ลดราคา, ลงช่องทางใหม่) — การ "สร้างชุด" จะบันทึกให้อัตโนมัติ
+    </div>
+  );
+  const count = (k) => results.filter(a => a.verdict === k).length;
+  return (
+    <div className="card card-tight">
+      <div className="card-head">
+        <div>
+          <h3>ติดตามผล · {results.length} รายการ</h3>
+          <div className="sub">ยอดขายต่อวัน 14 วันก่อนทำ เทียบกับหลังทำ · ได้ผล {count("up")} · ยังไม่ต่าง {count("flat")} · ลดลง {count("down")} · รอผล {count("wait")}</div>
+        </div>
+      </div>
+      <table className="t">
+        <thead><tr>
+          <th>สินค้า</th><th>ทำอะไร</th><th>วันที่</th><th>ยอดขาย ก่อน → หลัง</th><th>ผล</th><th className="t-num">คงเหลือ</th><th style={{ width: 1 }}/>
+        </tr></thead>
+        <tbody>
+          {results.map(a => {
+            const v = ACTION_VERDICTS[a.verdict];
+            return (
+              <tr key={a.id}>
+                <td>
+                  <div className="row" style={{ gap: 10 }}>
+                    <ProductImageThumb sku={a.sku} size={32} radius={6}/>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13 }}>{a.name}</div>
+                      <div className="t-mono" style={{ marginTop: 2 }}>{a.sku}</div>
+                    </div>
+                  </div>
+                </td>
+                <td style={{ fontSize: 12 }}>
+                  <div>{salesActionKindLabel(a.kind)}{a.price ? ` · ฿${fmt(a.price)}` : ""}</div>
+                  {a.note && <div style={{ color: "var(--muted)", marginTop: 2 }}>{a.note}</div>}
+                </td>
+                <td style={{ fontSize: 12, color: "var(--muted)" }}>{String(a.at).slice(0, 10)}{a.by ? <div>{a.by}</div> : null}</td>
+                <td className="tnum" style={{ fontSize: 12 }}>{actionLiftText(a)}</td>
+                <td><span className={"badge badge-" + v.tone}>{v.label}</span></td>
+                <td className="t-num tnum">{a.qtyNow == null ? "—" : fmt(a.qtyNow)}</td>
+                <td><button className="btn btn-ghost btn-icon" title="ลบ" onClick={() => insightRemoveAction(a)}><Icons.X size={14}/></button></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function SkuActionBoard({ showCost }) {
@@ -559,6 +655,7 @@ function SkuActionBoard({ showCost }) {
     };
   }, []);
   const ins = useMemoAn(() => buildSkuInsights({ days }), [days, pv]);
+  const results = useActionResults(useStateAn, useEffectAn, useMemoAn);
   useEffectAn(() => setShowN(60), [seg, days, q]);
 
   const needle = q.trim().toLowerCase();
@@ -601,9 +698,20 @@ function SkuActionBoard({ showCost }) {
             </div>
           </button>
         ))}
+        <button onClick={() => setSeg("track")} className="card" style={{
+          textAlign: "left", padding: "12px 14px", cursor: "pointer",
+          outline: seg === "track" ? "2px solid var(--accent)" : "none", outlineOffset: -2
+        }}>
+          <div className="row" style={{ gap: 6 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 99, background: "var(--accent)" }}/>
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>ติดตามผล</span>
+          </div>
+          <div className="tnum" style={{ fontSize: 22, fontWeight: 600, marginTop: 4 }}>{fmt(results.length)} <span style={{ fontSize: 12, fontWeight: 400, color: "var(--muted)" }}>รายการ</span></div>
+          <div className="tnum" style={{ fontSize: 11, color: "var(--muted)" }}>ได้ผล {results.filter(a => a.verdict === "up").length}</div>
+        </button>
       </div>
 
-      <div className="card card-tight">
+      {seg === "track" ? <ActionResultsPanel results={results}/> : <div className="card card-tight">
         <div className="card-head">
           <div>
             <h3>{cur.label} · {fmt(list.length)} SKU</h3>
@@ -646,7 +754,10 @@ function SkuActionBoard({ showCost }) {
                     {showCost && <td className="t-num tnum">{r.tiedUp != null ? fmtMoney(r.tiedUp) : "—"}</td>}
                     <td style={{ fontSize: 12, maxWidth: 340 }}>
                       {skuInsightTip(r, showCost) || <span style={{ color: "var(--muted)" }}>—</span>}
-                      {(r.seg === "slow" || r.seg === "dead") && canInsightBundle() && <div style={{ marginTop: 6 }}><button className="btn btn-sm" onClick={() => insightCreateBundle(r)}>สร้างชุด…</button></div>}
+                      <div className="row" style={{ marginTop: 6, gap: 6 }}>
+                        {(r.seg === "slow" || r.seg === "dead") && canInsightBundle() && <button className="btn btn-sm" onClick={() => insightCreateBundle(r)}>สร้างชุด…</button>}
+                        <button className="btn btn-sm" onClick={() => insightLogAction(r)}>บันทึกสิ่งที่ทำ</button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -657,9 +768,9 @@ function SkuActionBoard({ showCost }) {
             <button className="btn" onClick={() => setShowN(n => n + 60)}>ดูเพิ่ม ({fmt(list.length - showN)})</button>
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 }
 
-Object.assign(window, { AnalyticsPage, buildAnalyticsWindow, _todayBkkIso, SkuActionBoard, skuInsightTip, skuInsightsCsv, insightCreateBundle, canInsightBundle, exportReorderList, exportPromoList, fmtCover });
+Object.assign(window, { AnalyticsPage, buildAnalyticsWindow, _todayBkkIso, SkuActionBoard, skuInsightTip, skuInsightsCsv, insightCreateBundle, canInsightBundle, insightLogAction, insightRemoveAction, actionLiftText, useActionResults, exportReorderList, exportPromoList, fmtCover });
