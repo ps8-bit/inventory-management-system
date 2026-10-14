@@ -2363,6 +2363,34 @@ function _saveOrderAlerts(list) {
 }
 function ackOrderAlert(orderId) { _saveOrderAlerts(loadOrderAlerts().filter(a => a.id !== orderId)); }
 function ackAllOrderAlerts() { _saveOrderAlerts([]); }
+
+/* Auto-close an alert ONLY when the work it asked for provably happened: the
+   order was packed AFTER the alert. Packing (แพ็คเสร็จ) is the step where the
+   packer ticks/scans every line against the order, i.e. exactly the re-check a
+   new/edit alert asks for. Proof is a NEW pack stamp — order.packedAt differs
+   from the one recorded when the alert was raised (`pk`) — so device clocks
+   never matter, and an order edited AFTER it was packed keeps its alert until it
+   is packed again. Not closed automatically:
+     • alerts without a recorded stamp (a push folded after the order had moved
+       on) — we can't tell whether the pack came before or after the change;
+     • cancel alerts — putting picked goods back on the shelf leaves no record;
+     • an order that went back to รอแพ็ค, or vanished.
+   Returns the number closed. */
+function _orderAlertDone(a, byId) {
+  if (!a || a.kind === "removed" || typeof a.pk !== "string") return false;
+  const o = byId[a.id];
+  if (!o || !o.packedAt || String(o.packedAt) === a.pk) return false;
+  return o.status === "packed" || o.status === "shipped" || o.status === "delivered";
+}
+function closeDoneOrderAlerts() {
+  const list = loadOrderAlerts();
+  if (!list.length || typeof buildOrders !== "function") return 0;
+  const byId = {};
+  (buildOrders() || []).forEach(o => { if (o && o.id) byId[o.id] = o; });
+  const keep = list.filter(a => !_orderAlertDone(a, byId));
+  if (keep.length !== list.length) _saveOrderAlerts(keep);
+  return list.length - keep.length;
+}
 function orderAlertSoundOn() { try { return localStorage.getItem(ORDER_ALERT_SOUND_KEY) !== "0"; } catch (e) { return true; } }
 function setOrderAlertSound(on) { try { localStorage.setItem(ORDER_ALERT_SOUND_KEY, on ? "1" : "0"); } catch (e) {} }
 
@@ -2416,6 +2444,7 @@ function _orderAlertSnap() {
       cod: Number(o.codAmount) || 0,
       carrier: String(o.carrier || "").trim(),
       pnote: (n && n.text) ? String(n.text) : "",
+      pk: String(o.packedAt || ""),
     };
   });
   return { st, pend };
@@ -2448,7 +2477,7 @@ function _orderAlertDiff(prev, next, mode) {
   const now = Date.now();
   const mine = (id) => typeof orderTouchedRecently === "function" && orderTouchedRecently(id);
   const touched = (id) => mode === "local" ? !mine(id) : mine(id);
-  const base = (id, s) => ({ id, at: now, short: s.short, customer: s.customer, channel: s.channel, status: s.status });
+  const base = (id, s) => ({ id, at: now, short: s.short, customer: s.customer, channel: s.channel, status: s.status, pk: s.pk });
   Object.keys(next.pend).forEach(id => {
     if (touched(id)) return;
     const n = next.pend[id], p = prev.pend[id];
@@ -2665,6 +2694,11 @@ function startOrderAlertWatch() {
     if (own.length) _queueOrderPush(own);
   };
   ["ims-orders-change", "ims-labels-change", "ims-pack-change"].forEach(ev => window.addEventListener(ev, onChange));
+  // Close alerts whose order has since been packed (here or on another device).
+  let sweepT = null;
+  const sweep = () => { clearTimeout(sweepT); sweepT = setTimeout(closeDoneOrderAlerts, 800); };
+  ["ims-orders-change", "ims-labels-change", "ims-order-alerts-change"].forEach(ev => window.addEventListener(ev, sweep));
+  sweep();
 }
 
 function _oaTime(at) {
@@ -2965,7 +2999,18 @@ function _pushInboxDrain() {
 async function pullPushInbox() {
   const rows = await _pushInboxDrain();
   const day = Date.now() - 24 * 3600 * 1000;
-  const alerts = rows.filter(r => r && r.alert && r.alert.id && (r.at || 0) > day).map(r => r.alert);
+  const byId = {};
+  (typeof buildOrders === "function" ? buildOrders() : []).forEach(o => { if (o && o.id) byId[o.id] = o; });
+  // The push payload has no pack stamp. Take the current one only while the order
+  // is still รอแพ็ค — then any later pack is provably after this change. If it is
+  // already packed we can't tell which came first, so it stays manual (no pk).
+  const alerts = rows.filter(r => r && r.alert && r.alert.id && (r.at || 0) > day).map(r => {
+    const a = { ...r.alert };
+    delete a.pk;
+    const o = byId[a.id];
+    if (o && o.status === "picking") a.pk = String(o.packedAt || "");
+    return a;
+  });
   if (alerts.length && orderAlertsAllowed()) _saveOrderAlerts(_mergeOrderAlerts(loadOrderAlerts(), alerts));
   return alerts.length;
 }
@@ -3200,4 +3245,4 @@ function OrderAlerts({ onOpen, mobile }) {
 }
 
 Object.assign(window, { orderCustomerText, TrackingPage, CustomerLookup, useOrders, buildOrders, setOrderField, clearOrderOverride, saveOrderEdit, deleteOrdersFromDb, SlipScanModal, labelToOrder, loadPreservedOrders, savePreservedOrder,
-  OrderAlerts, OrderChangeBanner, OrderChangeDetail, OrderPushToggle, OrderPushNudge, enableOrderPush, disableOrderPush, orderPushState, startOrderAlertWatch, loadOrderAlerts, ackOrderAlert, ackAllOrderAlerts });
+  OrderAlerts, OrderChangeBanner, OrderChangeDetail, OrderPushToggle, OrderPushNudge, enableOrderPush, disableOrderPush, orderPushState, startOrderAlertWatch, loadOrderAlerts, ackOrderAlert, ackAllOrderAlerts, closeDoneOrderAlerts });
