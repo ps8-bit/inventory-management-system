@@ -3032,6 +3032,7 @@ function _hookOrderPush() {
     }
   } catch (e) {}
   pullPushInbox().then(() => _openOrderAlert(openId));
+  _pushRegAt = Date.now();
   refreshOrderPush();
   if (navigator.serviceWorker && navigator.serviceWorker.addEventListener) {
     navigator.serviceWorker.addEventListener("message", (e) => {
@@ -3040,7 +3041,28 @@ function _hookOrderPush() {
       if (d.type === "ims-push-open") pullPushInbox().then(() => _openOrderAlert(d.orderId));
     });
   }
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") pullPushInbox(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    pullPushInbox();
+    _reRegisterPushSoon(false);
+  });
+  // Signing out drops this device's push row (authSignOut → _dropDevicePush), and
+  // this hook runs once per page load — so a sign-out → sign-in without a reload
+  // used to leave the phone unregistered while its card still read "เปิดอยู่"
+  // (Android staff phones went silent on 2026-10-13). Register again on every
+  // sign-in, and on return to the foreground (throttled) as a safety net.
+  try {
+    if (typeof sb !== "undefined" && sb.auth && sb.auth.onAuthStateChange) {
+      sb.auth.onAuthStateChange((ev) => { if (ev === "SIGNED_IN") _reRegisterPushSoon(true); });
+    }
+  } catch (e) {}
+}
+let _pushRegAt = 0;
+function _reRegisterPushSoon(force) {
+  if (!force && Date.now() - _pushRegAt < 10 * 60 * 1000) return;
+  _pushRegAt = Date.now();
+  // Give Root a moment to set window.__currentUser for the new session.
+  setTimeout(() => { refreshOrderPush(); }, 1500);
 }
 
 const ORDER_PUSH_COPY = {
