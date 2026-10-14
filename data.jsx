@@ -2123,6 +2123,10 @@ function buildSkuInsights(opts) {
     if (r.seg !== "slow" && r.seg !== "dead") continue;
     const t = topByCat.get(r.cat) || byRev[0];
     r.partner = t && t.sku !== r.sku ? { sku: t.sku, name: t.name } : null;
+    // A few more candidates for the bundle dialog: same-category sellers first, then overall.
+    const seen = new Set([r.sku]);
+    r.partners = byRev.filter(x => x.cat === r.cat).concat(byRev)
+      .filter(x => !seen.has(x.sku) && seen.add(x.sku)).slice(0, 6).map(x => ({ sku: x.sku, name: x.name }));
   }
 
   const segs = SKU_SEGMENTS.map(s => {

@@ -6705,8 +6705,8 @@ function MSkuActions({ ctx }) {
               {showCost && r.tiedUp != null && <span>ทุน {mMoney(r.tiedUp)}</span>}
             </div>
             {tip(r) && <div style={{ fontSize: 12, marginTop: 6 }}>{tip(r)}</div>}
-            {r.partner && typeof canInsightBundle === "function" && canInsightBundle() &&
-              <button className="m-btn-big outline" style={{ marginTop: 8, padding: "8px 10px", fontSize: 13 }} onClick={() => insightCreateBundle(r)}>สร้างชุดกับ {r.partner.sku}</button>}
+            {(r.seg === "slow" || r.seg === "dead") && typeof canInsightBundle === "function" && canInsightBundle() &&
+              <button className="m-btn-big outline" style={{ marginTop: 8, padding: "8px 10px", fontSize: 13 }} onClick={() => insightCreateBundle(r)}>สร้างชุด…</button>}
           </div>
         ))}
       {list.length > showN && (
