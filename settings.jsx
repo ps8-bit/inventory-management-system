@@ -299,7 +299,8 @@ function LineAlertCard({ pushToast }) {
   };
   const runPreview = async (cmd, label) => {
     setPreview({ cmd: label, loading: true });
-    const { data, error } = await lineBotPreview(cmd);
+    // "weekly" previews the Monday sales digest (line-alert weekly-preview — never sent).
+    const { data, error } = cmd === "weekly" ? await lineTest("weekly-preview") : await lineBotPreview(cmd);
     if (error) { setPreview({ cmd: label, text: "⚠️ " + error }); return; }
     setPreview({ cmd: label, text: data?.text || "(ไม่มีข้อมูล)" });
   };
@@ -308,6 +309,7 @@ function LineAlertCard({ pushToast }) {
     { cmd: "สต็อก",   label: "สต็อกรวม" },
     { cmd: "ออเดอร์", label: "ออเดอร์ค้างส่ง" },
     { cmd: "ยอดขาย",  label: "ยอดขาย" },
+    { cmd: "weekly",  label: "ดูตัวอย่างสรุปรายสัปดาห์" },
   ];
   return (
     <div className="card" style={{ padding: 24 }}>
