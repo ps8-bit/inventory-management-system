@@ -2056,19 +2056,25 @@ function buildSkuInsights(opts) {
       a.win += qty;
       if (li.price != null) { a.revenue += qty * (Number(li.price) || 0); a.priced = true; }
       if (age < half) a.recent += qty; else if (age < half * 2) a.prev += qty;
-      const ch = String(li.ch || r.channel || "").trim();
+      // Lines carry the channel ID ("facebook"), orders the display name — fold both to the name.
+      const raw = String(li.ch || r.channel || "").trim();
+      const meta = CHANNEL_LIST.find(c => c.id === raw || c.name.toLowerCase() === raw.toLowerCase());
+      const ch = meta ? meta.name : raw;
       if (ch && ch !== "ฉลาก") { a.ch.set(ch, (a.ch.get(ch) || 0) + qty); chTotals.set(ch, (chTotals.get(ch) || 0) + qty); }
     }
   }
   // Channels that carry real volume — a best seller missing from one of them is a listing gap.
   const allUnits = [...chTotals.values()].reduce((s, v) => s + v, 0);
-  const mainChannels = [...chTotals.entries()].filter(([, v]) => v >= allUnits * 0.1).map(([k]) => k);
+  // Offline / other isn't a storefront you can list on, so it never counts as a gap.
+  const otherCh = CHANNEL_LIST.find(c => c.id === "other");
+  const mainChannels = [...chTotals.entries()]
+    .filter(([k, v]) => v >= allUnits * 0.1 && !(otherCh && k === otherCh.name)).map(([k]) => k);
 
   const rows = [];
   for (const p of PRODUCTS) {
     const a = per.get(p.sku);
     const qty = Math.max(0, Number(p.qty) || 0);
-    if (qty <= 0 && !(a && a.win)) continue;                    // nothing on hand, nothing selling
+    if (qty <= 0 && !(a && a.win >= 3)) continue;               // out of stock and not really selling — nothing to act on
     const units = a ? a.win : 0;
     const price = Number(p.price) || 0;
     const revenue = a ? (a.priced ? a.revenue : units * price) : 0;
@@ -2098,10 +2104,12 @@ function buildSkuInsights(opts) {
 
   for (const r of rows) {
     const isNew = r.firstAge != null && r.firstAge < o.newDays;
-    if (r.units > 0 && r.cover < o.coverLow) r.seg = "restock";
+    // Restock needs a real selling rate — 1 piece in 60 days that happens to be at 0 is not a reorder.
+    if (r.units >= 3 && r.cover < o.coverLow) r.seg = "restock";
     else if (r.units === 0) r.seg = isNew ? "new" : "dead";
-    else if (half >= 7 && r.recent >= 3 && r.recent >= r.prev * 1.5) r.seg = "rising";
     else if (stars.has(r.sku)) r.seg = "star";
+    // Rising: a clear jump on a non-trivial base, so a SKU going 1 → 3 isn't "trending".
+    else if (half >= 7 && r.recent >= 5 && r.recent >= Math.max(r.prev, 1) * 1.5) r.seg = "rising";
     else if (r.cover > o.coverHigh) r.seg = isNew ? "new" : "slow";
     else r.seg = "ok";
     r.isStar = stars.has(r.sku);
@@ -2139,7 +2147,7 @@ function buildSkuInsights(opts) {
     });
   });
   const key = {
-    restock: (r) => r.cover, rising: (r) => -(r.recent - r.prev), star: (r) => -r.revenue, ok: (r) => -r.revenue,
+    restock: (r) => -r.perDay, rising: (r) => -(r.recent - r.prev), star: (r) => -r.revenue, ok: (r) => -r.revenue,
     slow: (r) => -(r.tiedUp != null ? r.tiedUp : r.stockValue), dead: (r) => -(r.tiedUp != null ? r.tiedUp : r.stockValue),
     new: (r) => (r.firstAge || 0)
   };
@@ -2148,6 +2156,131 @@ function buildSkuInsights(opts) {
   const startIso = records.length ? new Date(todayMs - oldest * DAY + 7 * 3600000).toISOString().slice(0, 10) : null;
   return { rows, segs, observed, startIso, mainChannels, opts: o };
 }
+
+/* ── ติดตามผล: what was done to push a SKU, and did it work ─────────────────────
+   app_state "sales_actions" = { "<id>": { id, sku, kind, note, price, at, by } | null }.
+   merge_app_state can only ADD keys, so a removed action is a null tombstone,
+   filtered on read (same contract as pack_progress). Writes go one record at a
+   time through dbMergeState and roll the local mirror back when refused. */
+const SALES_ACTIONS_KEY = "sales_actions";
+const SALES_ACTIONS_LS = "ims_sales_actions";
+const SALES_ACTION_KINDS = [
+  { id: "promo",   label: "ลดราคา / โปร" },
+  { id: "bundle",  label: "จัดชุด" },
+  { id: "listing", label: "ลงขายช่องทางใหม่" },
+  { id: "ads",     label: "ยิงแอด / โพสต์" },
+  { id: "photo",   label: "ปรับรูป / รายละเอียด" },
+  { id: "other",   label: "อื่นๆ" }
+];
+function salesActionKindLabel(id) { const k = SALES_ACTION_KINDS.find(x => x.id === id); return k ? k.label : (id || "อื่นๆ"); }
+function _salesActionsRaw() {
+  let m = window._DB_SALES_ACTIONS;
+  if (!m || typeof m !== "object") {
+    try { m = JSON.parse(localStorage.getItem(SALES_ACTIONS_LS) || "null"); } catch (e) { m = null; }
+  }
+  return (m && typeof m === "object") ? m : {};
+}
+function loadSalesActions() {
+  const m = _salesActionsRaw();
+  return Object.keys(m).map(k => m[k]).filter(Boolean).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+}
+function _salesActionsMirror(m) {
+  window._DB_SALES_ACTIONS = m;
+  try { localStorage.setItem(SALES_ACTIONS_LS, JSON.stringify(m)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-sales-actions-change"));
+}
+let _salesActionsInflight = null;
+function refreshSalesActions() {
+  if (typeof dbLoadState !== "function") return Promise.resolve();
+  if (_salesActionsInflight) return _salesActionsInflight;
+  _salesActionsInflight = dbLoadState(SALES_ACTIONS_KEY).then(v => {
+    if (v && typeof v === "object") _salesActionsMirror(v);
+  }).catch(() => {}).then(() => { _salesActionsInflight = null; });
+  return _salesActionsInflight;
+}
+async function _salesActionPush(id, value) {
+  let res;
+  try {
+    if (typeof dbMergeState === "function") res = await dbMergeState(SALES_ACTIONS_KEY, { [id]: value });
+    if ((res === null || res === undefined) && typeof dbSaveState === "function") {
+      const full = Object.assign({}, _salesActionsRaw(), { [id]: value });
+      res = await dbSaveState(SALES_ACTIONS_KEY, full);
+    }
+  } catch (e) { res = { error: String(e) }; }
+  return res && !res.error ? { ok: true } : { ok: false, error: (res && res.error) || "เชื่อมต่อไม่ได้" };
+}
+/* Record one action. Resolves { ok, action } or { ok:false } (already rolled back + toasted). */
+async function addSalesAction(a) {
+  if (!a || !a.sku) return { ok: false };
+  const rec = {
+    id: "SA-" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 5).toUpperCase(),
+    sku: a.sku, kind: a.kind || "other", note: String(a.note || "").slice(0, 200),
+    price: a.price != null && a.price !== "" ? Number(a.price) || null : null,
+    at: a.at || new Date().toISOString(),
+    by: (window.__currentUser && window.__currentUser.name) || ""
+  };
+  const prev = _salesActionsRaw();
+  _salesActionsMirror(Object.assign({}, prev, { [rec.id]: rec }));
+  const r = await _salesActionPush(rec.id, rec);
+  if (!r.ok) { _salesActionsMirror(prev); _blobWriteFailed("การติดตามผล", r.error); return { ok: false }; }
+  return { ok: true, action: rec };
+}
+async function removeSalesAction(id) {
+  const prev = _salesActionsRaw();
+  if (!prev[id]) return { ok: true };
+  _salesActionsMirror(Object.assign({}, prev, { [id]: null }));
+  const r = await _salesActionPush(id, null);
+  if (!r.ok) { _salesActionsMirror(prev); _blobWriteFailed("การติดตามผล", r.error); return { ok: false }; }
+  return { ok: true };
+}
+
+/* Before / after for every action: units per day in the `win` days before the
+   action vs the days since (capped at `win`). Verdict needs at least 7 days
+   after — a promo judged on day 2 is noise. */
+function buildActionResults(opts) {
+  const o = Object.assign({ win: 14, minDays: 7 }, opts || {});
+  const DAY = 86400000;
+  const daily = new Map();   // sku → Map(dateIso → units)
+  for (const r of (loadSalesRecords() || [])) {
+    if (!r || !r.dateIso || r.status === "cancelled" || !Array.isArray(r.lineItems)) continue;
+    for (const li of r.lineItems) {
+      const q = Number(li && li.qty) || 0;
+      if (!li || !li.sku || q <= 0) continue;
+      let m = daily.get(li.sku); if (!m) { m = new Map(); daily.set(li.sku, m); }
+      m.set(r.dateIso, (m.get(r.dateIso) || 0) + q);
+    }
+  }
+  const isoOf = (ms) => new Date(ms + 7 * 3600000).toISOString().slice(0, 10);   // Bangkok date
+  const sum = (sku, fromMs, days) => {
+    const m = daily.get(sku); if (!m || days <= 0) return 0;
+    let s = 0;
+    for (let i = 0; i < days; i++) s += m.get(isoOf(fromMs + i * DAY)) || 0;
+    return s;
+  };
+  const today0 = Date.parse(todayIso() + "T00:00:00+07:00");
+  return loadSalesActions().map(a => {
+    const start0 = Date.parse(isoOf(Date.parse(a.at) || Date.now()) + "T00:00:00+07:00");
+    const afterDays = Math.max(0, Math.min(o.win, Math.round((today0 - start0) / DAY) + 1));
+    const before = sum(a.sku, start0 - o.win * DAY, o.win);
+    const after = sum(a.sku, start0, afterDays);
+    const bRate = before / o.win, aRate = afterDays ? after / afterDays : 0;
+    let verdict = "wait";
+    if (afterDays >= o.minDays) {
+      if (aRate > bRate * 1.5 && after - before * afterDays / o.win >= 2) verdict = "up";
+      else if (aRate < bRate * 0.75) verdict = "down";
+      else verdict = "flat";
+    }
+    const p = PRODUCTS.find(x => x.sku === a.sku);
+    return Object.assign({}, a, { name: p ? p.name : a.sku, qtyNow: p ? Number(p.qty) || 0 : null,
+      before, after, afterDays, bRate, aRate, verdict, win: o.win });
+  });
+}
+const ACTION_VERDICTS = {
+  up:   { label: "ได้ผล",       tone: "success" },
+  flat: { label: "ยังไม่ต่าง",   tone: "warning" },
+  down: { label: "ยอดลดลง",     tone: "danger"  },
+  wait: { label: "รอผล",        tone: "neutral" }
+};
 
 /* Today's sales per channel — what the "ออร์เดอร์ตามช่องทาง" cards show.
    Returns CHANNEL_LIST rows with { sales, units, pct } (pct of today's units). */
@@ -4396,6 +4529,7 @@ function cloudWriteFailed(res, what) {
 Object.assign(window, {
   cloudWriteFailed,
   refreshReceiveDates, buildSkuInsights, SKU_SEGMENTS,
+  SALES_ACTION_KINDS, salesActionKindLabel, loadSalesActions, refreshSalesActions, addSalesAction, removeSalesAction, buildActionResults, ACTION_VERDICTS,
   isIOSDevice, deliverFile, savePdf,
   STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,
   skuBrandPrefix, guessBrandFromSku,

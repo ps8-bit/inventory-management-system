@@ -6650,6 +6650,7 @@ function MSkuActions({ ctx }) {
     };
   }, []);
   const ins = useMemoM(() => (typeof buildSkuInsights === "function" ? buildSkuInsights({ days }) : { rows: [], segs: [], observed: 0 }), [days, pv]);
+  const results = useActionResults(useStateM, useEffectM, useMemoM);
   useEffectM(() => setShowN(40), [seg, days, q]);
   const tip = (r) => (typeof skuInsightTip === "function" ? skuInsightTip(r, showCost) : "");
   const needle = q.trim().toLowerCase();
@@ -6677,7 +6678,39 @@ function MSkuActions({ ctx }) {
             <div style={{ fontSize: 10, color: "var(--muted)" }}>{mFmt(s.qty)} ชิ้น{showCost && s.tiedUp > 0 ? ` · ทุน ${mMoney(s.tiedUp)}` : ""}</div>
           </button>
         ))}
+        <button className="m-card" onClick={() => setSeg("track")} style={{
+          margin: 0, textAlign: "left", padding: "10px 12px",
+          outline: seg === "track" ? "2px solid var(--accent)" : "none", outlineOffset: -2
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--muted)" }}>
+            <span style={{ width: 7, height: 7, borderRadius: 99, background: "var(--accent)" }}/>ติดตามผล
+          </div>
+          <div style={{ fontSize: 18, fontWeight: 600, marginTop: 2 }}>{mFmt(results.length)} <span style={{ fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>รายการ</span></div>
+          <div style={{ fontSize: 10, color: "var(--muted)" }}>ได้ผล {results.filter(a => a.verdict === "up").length}</div>
+        </button>
       </div>
+      {seg === "track" ? (results.length === 0
+        ? <div className="m-card" style={{ textAlign: "center", color: "var(--muted)", fontSize: 12, lineHeight: 1.7 }}>ยังไม่มีรายการติดตามผล — กด "บันทึกสิ่งที่ทำ" ที่สินค้า (การสร้างชุดจะบันทึกให้อัตโนมัติ)</div>
+        : results.map(a => {
+          const v = ACTION_VERDICTS[a.verdict];
+          return (
+            <div key={a.id} className="m-card" style={{ padding: 12 }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <ProductImageThumb sku={a.sku} size={36} radius={8}/>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</div>
+                  <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{a.sku} · {String(a.at).slice(0, 10)}</div>
+                </div>
+                <span className={"badge badge-" + v.tone}>{v.label}</span>
+              </div>
+              <div style={{ fontSize: 12, marginTop: 8 }}>{salesActionKindLabel(a.kind)}{a.price ? ` · ฿${mFmt(a.price)}` : ""}{a.note ? ` — ${a.note}` : ""}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>{actionLiftText(a)}</span>
+                <button className="btn btn-sm btn-ghost" onClick={() => insightRemoveAction(a)}>ลบ</button>
+              </div>
+            </div>
+          );
+        })) : <>
       {cur && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}><b style={{ color: "var(--fg)" }}>{cur.label}</b> — {cur.action}</div>}
       {seg === "restock" && canDo("exportData") && typeof exportReorderList === "function" &&
         <button className="m-btn-big outline" style={{ marginBottom: 10 }} onClick={() => exportReorderList(ins)}>ส่งออกรายการสั่งซื้อ</button>}
@@ -6708,6 +6741,7 @@ function MSkuActions({ ctx }) {
             {tip(r) && <div style={{ fontSize: 12, marginTop: 6 }}>{tip(r)}</div>}
             {(r.seg === "slow" || r.seg === "dead") && typeof canInsightBundle === "function" && canInsightBundle() &&
               <button className="m-btn-big outline" style={{ marginTop: 8, padding: "8px 10px", fontSize: 13 }} onClick={() => insightCreateBundle(r)}>สร้างชุด…</button>}
+            <button className="m-btn-big outline" style={{ marginTop: 8, padding: "8px 10px", fontSize: 13 }} onClick={() => insightLogAction(r)}>บันทึกสิ่งที่ทำ</button>
           </div>
         ))}
       {list.length > showN && (
@@ -6715,6 +6749,7 @@ function MSkuActions({ ctx }) {
           ดูเพิ่ม — แสดง {showN} จาก {list.length}
         </button>
       )}
+      </>}
     </>
   );
 }
