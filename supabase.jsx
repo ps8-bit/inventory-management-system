@@ -1026,6 +1026,21 @@ function _hookLiveFocusRefresh() {
 
 function setupRealtimeSync() {
   _hookLiveFocusRefresh();
+  // dbInit runs again whenever the signed-in user changes (sign-out → sign-in or
+  // an account switch without a reload). supabase-js hands back the SAME
+  // 'ims-sync' channel for the same topic, and adding .on() to a channel that is
+  // already subscribed throws — which failed dbInit ("[DB] init failed", orders
+  // marked failed) and left live sync on the previous session's channel. Drop the
+  // old channel first, then build a fresh one for the new session.
+  const old = sb.getChannels().filter(c => c.topic === 'realtime:ims-sync');
+  if (old.length) {
+    Promise.all(old.map(c => sb.removeChannel(c).catch(() => {})))
+      .then(_subscribeImsSync, _subscribeImsSync);
+    return;
+  }
+  _subscribeImsSync();
+}
+function _subscribeImsSync() {
   let wasSubscribed = false;
   sb.channel('ims-sync')
     // NO `products` listener: that table is deliberately not in the realtime
