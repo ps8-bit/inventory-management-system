@@ -441,7 +441,8 @@ function fmtCover(c) { return !isFinite(c) ? "—" : c > 365 ? "> 1 ปี" : Ma
 /* One-line "what to do" for a row; shared with the mobile fork. */
 function skuInsightTip(r, showCost) {
   const bits = [];
-  if (r.seg === "restock") bits.push(r.qty <= 0 ? "ของหมดแล้ว" : `เหลือพอขาย ~${Math.max(0, Math.round(r.cover))} วัน`, r.reorder > 0 ? `แนะนำสั่ง ${r.reorder} ชิ้น` : "");
+  if (r.seg === "restock") bits.push(r.qty <= 0 ? "ของหมดแล้ว" : `เหลือพอขาย ~${Math.max(0, Math.round(r.cover))} วัน`,
+    r.reorder > 0 ? `แนะนำสั่ง ${r.reorder} ชิ้น` : "", r.lead != null ? `ของมาถึงใน ${r.lead} วัน` : "");
   if (r.seg === "rising") bits.push(`ช่วงหลัง ${r.recent} ชิ้น vs ก่อนหน้า ${r.prev} ชิ้น`);
   if ((r.isStar || r.seg === "rising") && r.missingChannels && r.missingChannels.length) bits.push("ยังไม่มียอดบน " + r.missingChannels.join(", "));
   if (r.seg === "slow") bits.push("สต็อกพอขาย " + fmtCover(r.cover));
@@ -529,8 +530,8 @@ async function insightCreateBundle(r) {
 function exportReorderList(ins) {
   const rows = ins.rows.filter(r => r.seg === "restock" && r.reorder > 0);
   if (!rows.length) { _insightToast("ไม่มีสินค้าที่ต้องสั่งเพิ่ม"); return; }
-  _saveCsv([["SKU", "สินค้า", "คงเหลือ", "ขาย/วัน", "พอขาย (วัน)", "แนะนำสั่ง"]]
-    .concat(rows.map(r => [r.sku, r.name, r.qty, r.perDay.toFixed(2), Math.round(r.cover), r.reorder])),
+  _saveCsv([["SKU", "สินค้า", "ผู้จัดส่ง", "คงเหลือ", "ขาย/วัน", "พอขาย (วัน)", "วันสั่งของ", "แนะนำสั่ง"]]
+    .concat(rows.map(r => [r.sku, r.name, r.supplier || "", r.qty, r.perDay.toFixed(2), Math.round(r.cover), r.lead != null ? r.lead : "", r.reorder])),
     `reorder-${todayIso()}.csv`);
 }
 /* Promo list — slow/dead items with a cost-floored discounted price (viewCost only). */
@@ -540,6 +541,34 @@ function exportPromoList(ins) {
   _saveCsv([["SKU", "สินค้า", "คงเหลือ", "ไม่มียอด (วัน)", "ราคาปัจจุบัน", "ลด %", "ราคาโปร"]]
     .concat(rows.map(r => [r.sku, r.name, r.qty, r.idleDays, r.price, r.discountPct, r.promoPrice])),
     `promo-${todayIso()}.csv`);
+}
+
+/* วันสั่งของ (lead time): how many days an order takes to arrive. Sets this
+   product, or every product from the same supplier in one go. Shown only once
+   products.lead_days exists (sale-price-lead-time.sql) and to editProduct. */
+function canEditLeadDays() {
+  return typeof hasLeadDaysColumn === "function" && hasLeadDaysColumn() && (typeof canDo !== "function" || canDo("editProduct"));
+}
+async function insightEditLeadDays(r) {
+  if (!r || typeof setLeadDays !== "function") return;
+  const sup = r.supplier && r.supplier !== "ไม่ระบุ" ? r.supplier : "";
+  const sameSup = sup ? PRODUCTS.filter(p => p.supplier === sup).map(p => p.sku) : [];
+  const ONE = "เฉพาะสินค้านี้";
+  const ALL = sup ? `ทุกสินค้าของ ${sup} (${sameSup.length})` : "";
+  const ans = await askForm({
+    title: "วันสั่งของ (สั่งแล้วกี่วันของถึง)",
+    message: `${r.sku} · ${r.name}
+ใช้คำนวณ "ใกล้หมด" และจำนวนที่แนะนำให้สั่ง — เว้นว่าง = ไม่ระบุ (ใช้ค่ามาตรฐาน 14/30 วัน)`,
+    fields: [
+      { key: "days", label: "จำนวนวัน", value: r.lead != null ? String(r.lead) : "", type: "number", required: false, options: ["3", "7", "14", "30", "45", "60"] },
+      ...(sup ? [{ key: "scope", label: "ใช้กับ", value: ONE, options: [ONE, ALL] }] : [])
+    ],
+    okLabel: "บันทึก"
+  });
+  if (!ans) return;
+  const skus = ans.scope === ALL && sameSup.length ? sameSup : [r.sku];
+  const n = setLeadDays(skus, ans.days);
+  _insightToast(ans.days === "" ? `ล้างวันสั่งของ ${n} รายการ` : `ตั้งวันสั่งของ ${ans.days} วัน · ${n} รายการ`);
 }
 
 /* ── ติดตามผล (shared by desktop + mobile) ── */
@@ -757,6 +786,7 @@ function SkuActionBoard({ showCost }) {
                       <div className="row" style={{ marginTop: 6, gap: 6 }}>
                         {(r.seg === "slow" || r.seg === "dead") && canInsightBundle() && <button className="btn btn-sm" onClick={() => insightCreateBundle(r)}>สร้างชุด…</button>}
                         <button className="btn btn-sm" onClick={() => insightLogAction(r)}>บันทึกสิ่งที่ทำ</button>
+                        {r.units > 0 && canEditLeadDays() && <button className="btn btn-sm btn-ghost" onClick={() => insightEditLeadDays(r)}>วันสั่งของ: {r.lead != null ? r.lead + " วัน" : "ไม่ระบุ"}</button>}
                       </div>
                     </td>
                   </tr>
@@ -773,4 +803,4 @@ function SkuActionBoard({ showCost }) {
   );
 }
 
-Object.assign(window, { AnalyticsPage, buildAnalyticsWindow, _todayBkkIso, SkuActionBoard, skuInsightTip, skuInsightsCsv, insightCreateBundle, canInsightBundle, insightLogAction, insightRemoveAction, actionLiftText, useActionResults, exportReorderList, exportPromoList, fmtCover });
+Object.assign(window, { AnalyticsPage, buildAnalyticsWindow, _todayBkkIso, SkuActionBoard, skuInsightTip, skuInsightsCsv, insightCreateBundle, canInsightBundle, insightLogAction, insightRemoveAction, insightEditLeadDays, canEditLeadDays, actionLiftText, useActionResults, exportReorderList, exportPromoList, fmtCover });

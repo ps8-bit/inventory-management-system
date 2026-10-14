@@ -2207,7 +2207,7 @@ function MQuickSell({ ctx }) {
   const [lines, setLines] = useStateM(() => {
     const want = ctx.route.params && ctx.route.params.sku;
     const p = want && PRODUCTS.find(x => x.sku === want);
-    return p ? [{ sku: p.sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "" }] : [];
+    return p ? [{ sku: p.sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "", price: String(Number(p.price) || 0) }] : [];
   });
   const [q, setQ] = useStateM("");
   const [note, setNote] = useStateM("");
@@ -2232,7 +2232,7 @@ function MQuickSell({ ctx }) {
     setLines(ls => {
       const hit = ls.find(l => l.sku === sku);
       if (hit) return ls.map(l => l.sku === sku ? { ...l, qty: String(Math.min(effQty(sku), (parseInt(l.qty, 10) || 0) + 1)) } : l);
-      return [...ls, { sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "" }];
+      return [...ls, { sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "", price: String(Number(p.price) || 0) }];
     });
     setQ("");
   };
@@ -2256,13 +2256,14 @@ function MQuickSell({ ctx }) {
   };
   const setLine = (sku, patch) => setLines(ls => ls.map(l => l.sku === sku ? { ...l, ...patch } : l));
   const pieces = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0), 0);
+  const total = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0) * (Number(l.price) || 0), 0);
   const overStock = lines.find(l => (parseInt(l.qty, 10) || 0) > effQty(l.sku));
   const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy;
 
   const submit = async () => {
     if (!canSubmit || busyRef.current) return;
     busyRef.current = true; setBusy(true);   // synchronous latch — a double-tap must not sell twice
-    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim(), source: "mobile", when });
+    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc, price: l.price })), reasonId, note: note.trim(), source: "mobile", when });
     busyRef.current = false; setBusy(false);
     if (!res.ok) { if (res.error) ctx.pushToast(res.error); return; }
     const ch = channels.find(c => c.id === reasonId);
@@ -2333,6 +2334,12 @@ function MQuickSell({ ctx }) {
                       <span className="mono">{l.sku}</span> · เหลือ {left}{n > left ? " — เกินสต็อก" : ""}
                     </div>
                     <MLocPickChips sku={l.sku} value={l.loc} need={n} onChange={loc => setLine(l.sku, { loc })}/>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 12, color: "var(--muted)" }}>
+                      ราคาที่ขาย/ชิ้น ฿
+                      <input className="m-input tnum" inputMode="decimal" value={l.price ?? ""}
+                        style={{ width: 90, padding: "6px 8px", textAlign: "right", borderColor: l.price !== "" && Number(l.price) !== (Number(p.price) || 0) ? "var(--accent)" : undefined }}
+                        onChange={e => setLine(l.sku, { price: e.target.value.replace(/[^\d.]/g, "") })}/>
+                    </label>
                   </div>
                   <QtyStepper small value={l.qty} min={1} max={left} onChange={v => setLine(l.sku, { qty: v })} title={`จำนวน ${l.sku}`}/>
                   <button onClick={() => setLines(ls => ls.filter(x => x.sku !== l.sku))} aria-label="เอาออก"
@@ -2351,7 +2358,7 @@ function MQuickSell({ ctx }) {
         <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ขาย" hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ยอดขายจะนับเป็นวันนั้น"/>
 
         <button className="m-btn-big" style={{ marginTop: 14 }} disabled={!canSubmit} onClick={submit}>
-          <Icons.Check size={16}/> {busy ? "กำลังบันทึก…" : !reasonId ? "เลือกช่องทางขายก่อน" : `ยืนยันขาย${pieces ? " " + pieces + " ชิ้น" : ""}`}
+          <Icons.Check size={16}/> {busy ? "กำลังบันทึก…" : !reasonId ? "เลือกช่องทางขายก่อน" : `ยืนยันขาย${pieces ? " " + pieces + " ชิ้น · ฿" + Math.round(total).toLocaleString("th-TH") : ""}`}
         </button>
       </div>
     </>
@@ -6742,6 +6749,8 @@ function MSkuActions({ ctx }) {
             {(r.seg === "slow" || r.seg === "dead") && typeof canInsightBundle === "function" && canInsightBundle() &&
               <button className="m-btn-big outline" style={{ marginTop: 8, padding: "8px 10px", fontSize: 13 }} onClick={() => insightCreateBundle(r)}>สร้างชุด…</button>}
             <button className="m-btn-big outline" style={{ marginTop: 8, padding: "8px 10px", fontSize: 13 }} onClick={() => insightLogAction(r)}>บันทึกสิ่งที่ทำ</button>
+            {r.units > 0 && typeof canEditLeadDays === "function" && canEditLeadDays() &&
+              <button className="btn btn-sm btn-ghost" style={{ marginTop: 6 }} onClick={() => insightEditLeadDays(r)}>วันสั่งของ: {r.lead != null ? r.lead + " วัน" : "ไม่ระบุ"}</button>}
           </div>
         ))}
       {list.length > showN && (
