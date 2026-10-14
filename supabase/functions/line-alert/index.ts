@@ -124,6 +124,68 @@ function buildFlex(products: any[]): any {
   };
 }
 
+// ── Weekly sales action digest (mode "weekly") ─────────────────────────────
+// Mirrors the app's ต้องจัดการ board in miniature: best sellers this week, the
+// ones about to run out, and how much stock hasn't sold in 60 days. Sales =
+// every sale-type ledger row in stock_adjustments (ขาย… / ตัดสต็อก…). Values are
+// at SELL price only — the OA broadcasts to staff too, who never see cost.
+const DAY = 86400000;
+function isSaleReason(r: string) { return /^(ขาย|ตัดสต็อก)/.test(r || ""); }
+function buildWeekly(products: any[], moves: any[], now: number) {
+  const first = moves.length ? Math.min(...moves.map((m) => Date.parse(m.created_at) || now)) : now;
+  const observed = Math.max(1, Math.min(60, Math.ceil((now - first) / DAY)));
+  const s60 = new Map<string, number>(), s7 = new Map<string, number>();
+  for (const m of moves) {
+    const t = Date.parse(m.created_at) || 0, q = -numA(m.delta);
+    if (q <= 0 || !isSaleReason(m.reason)) continue;
+    if (now - t < 60 * DAY) s60.set(m.sku, (s60.get(m.sku) || 0) + q);
+    if (now - t < 7 * DAY) s7.set(m.sku, (s7.get(m.sku) || 0) + q);
+  }
+  const bySku = new Map(products.map((p) => [p.sku, p]));
+  const top = [...s7.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .map(([sku, u]) => ({ p: bySku.get(sku) || { sku, name: sku }, u }));
+  const restock: any[] = [];
+  let deadSkus = 0, deadPcs = 0, deadValue = 0;
+  for (const p of products) {
+    const qty = Math.max(0, numA(p.qty)), sold = s60.get(p.sku) || 0;
+    const perDay = sold / observed;
+    if (sold > 0 && perDay > 0 && qty / perDay < 14) restock.push({ p, days: Math.round(qty / perDay), order: Math.max(0, Math.ceil(perDay * 30 - qty)) });
+    if (sold === 0 && qty > 0) { deadSkus++; deadPcs += qty; deadValue += qty * numA(p.price); }
+  }
+  restock.sort((a, b) => a.days - b.days);
+  const units7 = [...s7.values()].reduce((a, b) => a + b, 0);
+  const fmtN = (n: number) => Math.round(n).toLocaleString("en-US");
+
+  let text = `📊 สรุปยอดขายประจำสัปดาห์ — คลังพร้อมส่ง\n${thaiDate(new Date(now + 7 * 3600000))}\nขาย 7 วัน: ${fmtN(units7)} ชิ้น\n`;
+  if (top.length) text += `\n⭐ ขายดี 7 วัน\n` + top.map((t) => `• ${t.p.name} (${t.p.sku}) — ${t.u} ชิ้น`).join("\n") + "\n";
+  if (restock.length) text += `\n🔴 ใกล้หมด (${restock.length})\n` + restock.slice(0, 10).map((r) => `• ${r.p.sku} — พอขาย ~${r.days} วัน · แนะนำสั่ง ${r.order}`).join("\n") + "\n";
+  text += `\n💤 ไม่มียอดขาย ${observed} วัน: ${fmtN(deadSkus)} SKU · ${fmtN(deadPcs)} ชิ้น · มูลค่าขาย ฿${fmtN(deadValue)}\nดูรายละเอียด: วิเคราะห์ยอดขาย › ต้องจัดการ`;
+  if (text.length > 4900) text = text.slice(0, 4900) + "\n…(ตัดทอน)";
+
+  const body: any[] = [
+    { type: "text", text: `ขาย 7 วัน ${fmtN(units7)} ชิ้น`, size: "md", weight: "bold", color: "#1A1A1A" },
+  ];
+  if (top.length) {
+    body.push(flexPill("⭐ ขายดี 7 วัน", "#0F6E3A", "#E3F5EA"));
+    top.forEach((t) => body.push(itemRow(t.p.name || t.p.sku, t.p.sku, `${t.u} ชิ้น`, "#0F6E3A")));
+  }
+  if (restock.length) {
+    body.push(flexPill(`🔴 ใกล้หมด ${restock.length}`, "#A32D2D", "#FCEBEB"));
+    restock.slice(0, 8).forEach((r) => body.push(itemRow(r.p.name || r.p.sku, r.p.sku, `~${r.days} วัน`, "#A32D2D")));
+  }
+  body.push(flexPill(`💤 ไม่มียอดขาย ${observed} วัน`, "#854F0B", "#FAEEDA"));
+  body.push({ type: "text", text: `${fmtN(deadSkus)} SKU · ${fmtN(deadPcs)} ชิ้น · มูลค่าขาย ฿${fmtN(deadValue)}`, size: "sm", color: "#1A1A1A", wrap: true });
+  const flex = {
+    type: "bubble",
+    header: flexHeader("📊 สรุปยอดขายประจำสัปดาห์", `คลังพร้อมส่ง · ${thaiDate(new Date(now + 7 * 3600000))}`),
+    body: { type: "box", layout: "vertical", spacing: "sm", paddingAll: "16px", contents: body },
+    footer: { type: "box", layout: "vertical", paddingAll: "12px", contents: [
+      { type: "button", style: "link", height: "sm", action: { type: "uri", label: "เปิด ต้องจัดการ", uri: APP_URL } },
+    ] },
+  };
+  return { text, flex, stats: { units7, restock: restock.length, deadSkus, observed } };
+}
+
 // Broadcast a text or (preferred) Flex message to every OA friend.
 async function lineBroadcast(token: string, altText: string, flex?: any) {
   const messages = flex
@@ -157,9 +219,9 @@ Deno.serve(async (req) => {
   try { payload = await req.json(); } catch { /* empty body = scheduled digest */ }
 
   // Build/health ping (no auth) — verify a deploy from outside.
-  if (payload?.mode === "ping") return json({ ok: true, build: "alert-flex-2" });
+  if (payload?.mode === "ping") return json({ ok: true, build: "alert-weekly-1" });
 
-  const mode = payload?.mode === "test" ? "test" : "digest";
+  const mode = ["test", "weekly", "weekly-preview"].includes(payload?.mode) ? payload.mode : "digest";
 
   // ---- Authorize: cron-secret header (scheduled) OR admin JWT (manual test) ----
   const admin = createClient(SUPABASE_URL, SERVICE_KEY);
@@ -179,6 +241,23 @@ Deno.serve(async (req) => {
     const r = await lineBroadcast(LINE_TOKEN, "✅ ทดสอบการแจ้งเตือนสต็อกจาก คลังพร้อมส่ง — การเชื่อมต่อ LINE ทำงานปกติ");
     if (!r.ok) return json({ error: "LINE broadcast failed", status: r.status, detail: r.body }, 502);
     return json({ sent: true, mode: "test" });
+  }
+
+  // ---- Weekly sales digest (cron: body {mode:"weekly"}); weekly-preview returns it unsent ----
+  if (mode === "weekly" || mode === "weekly-preview") {
+    const now = Date.now();
+    const [{ data: prods, error: e1 }, { data: moves, error: e2 }] = await Promise.all([
+      admin.from("products").select("sku, name, qty, price"),
+      admin.from("stock_adjustments").select("sku, delta, reason, created_at")
+        .lt("delta", 0).gte("created_at", new Date(now - 60 * DAY).toISOString()).limit(50000),
+    ]);
+    if (e1 || e2) return json({ error: (e1 || e2)!.message }, 500);
+    const w = buildWeekly(prods || [], moves || [], now);
+    if (mode === "weekly-preview") return json({ sent: false, mode, text: w.text, stats: w.stats });
+    let r = await lineBroadcast(LINE_TOKEN, w.text, w.flex);
+    if (!r.ok) r = await lineBroadcast(LINE_TOKEN, w.text);
+    if (!r.ok) return json({ error: "LINE broadcast failed", status: r.status, detail: r.body }, 502);
+    return json({ sent: true, mode, stats: w.stats });
   }
 
   // ---- Daily digest: read products with service role, build & broadcast ----

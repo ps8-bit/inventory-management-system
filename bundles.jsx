@@ -97,6 +97,28 @@ function newBundleId(bundles) {
   return "BND-" + String((Math.max(0, ...nums) + 1)).padStart(3, "0");
 }
 
+/* Create ONE bundle without going through the full-list saveBundles (which
+   diffs-and-deletes): append locally, upsert just this row, roll back on a
+   rejected write. Used by the ต้องจัดการ board's "สร้างชุด" action. */
+async function createBundle(data) {
+  const list = loadBundles() || [];
+  const nb = Object.assign({ desc: "" }, data, { id: newBundleId(list), createdAt: new Date().toISOString().slice(0, 10) });
+  const next = list.concat([nb]);
+  window._DB_BUNDLES = next;
+  try { localStorage.setItem("ims_bundles", JSON.stringify(next)); } catch {}
+  window.dispatchEvent(new CustomEvent("ims-bundles-change"));
+  const r = window.dbUpsertBundles ? await dbUpsertBundles([nb]) : { ok: true };
+  if (r && r.error) {
+    window._DB_BUNDLES = (window._DB_BUNDLES || []).filter(b => b.id !== nb.id);
+    try { localStorage.setItem("ims_bundles", JSON.stringify(window._DB_BUNDLES)); } catch {}
+    window.dispatchEvent(new CustomEvent("ims-bundles-change"));
+    return { ok: false, error: r.error === "PERMISSION_OR_MISSING"
+      ? "ไม่มีสิทธิ์สร้างชุดสินค้า (ต้องเป็นผู้ดูแลระบบหรือผู้จัดการ)"
+      : "สร้างชุดสินค้าไม่สำเร็จ: " + r.error };
+  }
+  return { ok: true, bundle: nb };
+}
+
 /* ── inventory sync verification ── */
 // Items in a bundle whose SKU no longer maps to a real inventory product
 function bundleLinkErrors(bundle) {
@@ -891,7 +913,7 @@ function BundlePage({ pushToast }) {
 
 Object.assign(window, {
   BundlePage, BundleStockAlert,
-  loadBundles, bundleAvail, bundleStatus,
+  loadBundles, bundleAvail, bundleStatus, createBundle,
   bundleLinkErrors, bundleStockIssues,
   getStockAdj, applyStockAdj, getEffectiveQty
 });

@@ -6678,6 +6678,10 @@ function MSkuActions({ ctx }) {
         ))}
       </div>
       {cur && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}><b style={{ color: "var(--fg)" }}>{cur.label}</b> — {cur.action}</div>}
+      {seg === "restock" && canDo("exportData") && typeof exportReorderList === "function" &&
+        <button className="m-btn-big outline" style={{ marginBottom: 10 }} onClick={() => exportReorderList(ins)}>ส่งออกรายการสั่งซื้อ</button>}
+      {(seg === "dead" || seg === "slow") && showCost && canDo("exportData") && typeof exportPromoList === "function" &&
+        <button className="m-btn-big outline" style={{ marginBottom: 10 }} onClick={() => exportPromoList(ins)}>ส่งออกรายการโปร</button>}
       <div className="m-search" style={{ marginBottom: 10 }}>
         <Icons.Search size={14}/>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา SKU, ชื่อสินค้า"/>
@@ -6701,6 +6705,8 @@ function MSkuActions({ ctx }) {
               {showCost && r.tiedUp != null && <span>ทุน {mMoney(r.tiedUp)}</span>}
             </div>
             {tip(r) && <div style={{ fontSize: 12, marginTop: 6 }}>{tip(r)}</div>}
+            {(r.seg === "slow" || r.seg === "dead") && typeof canInsightBundle === "function" && canInsightBundle() &&
+              <button className="m-btn-big outline" style={{ marginTop: 8, padding: "8px 10px", fontSize: 13 }} onClick={() => insightCreateBundle(r)}>สร้างชุด…</button>}
           </div>
         ))}
       {list.length > showN && (

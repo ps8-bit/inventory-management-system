@@ -465,6 +465,81 @@ function skuInsightsCsv(ins, showCost) {
   return "﻿" + [head.map(esc).join(","), ...lines].join("\n");
 }
 
+
+/* ── ต้องจัดการ actions (shared by desktop + mobile) ── */
+function _insightToast(msg, type) { window.dispatchEvent(new CustomEvent("ims-toast", { detail: type ? { msg, type } : msg })); }
+function _saveCsv(rows, filename) {
+  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const blob = new Blob(["﻿" + rows.map(r => r.map(esc).join(",")).join("\n")], { type: "text/csv;charset=utf-8" });
+  if (typeof deliverFile === "function") { deliverFile(blob, filename); return; }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+/* Who may create a bundle from the board — bundles are admin/manager writes in RLS. */
+function canInsightBundle() {
+  const role = window.__currentUser && window.__currentUser.role;
+  return role === "admin" || role === "manager";
+}
+/* "สร้างชุด": bundle a slow/dead item with a partner the user picks — any product
+   in the catalog (type to search), with the suggested best sellers offered first.
+   Name and price may be left blank: "partner + item" and 90% of the two retail
+   prices. Writes ONE bundle via createBundle. */
+async function insightCreateBundle(r) {
+  if (!r) return;
+  const label = (p) => `${p.sku} · ${p.name}`;
+  const skuOf = (v) => String(v || "").split(" · ")[0].trim().toUpperCase();
+  const findP = (v) => { const k = skuOf(v); return k ? PRODUCTS.find(p => String(p.sku).toUpperCase() === k) : null; };
+  const suggested = (r.partners || (r.partner ? [r.partner] : [])).map(label);
+  const autoPrice = (p) => Math.round(((Number(r.price) || 0) + (p ? Number(p.price) || 0 : 0)) * 0.9);
+  const ans = await askForm({
+    title: "สร้างชุดสินค้า",
+    message: `${r.sku} · ${r.name}
+ราคาปกติ ฿${Math.round(Number(r.price) || 0).toLocaleString("th-TH")} — เลือกสินค้าที่จะจับคู่ (พิมพ์ค้นหา SKU หรือชื่อได้)`,
+    fields: [
+      { key: "p", label: "จับคู่กับสินค้า", value: suggested[0] || "", placeholder: "ค้นหา SKU / ชื่อสินค้า",
+        options: (vals) => {
+          const q = String(vals.p || "").trim().toLowerCase();
+          if (!q || findP(vals.p)) return suggested;
+          return PRODUCTS.filter(p => p.sku !== r.sku && (p.sku + " " + p.name).toLowerCase().includes(q)).slice(0, 12).map(label);
+        } },
+      { key: "name", label: "ชื่อชุด (เว้นว่าง = ตั้งให้อัตโนมัติ)", value: "", required: false },
+      { key: "price", label: "ราคาชุด (บาท) — เว้นว่าง = 90% ของราคาปกติ", value: "", type: "number", required: false,
+        options: (vals) => { const p = findP(vals.p); return p ? [String(autoPrice(p))] : []; } }
+    ],
+    okLabel: "สร้างชุด"
+  });
+  if (!ans) return;
+  const partner = findP(ans.p);
+  if (!partner) { _insightToast("ไม่พบสินค้า " + ans.p, "error"); return; }
+  if (partner.sku === r.sku) { _insightToast("เลือกสินค้าอื่นที่ไม่ใช่ตัวเดียวกัน", "error"); return; }
+  const price = ans.price ? Number(ans.price) : autoPrice(partner);
+  if (!(price > 0)) { _insightToast("ราคาชุดต้องมากกว่า 0", "error"); return; }
+  const name = ans.name || `${partner.name} + ${r.name}`;
+  if (typeof createBundle !== "function") return;
+  const res = await createBundle({
+    name, desc: `จัดชุดระบายสต็อก ${r.sku}`, price,
+    items: [{ sku: partner.sku, qty: 1 }, { sku: r.sku, qty: 1 }]
+  });
+  _insightToast(res.ok ? `สร้างชุด "${name}" แล้ว (${res.bundle.id})` : res.error, res.ok ? undefined : "error");
+}
+/* Reorder list — the restock group with a suggested quantity. */
+function exportReorderList(ins) {
+  const rows = ins.rows.filter(r => r.seg === "restock" && r.reorder > 0);
+  if (!rows.length) { _insightToast("ไม่มีสินค้าที่ต้องสั่งเพิ่ม"); return; }
+  _saveCsv([["SKU", "สินค้า", "คงเหลือ", "ขาย/วัน", "พอขาย (วัน)", "แนะนำสั่ง"]]
+    .concat(rows.map(r => [r.sku, r.name, r.qty, r.perDay.toFixed(2), Math.round(r.cover), r.reorder])),
+    `reorder-${todayIso()}.csv`);
+}
+/* Promo list — slow/dead items with a cost-floored discounted price (viewCost only). */
+function exportPromoList(ins) {
+  const rows = ins.rows.filter(r => (r.seg === "dead" || r.seg === "slow") && r.promoPrice);
+  if (!rows.length) { _insightToast("ยังไม่มีสินค้าที่ควรลดราคา"); return; }
+  _saveCsv([["SKU", "สินค้า", "คงเหลือ", "ไม่มียอด (วัน)", "ราคาปัจจุบัน", "ลด %", "ราคาโปร"]]
+    .concat(rows.map(r => [r.sku, r.name, r.qty, r.idleDays, r.price, r.discountPct, r.promoPrice])),
+    `promo-${todayIso()}.csv`);
+}
+
 function SkuActionBoard({ showCost }) {
   const [days, setDays] = useStateAn(60);
   const [seg, setSeg] = useStateAn("restock");
@@ -534,7 +609,11 @@ function SkuActionBoard({ showCost }) {
             <h3>{cur.label} · {fmt(list.length)} SKU</h3>
             <div className="sub">{cur.action}</div>
           </div>
-          <input className="input" placeholder="ค้นหา SKU / ชื่อ" value={q} onChange={e => setQ(e.target.value)} style={{ width: 200 }}/>
+          <div className="row" style={{ gap: 8 }}>
+            {seg === "restock" && canDo("exportData") && <button className="btn" onClick={() => exportReorderList(ins)}><Icons.Pkg size={14}/> รายการสั่งซื้อ</button>}
+            {(seg === "dead" || seg === "slow") && showCost && canDo("exportData") && <button className="btn" onClick={() => exportPromoList(ins)}><Icons.Pkg size={14}/> รายการโปร</button>}
+            <input className="input" placeholder="ค้นหา SKU / ชื่อ" value={q} onChange={e => setQ(e.target.value)} style={{ width: 200 }}/>
+          </div>
         </div>
         {list.length === 0
           ? <div style={{ padding: 32, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>ไม่มีสินค้าในกลุ่มนี้</div>
@@ -565,7 +644,10 @@ function SkuActionBoard({ showCost }) {
                     <td className="t-num tnum">{fmtCover(r.cover)}</td>
                     <td className="t-num tnum" style={{ color: "var(--muted)" }}>{r.lastSaleAge == null ? "ไม่เคย" : r.lastSaleAge === 0 ? "วันนี้" : r.lastSaleAge + " วันก่อน"}</td>
                     {showCost && <td className="t-num tnum">{r.tiedUp != null ? fmtMoney(r.tiedUp) : "—"}</td>}
-                    <td style={{ fontSize: 12, maxWidth: 340 }}>{skuInsightTip(r, showCost) || <span style={{ color: "var(--muted)" }}>—</span>}</td>
+                    <td style={{ fontSize: 12, maxWidth: 340 }}>
+                      {skuInsightTip(r, showCost) || <span style={{ color: "var(--muted)" }}>—</span>}
+                      {(r.seg === "slow" || r.seg === "dead") && canInsightBundle() && <div style={{ marginTop: 6 }}><button className="btn btn-sm" onClick={() => insightCreateBundle(r)}>สร้างชุด…</button></div>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -580,4 +662,4 @@ function SkuActionBoard({ showCost }) {
   );
 }
 
-Object.assign(window, { AnalyticsPage, buildAnalyticsWindow, _todayBkkIso, SkuActionBoard, skuInsightTip, skuInsightsCsv, fmtCover });
+Object.assign(window, { AnalyticsPage, buildAnalyticsWindow, _todayBkkIso, SkuActionBoard, skuInsightTip, skuInsightsCsv, insightCreateBundle, canInsightBundle, exportReorderList, exportPromoList, fmtCover });
