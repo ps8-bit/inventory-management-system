@@ -149,7 +149,10 @@ function buildWeekly(products: any[], moves: any[], now: number) {
   for (const p of products) {
     const qty = Math.max(0, numA(p.qty)), sold = s60.get(p.sku) || 0;
     const perDay = sold / observed;
-    if (sold > 0 && perDay > 0 && qty / perDay < 14) restock.push({ p, days: Math.round(qty / perDay), order: Math.max(0, Math.ceil(perDay * 30 - qty)) });
+    // Same rule as the app's board: lead time (products.lead_days) moves the threshold and the target.
+    const lead = p.lead_days != null ? numA(p.lead_days) : null;
+    const low = lead != null ? Math.max(7, lead + 7) : 14, target = lead != null ? lead + 21 : 30;
+    if (sold >= 3 && perDay > 0 && qty / perDay < low) restock.push({ p, days: Math.round(qty / perDay), order: Math.max(0, Math.ceil(perDay * target - qty)) });
     if (sold === 0 && qty > 0) { deadSkus++; deadPcs += qty; deadValue += qty * numA(p.price); }
   }
   restock.sort((a, b) => a.days - b.days);
@@ -219,7 +222,7 @@ Deno.serve(async (req) => {
   try { payload = await req.json(); } catch { /* empty body = scheduled digest */ }
 
   // Build/health ping (no auth) — verify a deploy from outside.
-  if (payload?.mode === "ping") return json({ ok: true, build: "alert-weekly-1" });
+  if (payload?.mode === "ping") return json({ ok: true, build: "alert-weekly-2" });
 
   const mode = ["test", "weekly", "weekly-preview"].includes(payload?.mode) ? payload.mode : "digest";
 
@@ -246,8 +249,13 @@ Deno.serve(async (req) => {
   // ---- Weekly sales digest (cron: body {mode:"weekly"}); weekly-preview returns it unsent ----
   if (mode === "weekly" || mode === "weekly-preview") {
     const now = Date.now();
+    // lead_days arrives with sale-price-lead-time.sql — retry without it on an older schema.
+    const loadProds = async () => {
+      const r = await admin.from("products").select("sku, name, qty, price, lead_days");
+      return r.error && /lead_days/.test(r.error.message || "") ? await admin.from("products").select("sku, name, qty, price") : r;
+    };
     const [{ data: prods, error: e1 }, { data: moves, error: e2 }] = await Promise.all([
-      admin.from("products").select("sku, name, qty, price"),
+      loadProds(),
       admin.from("stock_adjustments").select("sku, delta, reason, created_at")
         .lt("delta", 0).gte("created_at", new Date(now - 60 * DAY).toISOString()).limit(50000),
     ]);

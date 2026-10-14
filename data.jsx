@@ -669,7 +669,9 @@ function writeLedgerRows(rows) {
     .map(r => ({ sku: r.sku, delta: Math.trunc(Number(r.delta)), reason: r.reason || "", created_by: r.created_by || by,
                  createdAt: r.createdAt || undefined, at: r.createdAt || r.at || at,
                  // Server-reported stock around the move; omitted when unknown (queued).
-                 ...(Number.isFinite(r.before) && Number.isFinite(r.after) ? { before: r.before, after: r.after } : {}) }));
+                 ...(Number.isFinite(r.before) && Number.isFinite(r.after) ? { before: r.before, after: r.after } : {}),
+                 // Actual sale price per piece (ขายออก) — survives the offline queue with the row.
+                 ...(Number.isFinite(r.unitPrice) ? { unitPrice: r.unitPrice } : {}) }));
   if (!list.length) return Promise.resolve({ ok: true });
   const keep = () => { if (typeof enqueueOfflineWrite === "function") enqueueOfflineWrite("ledger", list); };
   if (typeof navigator !== "undefined" && navigator.onLine === false) { keep(); return Promise.resolve({ queued: true }); }
@@ -878,7 +880,7 @@ function receiveStockAndRecord(lines, reason, opts) {
    never creates an order. External sales recorded here ("ขายผ่าน …") DO feed
    analytics and the channel cards via saleMoveOrders() — staff record almost
    every sale this way. */
-function applyStockAdjustment({ sku, delta, reason, note, source, when }) {
+function applyStockAdjustment({ sku, delta, reason, note, source, when, unitPrice }) {
   const d = Math.trunc(Number(delta) || 0);
   const p = PRODUCTS.find(x => x.sku === sku);
   if (!p || !d) return { ok: false };
@@ -940,7 +942,8 @@ function applyStockAdjustment({ sku, delta, reason, note, source, when }) {
       // Structured, queryable history (stock_adjustments table). Best-effort like
       // dbInsertAuditEntry — the atomic stock write above is the authoritative one.
       writeLedgerRows([{ sku, delta: rEff, reason: noteOut, createdAt: backAt,
-                         ...(exact ? { before: rFrom, after: rTo } : {}) }])
+                         ...(exact ? { before: rFrom, after: rTo } : {}),
+                         ...(rEff < 0 && Number.isFinite(unitPrice) ? { unitPrice } : {}) }])
         .then(() => { if (rEff < 0 && isAdjustSaleReason(noteOut)) refreshSaleMovesSoon(); })
         .catch(() => {});
     };
@@ -999,7 +1002,11 @@ async function commitQuickSale({ lines, reasonId, note, source, when }) {
     const q = Math.max(0, Math.round(Number(l.qty) || 0));
     if (!q) return;
     const cur = bySku.get(l.sku);
-    if (cur) cur.qty += q; else bySku.set(l.sku, { sku: l.sku, qty: q, loc: l.loc || "" });
+    // Price actually charged per piece; blank / invalid = not recorded (analytics then uses the catalog price).
+    const up = l.price === "" || l.price == null ? NaN : Number(l.price);
+    const price = Number.isFinite(up) && up >= 0 ? up : undefined;
+    if (cur) { cur.qty += q; if (price !== undefined) cur.price = price; }
+    else bySku.set(l.sku, { sku: l.sku, qty: q, loc: l.loc || "", price });
   });
   const want = [...bySku.values()];
   if (!want.length) return { ok: false, error: "ยังไม่ได้เลือกสินค้า" };
@@ -1007,11 +1014,12 @@ async function commitQuickSale({ lines, reasonId, note, source, when }) {
   const short = want.find(w => w.qty > _saleEffQty(w.sku));
   if (short) return { ok: false, error: `สต็อกไม่พอ: ${short.sku} เหลือ ${_saleEffQty(short.sku)} ชิ้น` };
   const changes = want.map(w => ({ sku: w.sku, delta: -w.qty }));
+  const priced = changes.map((c, i) => Object.assign({}, c, want[i].price !== undefined ? { unitPrice: want[i].price } : {}));
   // The picked date is part of the key: the same sale keyed for two different
   // days back-to-back is two sales, not a double-click.
   const guardKey = commitFingerprint("quicksale-" + reasonId + (when ? "@" + when : ""), changes);
   if (!claimCommit(guardKey)) { duplicateCommitToast(); return { ok: false, duplicate: true }; }
-  const res = applyStockAdjustmentBatch(changes, { reason, note, source, when });
+  const res = applyStockAdjustmentBatch(priced, { reason, note, source, when });
   if (!res.applied) {
     releaseCommit(guardKey);
     return { ok: false, error: "บันทึกการขายไม่สำเร็จ" };
@@ -1041,7 +1049,7 @@ function applyStockAdjustmentBatch(items, opts) {
   let applied = 0, skipped = 0, net = 0;
   list.forEach(it => {
     if (!it || !it.sku) { skipped++; return; }
-    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source, when }) || { ok: false };
+    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source, when, unitPrice: it.unitPrice }) || { ok: false };
     results.push({ sku: it.sku, ...res });
     // eff === 0 means the clamp ate the change (already 0 คงเหลือ) — not applied.
     if (res.ok && res.eff) { applied++; net += res.eff; } else skipped++;
@@ -1977,7 +1985,9 @@ function saleMoveOrders() {
     }
     cur = g;
     const qty = -Number(r.delta);
-    g.lineItems.push({ sku: r.sku, qty, price: priceOf.has(r.sku) ? priceOf.get(r.sku) : null });
+    // The price really charged when ขายออก recorded it; otherwise today's catalog price.
+    const charged = r.unit_price != null && Number.isFinite(Number(r.unit_price)) ? Number(r.unit_price) : null;
+    g.lineItems.push({ sku: r.sku, qty, price: charged != null ? charged : (priceOf.has(r.sku) ? priceOf.get(r.sku) : null), ...(charged != null ? { charged: true } : {}) });
     g.items += qty;
   }
   const list = [...groups.values()];
@@ -2084,8 +2094,10 @@ function buildSkuInsights(opts) {
     const firstAge = rec ? Math.floor((Date.now() - rec.first) / DAY) : null;
     const lastSaleAge = a && a.lastAge !== Infinity ? a.lastAge : null;
     const cost = p.cost != null && p.cost !== "" ? Number(p.cost) : null;
+    // Supplier lead time (products.lead_days); null = unknown → the fixed defaults.
+    const lead = p.lead_days != null && p.lead_days !== "" && Number.isFinite(Number(p.lead_days)) ? Number(p.lead_days) : null;
     rows.push({
-      sku: p.sku, name: p.name, cat: p.cat, qty, price, cost,
+      sku: p.sku, name: p.name, cat: p.cat, supplier: p.supplier, qty, price, cost, lead,
       units, revenue, perDay, cover, lastSaleAge, firstAge,
       recent: a ? a.recent : 0, prev: a ? a.prev : 0,
       channels: a ? [...a.ch.entries()].sort((x, y) => y[1] - x[1]).map(([k]) => k) : [],
@@ -2104,8 +2116,12 @@ function buildSkuInsights(opts) {
 
   for (const r of rows) {
     const isNew = r.firstAge != null && r.firstAge < o.newDays;
+    // With a known lead time, "about to run out" = less stock than the delivery
+    // takes plus a week's buffer; the reorder covers delivery + 3 more weeks.
+    r.coverLow = r.lead != null ? Math.max(7, r.lead + 7) : o.coverLow;
+    r.target = r.lead != null ? r.lead + 21 : o.targetCover;
     // Restock needs a real selling rate — 1 piece in 60 days that happens to be at 0 is not a reorder.
-    if (r.units >= 3 && r.cover < o.coverLow) r.seg = "restock";
+    if (r.units >= 3 && r.cover < r.coverLow) r.seg = "restock";
     else if (r.units === 0) r.seg = isNew ? "new" : "dead";
     else if (stars.has(r.sku)) r.seg = "star";
     // Rising: a clear jump on a non-trivial base, so a SKU going 1 → 3 isn't "trending".
@@ -2113,7 +2129,7 @@ function buildSkuInsights(opts) {
     else if (r.cover > o.coverHigh) r.seg = isNew ? "new" : "slow";
     else r.seg = "ok";
     r.isStar = stars.has(r.sku);
-    r.reorder = r.perDay > 0 ? Math.max(0, Math.ceil(r.perDay * o.targetCover - r.qty)) : 0;
+    r.reorder = r.perDay > 0 ? Math.max(0, Math.ceil(r.perDay * r.target - r.qty)) : 0;
     r.missingChannels = (r.isStar || r.seg === "rising") ? mainChannels.filter(c => !r.channels.includes(c)) : [];
     // Discount ladder for stock that isn't moving — never below cost + 5% when cost is known.
     const idle = r.lastSaleAge != null ? r.lastSaleAge : Math.max(observed, r.firstAge || 0);
@@ -2155,6 +2171,18 @@ function buildSkuInsights(opts) {
   rows.sort((x, y) => (segOrder[x.seg] - segOrder[y.seg]) || (key[x.seg](x) - key[y.seg](y)));
   const startIso = records.length ? new Date(todayMs - oldest * DAY + 7 * 3600000).toISOString().slice(0, 10) : null;
   return { rows, segs, observed, startIso, mainChannels, opts: o };
+}
+
+/* Lead time for one product, or every product of the same supplier. Goes through
+   updateManyProducts (scoped column update, RLS-checked). Returns how many were set. */
+function hasLeadDaysColumn() { return PRODUCTS.some(p => p && Object.prototype.hasOwnProperty.call(p, "lead_days")); }
+function setLeadDays(skus, days) {
+  const v = days === "" || days == null ? null : Math.max(0, Math.min(365, Math.round(Number(days) || 0)));
+  const list = (Array.isArray(skus) ? skus : [skus]).filter(Boolean);
+  if (!list.length) return 0;
+  updateManyProducts(list, { lead_days: v });
+  window.dispatchEvent(new CustomEvent("ims-products-change"));
+  return list.length;
 }
 
 /* ── ติดตามผล: what was done to push a SKU, and did it work ─────────────────────
@@ -4234,7 +4262,7 @@ async function flushOfflineQueue() {
           // dated when it HAPPENED, not when the phone got signal back.
           const rows = (item.payload || []).map(r => ({ sku: r.sku, delta: r.delta, reason: r.reason || "",
                                                        created_by: r.created_by, createdAt: r.at,
-                                                       before: r.before, after: r.after }));
+                                                       before: r.before, after: r.after, unitPrice: r.unitPrice }));
           const r = await dbInsertStockAdjustment(rows);
           ok = !!(r && (r.ok || _ledgerRefused(r.error)));
           if (ok && typeof refreshSaleMovesSoon === "function") refreshSaleMovesSoon();
@@ -4528,7 +4556,7 @@ function cloudWriteFailed(res, what) {
 
 Object.assign(window, {
   cloudWriteFailed,
-  refreshReceiveDates, buildSkuInsights, SKU_SEGMENTS,
+  refreshReceiveDates, buildSkuInsights, SKU_SEGMENTS, hasLeadDaysColumn, setLeadDays,
   SALES_ACTION_KINDS, salesActionKindLabel, loadSalesActions, refreshSalesActions, addSalesAction, removeSalesAction, buildActionResults, ACTION_VERDICTS,
   isIOSDevice, deliverFile, savePdf,
   STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,

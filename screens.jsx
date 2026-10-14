@@ -5519,7 +5519,7 @@ function QuickSellModal({ onClose, pushToast }) {
   const toast = pushToast || ((m) => { try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: m })); } catch (e) {} });
   const channels = useMemo(() => (typeof quickSaleChannels === "function" ? quickSaleChannels() : []), []);
   const [reasonId, setReasonId] = useState(() => (typeof lastAdjustReason === "function" ? lastAdjustReason() : ""));
-  const [lines, setLines] = useState([]);          // [{ sku, qty (string), loc }]
+  const [lines, setLines] = useState([]);          // [{ sku, qty (string), loc, price (string — ราคาที่ขายจริง/ชิ้น) }]
   const [q, setQ] = useState("");
   const [note, setNote] = useState("");
   // วันเวลาที่ขาย — kept across consecutive sales (a batch of yesterday's orders
@@ -5547,7 +5547,7 @@ function QuickSellModal({ onClose, pushToast }) {
     setLines(ls => {
       const hit = ls.find(l => l.sku === sku);
       if (hit) return ls.map(l => l.sku === sku ? { ...l, qty: String(Math.min(effQty(sku), (parseInt(l.qty, 10) || 0) + 1)) } : l);
-      return [...ls, { sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "" }];
+      return [...ls, { sku, qty: "1", loc: typeof defaultPickLoc === "function" ? defaultPickLoc(p) : "", price: String(Number(p.price) || 0) }];
     });
     setQ("");
     return true;
@@ -5572,13 +5572,14 @@ function QuickSellModal({ onClose, pushToast }) {
   };
   const setLine = (sku, patch) => setLines(ls => ls.map(l => l.sku === sku ? { ...l, ...patch } : l));
   const pieces = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0), 0);
+  const total = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0) * (Number(l.price) || 0), 0);
   const overStock = lines.find(l => (parseInt(l.qty, 10) || 0) > effQty(l.sku));
   const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy;
 
   const submit = async () => {
     if (!canSubmit || busyRef.current) return;
     busyRef.current = true; setBusy(true);   // synchronous latch — a double-click must not sell twice
-    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc })), reasonId, note: note.trim(), when });
+    const res = await commitQuickSale({ lines: lines.map(l => ({ sku: l.sku, qty: parseInt(l.qty, 10) || 0, loc: l.loc, price: l.price })), reasonId, note: note.trim(), when });
     busyRef.current = false; setBusy(false);
     if (!res.ok) { if (res.error) toast(res.error); return; }
     const ch = channels.find(c => c.id === reasonId);
@@ -5659,6 +5660,11 @@ function QuickSellModal({ onClose, pushToast }) {
                     </div>
                     <LocPickSelect sku={l.sku} value={l.loc} need={n} onChange={loc => setLine(l.sku, { loc })}/>
                   </div>
+                  <label title="ราคาที่ขายจริงต่อชิ้น (ลดราคาให้แก้ตรงนี้)" style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--muted)" }}>
+                    ฿<input className="input tnum" inputMode="decimal" value={l.price ?? ""} style={{ width: 80, padding: "6px 8px", textAlign: "right",
+                        borderColor: l.price !== "" && Number(l.price) !== (Number(p.price) || 0) ? "var(--accent)" : undefined }}
+                      onChange={e => setLine(l.sku, { price: e.target.value.replace(/[^\d.]/g, "") })}/>
+                  </label>
                   <QtyStepper small value={l.qty} min={1} max={left} onChange={v => setLine(l.sku, { qty: v })} title={`จำนวน ${l.sku}`}/>
                   <button className="btn btn-ghost btn-icon" title="เอาออก" onClick={() => setLines(ls => ls.filter(x => x.sku !== l.sku))}><Icons.X size={14}/></button>
                 </div>
@@ -5675,7 +5681,7 @@ function QuickSellModal({ onClose, pushToast }) {
         </div>
         <div className="modal-foot" style={{ alignItems: "center" }}>
           <span style={{ marginRight: "auto", fontSize: 13, color: "var(--muted)" }}>
-            {!reasonId ? "เลือกช่องทางขายก่อน" : pieces ? `${lines.length} รายการ · ${pieces} ชิ้น` : ""}
+            {!reasonId ? "เลือกช่องทางขายก่อน" : pieces ? `${lines.length} รายการ · ${pieces} ชิ้น · ฿${Math.round(total).toLocaleString("th-TH")}` : ""}
           </span>
           <button className="btn" onClick={onClose}>ปิด</button>
           <button className="btn btn-primary" disabled={!canSubmit} onClick={submit}>

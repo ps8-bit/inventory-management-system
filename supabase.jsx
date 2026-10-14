@@ -222,6 +222,8 @@ const _PRODUCT_COL_MAP = {
   loc:      v => v || '-',
   supplier: v => v || 'ไม่ระบุ',
   brand:    v => v || '',
+  // Days from ordering to arrival (sale-price-lead-time.sql); blank = unknown.
+  lead_days: v => (v === '' || v == null) ? null : Math.max(0, Math.min(365, Math.round(Number(v) || 0))),
 };
 function _mapProductPatch(changes) {
   const patch = {};
@@ -310,6 +312,7 @@ async function dbAdjustStock(adjustments, opId) {
    the authoritative operation, and it already surfaces its own permission
    toast — a blocked history row must not toast a second error on top. */
 let _ledgerHasBA = null;   // null = unknown, false = qty_before/qty_after columns missing
+let _ledgerHasPrice = null; // null = unknown, false = unit_price column missing (supabase/sale-price-lead-time.sql)
 async function dbInsertStockAdjustment(entries) {
   const rows = (entries || [])
     .filter(e => e && e.sku && Number(e.delta))
@@ -326,6 +329,8 @@ async function dbInsertStockAdjustment(entries) {
       if (_ledgerHasBA !== false && Number.isFinite(e.before) && Number.isFinite(e.after)) {
         row.qty_before = Math.trunc(e.before); row.qty_after = Math.trunc(e.after);
       }
+      // The price a ขายออก line was really sold at (discounts included).
+      if (_ledgerHasPrice !== false && Number.isFinite(e.unitPrice) && e.unitPrice >= 0) row.unit_price = e.unitPrice;
       return row;
     });
   if (!rows.length) return { ok: true };
@@ -334,6 +339,11 @@ async function dbInsertStockAdjustment(entries) {
   if (error && /qty_(before|after)/.test(error.message || '')) {
     _ledgerHasBA = false;
     rows.forEach(r => { delete r.qty_before; delete r.qty_after; });
+    ({ data, error } = await sb.from('stock_adjustments').insert(rows).select('id'));
+  }
+  if (error && /unit_price/.test(error.message || '')) {
+    _ledgerHasPrice = false;
+    rows.forEach(r => { delete r.unit_price; });
     ({ data, error } = await sb.from('stock_adjustments').insert(rows).select('id'));
   }
   if (error) { console.error('[DB] insert stock_adjustments:', error.message); return { error: error.message }; }
@@ -364,13 +374,21 @@ async function dbLoadSaleAdjustments(sinceIso) {
   // ONLY the ปรับสต็อก sale reasons. ขายสินค้า / ตัดสต็อก / ขายชุดสินค้า also write
   // history rows ("ขายสินค้า · …", "ขายชุดสินค้า …") but they already exist as
   // orders — loading them here would count those sales twice.
-  let q = sb.from('stock_adjustments').select('id, sku, delta, reason, created_at')
-    .or('reason.like.ขายผ่าน*,reason.like.ขายหน้าร้าน*')
-    .lt('delta', 0)
-    .order('created_at', { ascending: false })
-    .limit(10000);
-  if (sinceIso) q = q.gte('created_at', sinceIso);
-  const { data, error } = await q;
+  const run = (cols) => {
+    let q = sb.from('stock_adjustments').select(cols)
+      .or('reason.like.ขายผ่าน*,reason.like.ขายหน้าร้าน*')
+      .lt('delta', 0)
+      .order('created_at', { ascending: false })
+      .limit(10000);
+    if (sinceIso) q = q.gte('created_at', sinceIso);
+    return q;
+  };
+  // unit_price = the price really charged (sale-price-lead-time.sql); older DBs lack it.
+  let { data, error } = await run(_ledgerHasPrice === false ? 'id, sku, delta, reason, created_at' : 'id, sku, delta, reason, created_at, unit_price');
+  if (error && /unit_price/.test(error.message || '')) {
+    _ledgerHasPrice = false;
+    ({ data, error } = await run('id, sku, delta, reason, created_at'));
+  }
   if (error) { console.error('[DB] load sale adjustments:', error.message); return null; }
   return data || [];
 }
