@@ -1623,8 +1623,13 @@ async function moveStockToLocation(sku, code, pieces) {
   const total = Math.max(0, Number(p.qty) || 0);
   const rows = locSplitFor(sku, p.loc);
   if (!rows.length) {
-    // No split recorded: p.loc IS the whole truth, keep the legacy whole-move.
+    // No split recorded: p.loc IS the whole truth, keep the legacy whole-move —
+    // and record the shelf row too, or the pieces show as ยังไม่จัดเก็บ (001-HC).
     updateProductInStore(sku, { loc: target });
+    if (total > 0 && locIsStored(target)) {
+      const res = await saveLocSplit(sku, [{ loc: target, qty: total }]);
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || "บันทึกตำแหน่งไม่สำเร็จ" };
+    }
     return { ok: true, moved: total, all: true };
   }
   let need = Math.min(total, Math.max(0, Math.round(Number(pieces) || 0)));
@@ -1684,6 +1689,10 @@ async function applyReceiveLocs(lines) {
     const oldQty = Math.max(0, (Number(p.qty) || 0) - n);
     if (!p.loc || p.loc === loc || !locIsStored(p.loc, stored) || oldQty === 0) {
       if ((p.loc || "") !== loc) updateProductInStore(l.sku, { loc: loc });
+      // Also create the shelf row: without it the stock has no product_locations
+      // row and shows as ยังไม่จัดเก็บ (001-HC). Once per sku per batch.
+      const q = Math.max(0, Number(p.qty) || 0);
+      if (q > 0 && locIsStored(loc, stored) && !jobs.some(j => j[0] === l.sku)) jobs.push([l.sku, [{ loc: loc, qty: q }]]);
       return;
     }
     // Stock recorded elsewhere and this batch lands somewhere new → real split.
@@ -3779,19 +3788,67 @@ function saveStockTake(counts) {
    2026-10-10 AFG-OT21-BK was counted 0 → 9 while three cut orders still had their
    pieces on the shelf, leaving the system 3 above reality for good.
    Returns { sku: { qty, orders: [orderId…] } } over every order still รอแพ็ค
-   (status "picking", no packedAt), from the same pick lines the packer sees. */
+   (status "picking"; a packed → picking revert counts again) whose sale really
+   debited stock (restockLinesForOrder — label-only orders never did), minus
+   pieces the packer already took off the shelf (pack progress, per order and
+   per wave: a wave at stage "sort" has picked everything). */
 function pendingPackReserved() {
   const list = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
-  const out = {};
+  const prog = (typeof loadPackProgress === "function") ? loadPackProgress() : {};
+  const pending = [];
   (list || []).forEach(o => {
-    if (!o || o.deleted || o.status !== "picking" || o.packedAt) return;
+    if (!o || o.deleted || o.status !== "picking") return;
     if (isBlankDraftOrder(o)) return;
-    packLinesForOrder(o).forEach(l => {
-      const r = out[l.sku] || (out[l.sku] = { qty: 0, orders: [] });
-      r.qty += l.qty;
-      if (!r.orders.includes(o.id)) r.orders.push(o.id);
+    const lines = restockLinesForOrder(o).map(l => ({ sku: l.sku, key: l.key || packKey(l.sku, l.loc), qty: Math.max(0, Number(l.qty) || 0) }));
+    if (!lines.length) return;
+    const own = (prog[o.id] && prog[o.id].done) || {};
+    lines.forEach(l => { l.left = Math.max(0, l.qty - Math.min(Number(own[l.key]) || 0, l.qty)); });
+    pending.push({ id: o.id, lines });
+  });
+  const byId = {};
+  pending.forEach(e => { byId[e.id] = e; });
+  Object.keys(prog).forEach(k => {
+    if (k.indexOf("batch:") !== 0) return;
+    const w = prog[k] || {};
+    const members = (w.orderIds || []).map(id => byId[id]).filter(Boolean);
+    if (w.stage === "sort") { members.forEach(e => e.lines.forEach(l => { l.left = 0; })); return; }
+    const done = w.done || {};
+    Object.keys(done).forEach(key => {
+      let take = Math.max(0, Number(done[key]) || 0);
+      members.forEach(e => e.lines.forEach(l => {
+        if (take <= 0 || l.key !== key) return;
+        const t = Math.min(take, l.left);
+        l.left -= t; take -= t;
+      }));
     });
   });
+  const out = {};
+  pending.forEach(e => e.lines.forEach(l => {
+    if (l.left <= 0) return;
+    const r = out[l.sku] || (out[l.sku] = { qty: 0, orders: [] });
+    r.qty += l.left;
+    if (!r.orders.includes(e.id)) r.orders.push(e.id);
+  }));
+  return out;
+}
+
+/* Count-time snapshot of pendingPackReserved per counted SKU + the "pulled"
+   choices, so a count applied later still subtracts what was on the shelf when
+   it was counted (packing doesn't move stock). Cleared with the counts. */
+const STOCKTAKE_META_KEY = "ims_stocktake_meta_v1";
+function loadStockTakeMeta() {
+  try {
+    const o = JSON.parse(localStorage.getItem(STOCKTAKE_META_KEY) || "{}") || {};
+    return { reserved: (o.reserved && typeof o.reserved === "object") ? o.reserved : {}, pulled: (o.pulled && typeof o.pulled === "object") ? o.pulled : {} };
+  } catch (e) { return { reserved: {}, pulled: {} }; }
+}
+function saveStockTakeMeta(meta) {
+  try { localStorage.setItem(STOCKTAKE_META_KEY, JSON.stringify({ reserved: (meta && meta.reserved) || {}, pulled: (meta && meta.pulled) || {} })); } catch (e) {}
+}
+// Reserved map to plan with: the count-time snapshot where one exists, else current.
+function stockTakeReserved(current, snap) {
+  const out = Object.assign({}, current || {});
+  Object.keys(snap || {}).forEach(sku => { out[sku] = snap[sku]; });
   return out;
 }
 
@@ -3827,10 +3884,11 @@ function stockCountPlan(counts, reserved, pulled) {
    Shared by ตรวจนับ (_countNote) and ปรับสต็อก ตั้งค่าเป็น (adjustSetTarget). */
 function pendingPackNote(c) {
   if (!c || !c.reserved) return "";
-  const ids = (c.orders || []).slice(0, 4).map(id => orderShortId({ id })).join(", ")
-    + ((c.orders || []).length > 4 ? ` +${c.orders.length - 4}` : "");
+  // No order ids here: an SO-… id in a ledger reason makes loadAuditEntryMoves
+  // read the count row as that order's sale.
+  const k = (c.orders || []).length;
   return c.subtracted
-    ? `นับได้ ${c.counted} − รอแพ็ค ${c.reserved} = ${c.to}${ids ? ` (${ids})` : ""}`
+    ? `นับได้ ${c.counted} − รอแพ็ค ${c.reserved} ชิ้น${k ? ` · ${k} ออร์เดอร์` : ""} = ${c.to}`
     : `นับได้ ${c.counted} (รอแพ็ค ${c.reserved} ชิ้นหยิบออกจากชั้นแล้ว — ไม่หัก)`;
 }
 function _countNote(c) {
@@ -4864,7 +4922,7 @@ Object.assign(window, {
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, writeLedgerRows, receiveStockAndRecord,
-  loadStockTake, saveStockTake, applyStockCounts, pendingPackReserved, stockCountPlan,
+  loadStockTake, saveStockTake, loadStockTakeMeta, saveStockTakeMeta, stockTakeReserved, applyStockCounts, pendingPackReserved, stockCountPlan,
   pendingPackNote, adjustSetTarget, isCountReason, loadLatestCounts, backdateCountConflicts, ledgerStampLabel, useLatestCounts, ledgerBackdatedIds, useBackdateGuard, BackdateCountWarning,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   omit,

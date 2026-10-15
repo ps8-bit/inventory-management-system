@@ -6922,23 +6922,38 @@ function MStockTake({ ctx }) {
   const [camOpen, setCamOpen] = useStateM(false);
   const [tick, setTick] = useStateM(0);
   // SKUs whose รอแพ็ค pieces are already OFF the shelf (desktop StockTake twin).
-  const [pulled, setPulled] = useStateM({});
+  // Persisted with the count-time รอแพ็ค snapshot (ims_stocktake_meta_v1).
+  const [meta, setMeta] = useStateM(() => (typeof loadStockTakeMeta === "function") ? loadStockTakeMeta() : { reserved: {}, pulled: {} });
+  const pulled = meta.pulled;
+  const updateMeta = (fn) => setMeta(m => { const n = fn(m); if (typeof saveStockTakeMeta === "function") saveStockTakeMeta(n); return n; });
+  const setPulled = (fn) => updateMeta(m => ({ reserved: m.reserved, pulled: fn(m.pulled) }));
+  const clearMeta = () => { setMeta({ reserved: {}, pulled: {} }); if (typeof saveStockTakeMeta === "function") saveStockTakeMeta({}); };
 
   useEffectM(() => {
     const refresh = () => setTick(t => t + 1);
-    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change"];
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-orders-load"];
     evs.forEach(ev => window.addEventListener(ev, refresh));
     return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
   }, []);
 
   // Pieces cut (ตัดสต็อก) but not yet packed: still on the shelf, already off
   // the system — counted as-is they would be added back (pendingPackReserved).
-  const reserved = useMemoM(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  const liveReserved = useMemoM(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  // Plan with what was รอแพ็ค when each SKU was counted (packing doesn't move stock).
+  const reserved = useMemoM(() => (typeof stockTakeReserved === "function") ? stockTakeReserved(liveReserved, meta.reserved) : liveReserved, [liveReserved, meta]);
   const resvOf = (sku) => (reserved[sku] && reserved[sku].qty) || 0;
+  const ordersLoaded = (typeof packHomeLoadState !== "function") || packHomeLoadState() === "ok";
   const targetOf = (sku, counted) => Math.max(0, counted - (pulled[sku] ? 0 : resvOf(sku)));
   useEffectM(() => () => setCamOpen(false), []);
+  const snapReserved = (skus) => updateMeta(m => {
+    const r = { ...m.reserved };
+    skus.forEach(sku => { const x = liveReserved[sku]; r[sku] = x ? { qty: x.qty, orders: x.orders.slice() } : { qty: 0, orders: [] }; });
+    return { reserved: r, pulled: m.pulled };
+  });
 
   const setCount = (sku, val) => {
+    const clean = (val === "" || val == null) ? "" : String(val).replace(/[^\d]/g, "");
+    if (clean !== "" && clean !== (counts[sku] ?? "")) snapReserved([sku]);
     setCounts(prev => {
       const next = { ...prev };
       if (val === "" || val == null) delete next[sku];
@@ -6958,10 +6973,12 @@ function MStockTake({ ctx }) {
     setCounts(prev => {
       const next = { ...prev };
       // The shelf should hold system stock PLUS the รอแพ็ค pieces still on it.
-      rows.forEach(p => { next[p.sku] = String(p.qty + (pulled[p.sku] ? 0 : resvOf(p.sku))); });
+      // Snapshot = live รอแพ็ค right now, the number this fill is based on.
+      rows.forEach(p => { const lr = (liveReserved[p.sku] && liveReserved[p.sku].qty) || 0; next[p.sku] = String(p.qty + (pulled[p.sku] ? 0 : lr)); });
       saveStockTake(next);
       return next;
     });
+    snapReserved(rows.map(p => p.sku));
   };
 
   const exportCsv = () => {
@@ -7037,7 +7054,7 @@ function MStockTake({ ctx }) {
     if (guardKey && typeof claimCommit === "function" && !claimCommit(guardKey)) {
       if (typeof duplicateCommitToast === "function") duplicateCommitToast();
       // The identical count DID just apply — clear the sheet (desktop twin).
-      setCounts({}); saveStockTake({});
+      setCounts({}); saveStockTake({}); clearMeta();
       return;
     }
     const changes = (typeof applyStockCounts === "function") ? applyStockCounts(counts, { reserved, pulled }) : [];
@@ -7049,7 +7066,7 @@ function MStockTake({ ctx }) {
         changes: changes.map(c => ({ label: c.sku, to: `${c.from} → ${c.to} ชิ้น (${c.delta >= 0 ? "+" : ""}${c.delta})${c.subtracted ? ` · นับได้ ${c.counted} หักรอแพ็ค ${c.reserved}` : ""}` }))
       });
     }
-    setCounts({}); saveStockTake({}); setPulled({});
+    setCounts({}); saveStockTake({}); clearMeta();
     ctx.pushToast(`ปรับสต็อกแล้ว ${changes.length} SKU`);
   };
 
@@ -7068,6 +7085,10 @@ function MStockTake({ ctx }) {
           <div className="m-kpi"><div className="m-kpi-label">ส่วนต่าง</div><div className="m-kpi-value" style={{ fontSize: 18, color: summary.disc ? "var(--warning)" : "var(--success)" }}>{summary.disc}</div></div>
           <div className="m-kpi"><div className="m-kpi-label">สุทธิ</div><div className="m-kpi-value" style={{ fontSize: 18, color: summary.net > 0 ? "var(--info)" : summary.net < 0 ? "var(--danger)" : "var(--fg)" }}>{summary.net > 0 ? "+" : ""}{summary.net}</div></div>
         </div>
+
+        {!ordersLoaded && (
+          <div style={{ padding: "8px 12px", marginBottom: 12, borderRadius: 12, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12 }}>ยังโหลดออร์เดอร์ไม่ครบ — ตัวเลขรอแพ็คอาจไม่ครบ</div>
+        )}
 
         {resvCounted.length > 0 && (
           <div style={{ padding: "10px 12px", marginBottom: 12, borderRadius: 12, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12, lineHeight: 1.5 }}>
@@ -7102,6 +7123,8 @@ function MStockTake({ ctx }) {
             const has = raw !== undefined && raw !== "";
             const c = has ? (parseInt(raw, 10) || 0) : null;
             const rs = resvOf(p.sku);
+            const snap = meta.reserved[p.sku];
+            const liveRs = (liveReserved[p.sku] && liveReserved[p.sku].qty) || 0;
             const v = has ? targetOf(p.sku, c) - p.qty : null;
             const tone = v === null ? "var(--muted)" : v === 0 ? "var(--success)" : v > 0 ? "var(--info)" : "var(--danger)";
             return (
@@ -7134,7 +7157,11 @@ function MStockTake({ ctx }) {
                       <button className={"m-chip" + (pulled[p.sku] ? " on" : "")} style={{ flex: 1, justifyContent: "center" }}
                               onClick={() => setPulled(prev => ({ ...prev, [p.sku]: true }))}>หยิบออกแล้ว — ไม่หัก</button>
                     </div>
+                    {has && c < rs && <div style={{ fontSize: 11, color: "var(--warning)" }}>นับได้น้อยกว่าที่รอแพ็ค — บางชิ้นน่าจะหยิบไปแล้ว</div>}
                   </div>
+                )}
+                {has && snap && (Number(snap.qty) || 0) !== liveRs && (
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>รอแพ็คตอนนับ {Number(snap.qty) || 0} ชิ้น (ตอนนี้ {liveRs})</div>
                 )}
               </div>
             );

@@ -6403,24 +6403,39 @@ function StockTake({ pushToast }) {
   const [tick, setTick] = useState(0);
   // SKUs whose รอแพ็ค pieces the counter says are already OFF the shelf (so the
   // counted number is free stock as-is). Default = still on the shelf → subtract.
-  const [pulled, setPulled] = useState({});
+  // Persisted with the count-time รอแพ็ค snapshot (ims_stocktake_meta_v1).
+  const [meta, setMeta] = useState(() => (typeof loadStockTakeMeta === "function") ? loadStockTakeMeta() : { reserved: {}, pulled: {} });
+  const pulled = meta.pulled;
+  const updateMeta = (fn) => setMeta(m => { const n = fn(m); if (typeof saveStockTakeMeta === "function") saveStockTakeMeta(n); return n; });
+  const setPulled = (fn) => updateMeta(m => ({ reserved: m.reserved, pulled: fn(m.pulled) }));
+  const clearMeta = () => { setMeta({ reserved: {}, pulled: {} }); if (typeof saveStockTakeMeta === "function") saveStockTakeMeta({}); };
   const scanRef = useRef(null);
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
-    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change"];
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-orders-load"];
     evs.forEach(ev => window.addEventListener(ev, refresh));
     return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
   }, []);
 
   // Pieces already cut (ตัดสต็อก) but not yet packed — they are still on the
   // shelf, so a count sees them although the system has already taken them off.
-  const reserved = useMemo(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  const liveReserved = useMemo(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  // Plan with what was รอแพ็ค when each SKU was counted (packing doesn't move stock).
+  const reserved = useMemo(() => (typeof stockTakeReserved === "function") ? stockTakeReserved(liveReserved, meta.reserved) : liveReserved, [liveReserved, meta]);
   const resvOf = (sku) => (reserved[sku] && reserved[sku].qty) || 0;
+  const ordersLoaded = (typeof packHomeLoadState !== "function") || packHomeLoadState() === "ok";
   // Counted pile → stock it implies (what applyStockCounts will write).
   const targetOf = (sku, counted) => Math.max(0, counted - (pulled[sku] ? 0 : resvOf(sku)));
+  const snapReserved = (skus) => updateMeta(m => {
+    const r = { ...m.reserved };
+    skus.forEach(sku => { const x = liveReserved[sku]; r[sku] = x ? { qty: x.qty, orders: x.orders.slice() } : { qty: 0, orders: [] }; });
+    return { reserved: r, pulled: m.pulled };
+  });
 
   const setCount = (sku, val) => {
+    const clean = (val === "" || val == null) ? "" : String(val).replace(/[^\d]/g, "");
+    if (clean !== "" && clean !== (counts[sku] ?? "")) snapReserved([sku]);
     setCounts(prev => {
       const next = { ...prev };
       if (val === "" || val == null) delete next[sku];
@@ -6480,16 +6495,18 @@ function StockTake({ pushToast }) {
     setCounts(prev => {
       const next = { ...prev };
       // The shelf should hold system stock PLUS the รอแพ็ค pieces still on it.
-      rows.forEach(p => { next[p.sku] = String(p.qty + (pulled[p.sku] ? 0 : resvOf(p.sku))); });
+      // Snapshot = live รอแพ็ค right now, the number this fill is based on.
+      rows.forEach(p => { const lr = (liveReserved[p.sku] && liveReserved[p.sku].qty) || 0; next[p.sku] = String(p.qty + (pulled[p.sku] ? 0 : lr)); });
       saveStockTake(next);
       return next;
     });
+    snapReserved(rows.map(p => p.sku));
   };
 
   const clearAll = () => {
     if (!Object.keys(counts).length) return;
     if (!confirm("ล้างผลการนับทั้งหมด?")) return;
-    setCounts({}); saveStockTake({});
+    setCounts({}); saveStockTake({}); clearMeta();
   };
 
   const apply = () => {
@@ -6502,7 +6519,7 @@ function StockTake({ pushToast }) {
       if (typeof duplicateCommitToast === "function") duplicateCommitToast();
       // The identical count DID just apply (that is what the latch matched), so
       // retire the sheet instead of leaving numbers that invite a third attempt.
-      setCounts({}); saveStockTake({});
+      setCounts({}); saveStockTake({}); clearMeta();
       setConfirmOpen(false);
       return;
     }
@@ -6516,7 +6533,7 @@ function StockTake({ pushToast }) {
         changes: changes.map(c => ({ label: c.sku, to: `${c.from} → ${c.to} ชิ้น (${c.delta >= 0 ? "+" : ""}${c.delta})${c.subtracted ? ` · นับได้ ${c.counted} หักรอแพ็ค ${c.reserved}` : ""}` }))
       });
     }
-    setCounts({}); saveStockTake({}); setPulled({});
+    setCounts({}); saveStockTake({}); clearMeta();
     setConfirmOpen(false);
     pushToast(changes.length ? `ปรับสต็อกแล้ว ${changes.length} SKU` : "ไม่มีส่วนต่าง — สต็อกตรงกับระบบ");
   };
@@ -6555,6 +6572,10 @@ function StockTake({ pushToast }) {
         <div className="kpi"><div className="kpi-label">สุทธิ (ชิ้น)</div><div className="kpi-value" style={{ color: summary.net > 0 ? "var(--info)" : summary.net < 0 ? "var(--danger)" : "var(--fg)" }}>{summary.net > 0 ? "+" : ""}{summary.net}</div><div className="kpi-delta">เทียบกับระบบ</div></div>
         <div className="kpi"><div className="kpi-label">ยังไม่นับ</div><div className="kpi-value">{PRODUCTS.length - summary.counted}</div><div className="kpi-delta">SKU</div></div>
       </div>
+
+      {!ordersLoaded && (
+        <div className="card" style={{ padding: "10px 16px", background: "var(--warning-soft)", borderColor: "var(--warning)", fontSize: 13 }}>ยังโหลดออร์เดอร์ไม่ครบ — ตัวเลขรอแพ็คอาจไม่ครบ</div>
+      )}
 
       {resvCounted.length > 0 && (
         <div className="card" style={{ padding: "12px 16px", background: "var(--warning-soft)", borderColor: "var(--warning)" }}>
@@ -6604,6 +6625,8 @@ function StockTake({ pushToast }) {
               const has = raw !== undefined && raw !== "";
               const c = has ? (parseInt(raw, 10) || 0) : null;
               const rs = resvOf(p.sku);
+              const snap = meta.reserved[p.sku];
+              const liveRs = (liveReserved[p.sku] && liveReserved[p.sku].qty) || 0;
               const v = has ? targetOf(p.sku, c) - p.qty : null;
               const tone = v === null ? "var(--muted)" : v === 0 ? "var(--success)" : v > 0 ? "var(--info)" : "var(--danger)";
               return (
@@ -6633,7 +6656,11 @@ function StockTake({ pushToast }) {
                           <option value="pulled">หยิบออกจากชั้นแล้ว — ไม่หัก</option>
                         </select>
                         {has && !pulled[p.sku] && <span className="t-mono" style={{ fontSize: 11 }}>สต็อกใหม่ = {c} − {rs} = {targetOf(p.sku, c)}</span>}
+                        {has && c < rs && <span style={{ fontSize: 11, color: "var(--warning)" }}>นับได้น้อยกว่าที่รอแพ็ค — บางชิ้นน่าจะหยิบไปแล้ว</span>}
                       </div>
+                    )}
+                    {has && snap && (Number(snap.qty) || 0) !== liveRs && (
+                      <div style={{ marginTop: 4, fontSize: 11, color: "var(--muted)" }}>รอแพ็คตอนนับ {Number(snap.qty) || 0} ชิ้น (ตอนนี้ {liveRs})</div>
                     )}
                   </td>
                   <td className="t-num tnum" style={{ color: tone, fontWeight: 600 }}>{v === null ? "—" : (v > 0 ? "+" + v : v)}</td>
