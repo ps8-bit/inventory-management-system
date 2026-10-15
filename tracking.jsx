@@ -1889,6 +1889,11 @@ function CustomerLookup() {
   const [dateFilter, setDateFilter] = useStateTrk(() => parseDateFromHash());
 
   const [dbOrders, setDbOrders] = useStateTrk(null); // null = not loaded yet
+  // Only a signed-in staff device has real local order data. An anonymous
+  // customer's browser holds nothing useful — loadLabels() even falls back to
+  // SAMPLE_LABELS — and an in-app browser (Facebook/LINE) can keep a stale copy
+  // from an old visit, so for them the track-lookup function is the only source.
+  const [hasSession, setHasSession] = useStateTrk(false);
   const [dbLabels, setDbLabels] = useStateTrk(null);  // shipments from the label queue
   const [, bumpLabelsCL] = useStateTrk(0);
 
@@ -1912,6 +1917,7 @@ function CustomerLookup() {
     // being dropped to match: supabase/realtime-live-stock.sql.)
     if (window.sb) window.sb.auth.getSession().then(({ data }) => {
       if (!data || !data.session) return;
+      setHasSession(true);
       window.sb.from("orders")
         .select("*")
         .order("created_at", { ascending: false })
@@ -1963,32 +1969,71 @@ function CustomerLookup() {
   const preservedOrders = loadPreservedOrders().filter(o => {
     if (preservedSeen.has(o.id)) return false; preservedSeen.add(o.id); return true;
   });
-  const orders = [...baseOrders, ...labelOrders, ...preservedOrders].map(o => ({ ...o, ...(overrides[o.id] || {}) }));
+  const orders = hasSession
+    ? [...baseOrders, ...labelOrders, ...preservedOrders].map(o => ({ ...o, ...(overrides[o.id] || {}) }))
+    : [];
   const dateFilteredOrders = dateFilter ? orders.filter(o => o.dateIso === dateFilter) : orders;
 
   // Results from the public track-lookup Edge Function (works for anon customers
   // who have no direct DB access). Server-side filtered + phone-masked.
   const [apiResults, setApiResults] = useStateTrk(null);
+  const lookupSeqRef = useRefTrk(0);
+  const lastQueryRef = useRefTrk("");
+
+  // `refresh` = a background re-check of a search already on screen: a failure
+  // keeps what is shown instead of blanking it to "not found".
+  const runLookup = (query, refresh) => {
+    if (query.length < 3 || typeof SUPABASE_FUNC_URL !== "string") return;
+    const seq = ++lookupSeqRef.current; // a slower, older response must not win
+    fetch(SUPABASE_FUNC_URL + "/track-lookup", {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    })
+      .then(r => r.json())
+      .then(j => {
+        if (seq !== lookupSeqRef.current) return;
+        if (j && j.success && Array.isArray(j.results)) {
+          setApiResults(j.results.map(o => ({ ...o, date: o.dateIso ? isoToThai(o.dateIso) : "", ts: "" })));
+        } else if (!refresh) setApiResults([]);
+      })
+      .catch(() => { if (seq === lookupSeqRef.current && !refresh) setApiResults([]); });
+  };
 
   const search = () => {
     setSearched(true);
     setSelected(null);
+    setApiResults(null);
     const query = q.trim();
-    if (query.length >= 3 && typeof SUPABASE_FUNC_URL === "string") {
-      fetch(SUPABASE_FUNC_URL + "/track-lookup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query }),
-      })
-        .then(r => r.json())
-        .then(j => {
-          if (j && j.success && Array.isArray(j.results)) {
-            setApiResults(j.results.map(o => ({ ...o, date: o.dateIso ? isoToThai(o.dateIso) : "", ts: "" })));
-          } else setApiResults([]);
-        })
-        .catch(() => setApiResults([]));
-    }
+    lastQueryRef.current = query;
+    runLookup(query, false);
   };
+
+  // The Facebook / LINE / Instagram in-app browsers don't reload a page the
+  // customer opens again: they restore the old one from memory (bfcache) or keep
+  // the WebView alive in the background, so the status from the first visit stayed
+  // on screen while a normal browser fetched the current one. Re-check whenever
+  // the page comes back.
+  useEffectTrk(() => {
+    let hiddenAt = 0;
+    const refresh = () => {
+      setOverrides(loadOrderOverrides());
+      if (lastQueryRef.current) runLookup(lastQueryRef.current, true);
+    };
+    const onShow = (e) => { if (e.persisted) refresh(); };
+    const onVis = () => {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (hiddenAt && Date.now() - hiddenAt > 10000) refresh();
+      hiddenAt = 0;
+    };
+    window.addEventListener("pageshow", onShow);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("pageshow", onShow);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
   const clearDateFilter = () => {
     setDateFilter(null);
@@ -1998,20 +2043,24 @@ function CustomerLookup() {
   const matches = useMemoTrk(() => {
     if (!searched || !q.trim()) return [];
     const local = dateFilteredOrders.filter(o => orderMatchesQuery(o, q));
-    // Merge Edge-Function results (deduped) so anon customers see their parcels too.
-    const seen = new Set(local.map(o => o.id + "|" + o.tracking));
-    const merged = [...local];
-    (apiResults || []).forEach(o => {
-      const key = o.id + "|" + o.tracking;
-      if (seen.has(key)) return;
-      if (dateFilter && o.dateIso && o.dateIso !== dateFilter) return;
-      seen.add(key);
-      merged.push(o);
-    });
+    // The Edge Function's row is the current server state (overrides applied), so
+    // it REPLACES a local copy of the same order — the local one may be stale (a
+    // device that hasn't synced, an in-app browser's old cache). Keyed by id, not
+    // id|tracking: a tracking number added since would otherwise show the order twice.
+    const api = (apiResults || []).filter(o => !(dateFilter && o.dateIso && o.dateIso !== dateFilter));
+    const apiById = new Map(api.map(o => [o.id, o]));
+    const merged = local.map(o => apiById.get(o.id) || o);
+    const seen = new Set(merged.map(o => o.id));
+    api.forEach(o => { if (!seen.has(o.id)) { seen.add(o.id); merged.push(o); } });
     return merged;
-  }, [q, searched, overrides, dateFilter, apiResults]);
+  }, [q, searched, overrides, dateFilter, apiResults, hasSession, dbOrders, dbLabels]);
 
-  if (selected) return <CustomerOrderDetail order={selected} store={store} onBack={() => setSelected(null)}/>;
+  // Show the open order from the latest results, so a refresh updates the detail
+  // view too instead of leaving the snapshot taken when it was tapped.
+  if (selected) {
+    const current = matches.find(o => o.id === selected.id) || selected;
+    return <CustomerOrderDetail order={current} store={store} onBack={() => setSelected(null)}/>;
+  }
 
   const isToday = dateFilter === (typeof todayIso === "function" ? todayIso() : TODAY_ISO);
 
@@ -2047,7 +2096,7 @@ function CustomerLookup() {
                 {isToday ? "วันนี้ · " : ""}{isoToThai(dateFilter)}
               </div>
               <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>
-                {dateFilteredOrders.length === 0 ? "ไม่มีออร์เดอร์ในวันนี้" : `${dateFilteredOrders.length} ออร์เดอร์ในวันที่นี้ — ค้นหาด้วยเบอร์หรือชื่อด้านล่าง`}
+                {!hasSession ? "ค้นหาด้วยเบอร์หรือชื่อด้านล่าง" : dateFilteredOrders.length === 0 ? "ไม่มีออร์เดอร์ในวันนี้" : `${dateFilteredOrders.length} ออร์เดอร์ในวันที่นี้ — ค้นหาด้วยเบอร์หรือชื่อด้านล่าง`}
               </div>
             </div>
             <button onClick={clearDateFilter} className="btn btn-sm" style={{ background: "oklch(1 0 0 / 0.15)", color: "white", border: "1px solid oklch(1 0 0 / 0.2)", flexShrink: 0 }}>
@@ -2100,7 +2149,11 @@ function CustomerLookup() {
 
           {searched && (
             <div style={{ marginTop: 24 }}>
-              {matches.length === 0 ? (
+              {matches.length === 0 && apiResults === null && q.trim().length >= 3 ? (
+                <div style={{ padding: 36, textAlign: "center", background: "var(--surface-2)", borderRadius: 14, fontSize: 13, color: "var(--muted)" }}>
+                  กำลังค้นหา…
+                </div>
+              ) : matches.length === 0 ? (
                 <div style={{ padding: 36, textAlign: "center", background: "var(--surface-2)", borderRadius: 14 }}>
                   <Icons.Search size={32} style={{ color: "var(--muted)", opacity: 0.5, marginBottom: 10 }}/>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>ไม่พบพัสดุที่ตรงกับ "{q}"{dateFilter && " ในวันที่ " + isoToThai(dateFilter)}</div>
