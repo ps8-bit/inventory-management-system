@@ -7207,12 +7207,13 @@ function MPackLoc({ parts, loc }) {
   if (!loc) return <span style={{ fontSize: 11, color: "var(--danger)" }}>ยังไม่ระบุตำแหน่ง</span>;
   const p = parts || (typeof locParts === "function" ? locParts(loc) : null);
   return (
-    <span className="row" style={{ gap: 6, minWidth: 0 }}>
-      <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)", background: "var(--accent-soft)", padding: "1px 7px", borderRadius: 6, flexShrink: 0 }}>
+    // Wraps rather than truncating — the shelf is where the picker walks to.
+    <span className="row" style={{ gap: "2px 6px", minWidth: 0, flexWrap: "wrap" }}>
+      <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: "var(--accent)", background: "var(--accent-soft)", padding: "1px 7px", borderRadius: 6, maxWidth: "100%", overflowWrap: "anywhere" }}>
         {(p && p.pos) || loc}
       </span>
       {p && (p.building || p.floor) && (
-        <span style={{ fontSize: 10.5, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: 10.5, color: "var(--muted)", wordBreak: "break-word", lineHeight: 1.35 }}>
           {p.building}{p.floor ? " · " + p.floor : ""}
         </span>
       )}
@@ -7296,8 +7297,7 @@ function MPackLine({ line, picked, short, onSet, onShort, sub, onRemove }) {
         </button>
         <ProductImageThumb sku={line.sku} size={44} radius={8} zoom caption={line.sku + (line.name ? " · " + line.name : "")}/>
         <div className="m-row-main" style={{ minWidth: 0 }}>
-          <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: tone, textDecoration: full ? "line-through" : "none" }}>{line.name}</div>
-          <div className="m-row-sub mono" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{line.sku}</div>
+          <div className="m-row-title" style={{ overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", wordBreak: "break-word", lineHeight: 1.3, color: tone, textDecoration: full ? "line-through" : "none" }}>{line.name}</div>
           {line.addedQty > 0 && (
             <span style={{ display: "inline-block", marginTop: 3, fontSize: 10.5, fontWeight: 700, color: "#fff", background: "var(--info)", borderRadius: 999, padding: "1px 8px" }}>
               ＋ เพิ่มใหม่ {line.addedQty < line.qty ? line.addedQty + " ชิ้น" : ""}
@@ -7312,7 +7312,12 @@ function MPackLine({ line, picked, short, onSet, onShort, sub, onRemove }) {
         )}
       </div>
 
-      <div className="row" style={{ gap: 8, marginTop: 8, justifyContent: "space-between" }}>
+      {/* The SKU is what the picker matches against the shelf, so it gets its own
+          full-width line and is never cut off — lookalikes differ only at the end
+          (…-BK-RH vs …-BK-LH), exactly the part an ellipsis used to hide. */}
+      <div className="mono" style={{ marginTop: 6, fontSize: 15, fontWeight: 700, letterSpacing: "0.02em", color: "var(--fg)", overflowWrap: "anywhere", lineHeight: 1.3 }}>{line.sku}</div>
+
+      <div className="row" style={{ gap: 8, marginTop: 6, justifyContent: "space-between" }}>
         <MPackLoc parts={line.parts} loc={line.loc}/>
         <div className="qty-stepper" style={{ flexShrink: 0 }}>
           <button onClick={() => onSet(Math.max(0, picked - 1))} disabled={picked <= 0}>−</button>
