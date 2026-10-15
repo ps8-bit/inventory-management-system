@@ -6256,13 +6256,24 @@ function StockTake({ pushToast }) {
   const [scan, setScan] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [tick, setTick] = useState(0);
+  // SKUs whose รอแพ็ค pieces the counter says are already OFF the shelf (so the
+  // counted number is free stock as-is). Default = still on the shelf → subtract.
+  const [pulled, setPulled] = useState({});
   const scanRef = useRef(null);
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
-    window.addEventListener("ims-products-change", refresh);
-    return () => window.removeEventListener("ims-products-change", refresh);
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change"];
+    evs.forEach(ev => window.addEventListener(ev, refresh));
+    return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
   }, []);
+
+  // Pieces already cut (ตัดสต็อก) but not yet packed — they are still on the
+  // shelf, so a count sees them although the system has already taken them off.
+  const reserved = useMemo(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  const resvOf = (sku) => (reserved[sku] && reserved[sku].qty) || 0;
+  // Counted pile → stock it implies (what applyStockCounts will write).
+  const targetOf = (sku, counted) => Math.max(0, counted - (pulled[sku] ? 0 : resvOf(sku)));
 
   const setCount = (sku, val) => {
     setCounts(prev => {
@@ -6292,23 +6303,20 @@ function StockTake({ pushToast }) {
       const p = PRODUCTS.find(x => x.sku === sku);
       if (!p || counts[sku] === "") return;
       counted++;
-      const v = (parseInt(counts[sku], 10) || 0) - p.qty;
+      const v = targetOf(sku, parseInt(counts[sku], 10) || 0) - p.qty;
       if (v > 0) over++; else if (v < 0) short++;
       net += v;
     });
     return { counted, over, short, net, discrepancies: over + short };
-  }, [counts, tick]);
+  }, [counts, tick, reserved, pulled]);
 
-  const changeList = useMemo(() => {
-    const list = [];
-    Object.keys(counts).forEach(sku => {
-      const p = PRODUCTS.find(x => x.sku === sku);
-      if (!p || counts[sku] === "") return;
-      const to = parseInt(counts[sku], 10) || 0;
-      if (to !== p.qty) list.push({ sku, name: p.name, from: p.qty, to, delta: to - p.qty });
-    });
-    return list;
-  }, [counts, tick]);
+  // Same plan applyStockCounts writes, so the confirm list can't disagree with it.
+  const changeList = useMemo(
+    () => (typeof stockCountPlan === "function") ? stockCountPlan(counts, reserved, pulled) : [],
+    [counts, tick, reserved, pulled]
+  );
+  // รอแพ็ค SKUs among what has been counted — drives the banner.
+  const resvCounted = Object.keys(counts).filter(sku => counts[sku] !== "" && resvOf(sku) > 0);
 
   const submitScan = (override) => {
     const code = (override ?? scan).trim();
@@ -6326,7 +6334,8 @@ function StockTake({ pushToast }) {
   const fillSystem = () => {
     setCounts(prev => {
       const next = { ...prev };
-      rows.forEach(p => { next[p.sku] = String(p.qty); });
+      // The shelf should hold system stock PLUS the รอแพ็ค pieces still on it.
+      rows.forEach(p => { next[p.sku] = String(p.qty + (pulled[p.sku] ? 0 : resvOf(p.sku))); });
       saveStockTake(next);
       return next;
     });
@@ -6352,17 +6361,17 @@ function StockTake({ pushToast }) {
       setConfirmOpen(false);
       return;
     }
-    const changes = (typeof applyStockCounts === "function") ? applyStockCounts(counts) : [];
+    const changes = (typeof applyStockCounts === "function") ? applyStockCounts(counts, { reserved, pulled }) : [];
     const net = changes.reduce((s, c) => s + c.delta, 0);
     if (typeof recordChange === "function" && changes.length) {
       recordChange({
         entity: "product", action: "update",
         summary: `ตรวจนับสต็อก — ปรับ ${changes.length} SKU (สุทธิ ${net >= 0 ? "+" : ""}${net} ชิ้น)`,
         count: changes.length,
-        changes: changes.map(c => ({ label: c.sku, to: `${c.from} → ${c.to} ชิ้น (${c.delta >= 0 ? "+" : ""}${c.delta})` }))
+        changes: changes.map(c => ({ label: c.sku, to: `${c.from} → ${c.to} ชิ้น (${c.delta >= 0 ? "+" : ""}${c.delta})${c.subtracted ? ` · นับได้ ${c.counted} หักรอแพ็ค ${c.reserved}` : ""}` }))
       });
     }
-    setCounts({}); saveStockTake({});
+    setCounts({}); saveStockTake({}); setPulled({});
     setConfirmOpen(false);
     pushToast(changes.length ? `ปรับสต็อกแล้ว ${changes.length} SKU` : "ไม่มีส่วนต่าง — สต็อกตรงกับระบบ");
   };
@@ -6370,9 +6379,11 @@ function StockTake({ pushToast }) {
   const exportCsv = () => {
     const esc = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const lines = PRODUCTS.filter(p => counts[p.sku] !== undefined && counts[p.sku] !== "").map(p => {
-      const c = parseInt(counts[p.sku], 10) || 0; return [p.sku, p.name, p.qty, c, c - p.qty].map(esc).join(",");
+      const c = parseInt(counts[p.sku], 10) || 0;
+      const rs = pulled[p.sku] ? 0 : resvOf(p.sku);
+      return [p.sku, p.name, p.qty, c, rs, targetOf(p.sku, c), targetOf(p.sku, c) - p.qty].map(esc).join(",");
     });
-    const csv = ["SKU,สินค้า,ระบบ,นับได้,ส่วนต่าง", ...lines].join("\n");
+    const csv = ["SKU,สินค้า,ระบบ,นับได้,หักรอแพ็ค,สต็อกใหม่,ส่วนต่าง", ...lines].join("\n");
     const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob); const a = document.createElement("a");
     a.href = url; a.download = `stocktake-${new Date().toISOString().slice(0, 10)}.csv`; a.click(); URL.revokeObjectURL(url);
@@ -6399,6 +6410,16 @@ function StockTake({ pushToast }) {
         <div className="kpi"><div className="kpi-label">สุทธิ (ชิ้น)</div><div className="kpi-value" style={{ color: summary.net > 0 ? "var(--info)" : summary.net < 0 ? "var(--danger)" : "var(--fg)" }}>{summary.net > 0 ? "+" : ""}{summary.net}</div><div className="kpi-delta">เทียบกับระบบ</div></div>
         <div className="kpi"><div className="kpi-label">ยังไม่นับ</div><div className="kpi-value">{PRODUCTS.length - summary.counted}</div><div className="kpi-delta">SKU</div></div>
       </div>
+
+      {resvCounted.length > 0 && (
+        <div className="card" style={{ padding: "12px 16px", background: "var(--warning-soft)", borderColor: "var(--warning)" }}>
+          <div style={{ fontWeight: 600, fontSize: 13 }}>มี {resvCounted.length} SKU ที่ตัดสต็อกแล้วแต่ยังรอแพ็ค</div>
+          <div className="page-sub" style={{ marginTop: 4 }}>
+            ชิ้นเหล่านี้ระบบหักออกไปแล้ว แต่ยังวางอยู่บนชั้น — ถ้านับรวมไปด้วย ระบบจะหักออกจากจำนวนที่นับให้อัตโนมัติ
+            ถ้าหยิบออกจากชั้นไปแล้ว ให้เลือก “หยิบออกจากชั้นแล้ว” ในแถวนั้น
+          </div>
+        </div>
+      )}
 
       <div className="scan-zone" style={{ padding: 18 }}>
         <div className="scan-input-wrap">
@@ -6437,7 +6458,8 @@ function StockTake({ pushToast }) {
               const raw = counts[p.sku];
               const has = raw !== undefined && raw !== "";
               const c = has ? (parseInt(raw, 10) || 0) : null;
-              const v = has ? c - p.qty : null;
+              const rs = resvOf(p.sku);
+              const v = has ? targetOf(p.sku, c) - p.qty : null;
               const tone = v === null ? "var(--muted)" : v === 0 ? "var(--success)" : v > 0 ? "var(--info)" : "var(--danger)";
               return (
                 <tr key={p.sku} style={{ background: (v !== null && v !== 0) ? "var(--warning-soft)" : undefined }}>
@@ -6454,6 +6476,20 @@ function StockTake({ pushToast }) {
                   <td className="t-num">
                     <input className="input" style={{ width: 90, textAlign: "right", padding: "6px 8px" }} type="number" min="0"
                            value={raw ?? ""} onChange={e => setCount(p.sku, e.target.value)} placeholder="—"/>
+                    {rs > 0 && (
+                      <div style={{ marginTop: 6, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                        <span className="badge badge-warning" title={reserved[p.sku].orders.map(id => orderShortId({ id })).join(", ")}>
+                          รอแพ็ค {rs} ชิ้น · {reserved[p.sku].orders.length} ออร์เดอร์
+                        </span>
+                        <select className="input" style={{ width: 220, padding: "4px 6px", fontSize: 12 }}
+                                value={pulled[p.sku] ? "pulled" : "on"}
+                                onChange={e => { const v = e.target.value === "pulled"; setPulled(prev => ({ ...prev, [p.sku]: v })); }}>
+                          <option value="on">ยังอยู่บนชั้น (นับรวมแล้ว) — หัก {rs}</option>
+                          <option value="pulled">หยิบออกจากชั้นแล้ว — ไม่หัก</option>
+                        </select>
+                        {has && !pulled[p.sku] && <span className="t-mono" style={{ fontSize: 11 }}>สต็อกใหม่ = {c} − {rs} = {targetOf(p.sku, c)}</span>}
+                      </div>
+                    )}
                   </td>
                   <td className="t-num tnum" style={{ color: tone, fontWeight: 600 }}>{v === null ? "—" : (v > 0 ? "+" + v : v)}</td>
                   <td>
@@ -6481,7 +6517,14 @@ function StockTake({ pushToast }) {
                 {changeList.map(c => (
                   <div key={c.sku} className="row" style={{ justifyContent: "space-between", padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 8 }}>
                     <div><div style={{ fontSize: 13 }}>{c.name}</div><div className="t-mono">{c.sku}</div></div>
-                    <div className="tnum" style={{ fontWeight: 600 }}>{c.from} → {c.to} <span style={{ color: c.delta > 0 ? "var(--info)" : "var(--danger)" }}>({c.delta > 0 ? "+" : ""}{c.delta})</span></div>
+                    <div style={{ textAlign: "right" }}>
+                      <div className="tnum" style={{ fontWeight: 600 }}>{c.from} → {c.to} <span style={{ color: c.delta > 0 ? "var(--info)" : "var(--danger)" }}>({c.delta > 0 ? "+" : ""}{c.delta})</span></div>
+                      {c.reserved > 0 && (
+                        <div className="t-mono" style={{ fontSize: 11, marginTop: 2 }}>
+                          {c.subtracted ? `นับได้ ${c.counted} − รอแพ็ค ${c.reserved}` : `รอแพ็ค ${c.reserved} หยิบออกแล้ว — ไม่หัก`}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>

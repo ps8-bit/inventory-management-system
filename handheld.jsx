@@ -6780,12 +6780,21 @@ function MStockTake({ ctx }) {
   const [onlyCounted, setOnlyCounted] = useStateM(false);
   const [camOpen, setCamOpen] = useStateM(false);
   const [tick, setTick] = useStateM(0);
+  // SKUs whose รอแพ็ค pieces are already OFF the shelf (desktop StockTake twin).
+  const [pulled, setPulled] = useStateM({});
 
   useEffectM(() => {
     const refresh = () => setTick(t => t + 1);
-    window.addEventListener("ims-products-change", refresh);
-    return () => window.removeEventListener("ims-products-change", refresh);
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change"];
+    evs.forEach(ev => window.addEventListener(ev, refresh));
+    return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
   }, []);
+
+  // Pieces cut (ตัดสต็อก) but not yet packed: still on the shelf, already off
+  // the system — counted as-is they would be added back (pendingPackReserved).
+  const reserved = useMemoM(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  const resvOf = (sku) => (reserved[sku] && reserved[sku].qty) || 0;
+  const targetOf = (sku, counted) => Math.max(0, counted - (pulled[sku] ? 0 : resvOf(sku)));
   useEffectM(() => () => setCamOpen(false), []);
 
   const setCount = (sku, val) => {
@@ -6807,19 +6816,22 @@ function MStockTake({ ctx }) {
   const fillSystem = () => {
     setCounts(prev => {
       const next = { ...prev };
-      rows.forEach(p => { next[p.sku] = String(p.qty); });
+      // The shelf should hold system stock PLUS the รอแพ็ค pieces still on it.
+      rows.forEach(p => { next[p.sku] = String(p.qty + (pulled[p.sku] ? 0 : resvOf(p.sku))); });
       saveStockTake(next);
       return next;
     });
   };
 
   const exportCsv = () => {
-    const csvRows = [["SKU", "ชื่อสินค้า", "สต็อกระบบ", "นับได้", "ส่วนต่าง"]];
+    const csvRows = [["SKU", "ชื่อสินค้า", "สต็อกระบบ", "นับได้", "หักรอแพ็ค", "สต็อกใหม่", "ส่วนต่าง"]];
     PRODUCTS.forEach(p => {
       const raw = counts[p.sku];
       const counted = (raw !== undefined && raw !== "") ? (parseInt(raw, 10) || 0) : "";
-      const delta = counted !== "" ? counted - p.qty : "";
-      csvRows.push([p.sku, `"${(p.name || "").replace(/"/g, '""')}"`, p.qty, counted, delta]);
+      const rs = counted !== "" && !pulled[p.sku] ? resvOf(p.sku) : "";
+      const to = counted !== "" ? targetOf(p.sku, counted) : "";
+      const delta = counted !== "" ? to - p.qty : "";
+      csvRows.push([p.sku, `"${(p.name || "").replace(/"/g, '""')}"`, p.qty, counted, rs, to, delta]);
     });
     const csv = "﻿" + csvRows.map(r => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -6856,28 +6868,28 @@ function MStockTake({ ctx }) {
     Object.keys(counts).forEach(sku => {
       const p = PRODUCTS.find(x => x.sku === sku);
       if (!p || counts[sku] === "") return;
-      counted++; const v = (parseInt(counts[sku], 10) || 0) - p.qty;
+      counted++; const v = targetOf(sku, parseInt(counts[sku], 10) || 0) - p.qty;
       if (v !== 0) disc++; net += v;
     });
     const uncounted = PRODUCTS.length - counted;
     return { counted, uncounted, disc, net };
-  }, [counts, tick]);
+  }, [counts, tick, reserved, pulled]);
 
-  const changeList = useMemoM(() => {
-    const list = [];
-    Object.keys(counts).forEach(sku => {
-      const p = PRODUCTS.find(x => x.sku === sku);
-      if (!p || counts[sku] === "") return;
-      const to = parseInt(counts[sku], 10) || 0;
-      if (to !== p.qty) list.push({ sku, name: p.name, from: p.qty, to, delta: to - p.qty });
-    });
-    return list;
-  }, [counts, tick]);
+  // Same plan applyStockCounts writes, so the confirm can't disagree with it.
+  const changeList = useMemoM(
+    () => (typeof stockCountPlan === "function") ? stockCountPlan(counts, reserved, pulled) : [],
+    [counts, tick, reserved, pulled]
+  );
+  const resvCounted = Object.keys(counts).filter(sku => counts[sku] !== "" && resvOf(sku) > 0);
 
   const save = () => {
     if (!changeList.length) { ctx.pushToast("ไม่มีส่วนต่าง — สต็อกตรงกับระบบ"); return; }
     const net = changeList.reduce((s, c) => s + c.delta, 0);
-    if (!confirm(`ยืนยันปรับสต็อก ${changeList.length} SKU?\nสุทธิ ${net >= 0 ? "+" : ""}${net} ชิ้น`)) return;
+    const resvLines = changeList.filter(c => c.reserved > 0).map(c => c.subtracted
+      ? `• ${c.sku}: นับได้ ${c.counted} − รอแพ็ค ${c.reserved} = ${c.to}`
+      : `• ${c.sku}: รอแพ็ค ${c.reserved} หยิบออกแล้ว — ไม่หัก`);
+    if (!confirm(`ยืนยันปรับสต็อก ${changeList.length} SKU?\nสุทธิ ${net >= 0 ? "+" : ""}${net} ชิ้น`
+      + (resvLines.length ? `\n\nของที่ตัดสต็อกแล้วแต่ยังรอแพ็ค:\n${resvLines.join("\n")}` : ""))) return;
     // Same duplicate-commit latch as desktop ตรวจนับสต็อก.
     const guardKey = (typeof commitFingerprint === "function")
       ? commitFingerprint("stocktake-apply", changeList) : null;
@@ -6887,16 +6899,16 @@ function MStockTake({ ctx }) {
       setCounts({}); saveStockTake({});
       return;
     }
-    const changes = (typeof applyStockCounts === "function") ? applyStockCounts(counts) : [];
+    const changes = (typeof applyStockCounts === "function") ? applyStockCounts(counts, { reserved, pulled }) : [];
     if (typeof recordChange === "function" && changes.length) {
       recordChange({
         entity: "product", action: "update",
         summary: `ตรวจนับสต็อก (มือถือ) — ปรับ ${changes.length} SKU (สุทธิ ${net >= 0 ? "+" : ""}${net} ชิ้น)`,
         count: changes.length,
-        changes: changes.map(c => ({ label: c.sku, to: `${c.from} → ${c.to} ชิ้น (${c.delta >= 0 ? "+" : ""}${c.delta})` }))
+        changes: changes.map(c => ({ label: c.sku, to: `${c.from} → ${c.to} ชิ้น (${c.delta >= 0 ? "+" : ""}${c.delta})${c.subtracted ? ` · นับได้ ${c.counted} หักรอแพ็ค ${c.reserved}` : ""}` }))
       });
     }
-    setCounts({}); saveStockTake({});
+    setCounts({}); saveStockTake({}); setPulled({});
     ctx.pushToast(`ปรับสต็อกแล้ว ${changes.length} SKU`);
   };
 
@@ -6915,6 +6927,13 @@ function MStockTake({ ctx }) {
           <div className="m-kpi"><div className="m-kpi-label">ส่วนต่าง</div><div className="m-kpi-value" style={{ fontSize: 18, color: summary.disc ? "var(--warning)" : "var(--success)" }}>{summary.disc}</div></div>
           <div className="m-kpi"><div className="m-kpi-label">สุทธิ</div><div className="m-kpi-value" style={{ fontSize: 18, color: summary.net > 0 ? "var(--info)" : summary.net < 0 ? "var(--danger)" : "var(--fg)" }}>{summary.net > 0 ? "+" : ""}{summary.net}</div></div>
         </div>
+
+        {resvCounted.length > 0 && (
+          <div style={{ padding: "10px 12px", marginBottom: 12, borderRadius: 12, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12, lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>มี {resvCounted.length} SKU ที่ตัดสต็อกแล้วแต่ยังรอแพ็ค</div>
+            ชิ้นเหล่านี้ระบบหักไปแล้วแต่ยังอยู่บนชั้น — ถ้านับรวมไปด้วย ระบบจะหักออกให้ ถ้าหยิบออกไปแล้วให้เลือก “หยิบออกแล้ว” ในแถวนั้น
+          </div>
+        )}
 
         {!camOpen && (
           <div className="row" style={{ gap: 8, marginBottom: 12 }}>
@@ -6940,7 +6959,9 @@ function MStockTake({ ctx }) {
           {rows.map(p => {
             const raw = counts[p.sku];
             const has = raw !== undefined && raw !== "";
-            const v = has ? (parseInt(raw, 10) || 0) - p.qty : null;
+            const c = has ? (parseInt(raw, 10) || 0) : null;
+            const rs = resvOf(p.sku);
+            const v = has ? targetOf(p.sku, c) - p.qty : null;
             const tone = v === null ? "var(--muted)" : v === 0 ? "var(--success)" : v > 0 ? "var(--info)" : "var(--danger)";
             return (
               <div key={p.sku} style={{ padding: "10px 12px", borderBottom: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 8, background: (v !== null && v !== 0) ? "var(--warning-soft)" : undefined }}>
@@ -6960,6 +6981,20 @@ function MStockTake({ ctx }) {
                     <button onClick={() => bump(p.sku, 1)}>+</button>
                   </div>
                 </div>
+                {rs > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+                    <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+                      <span className="badge badge-warning">รอแพ็ค {rs} ชิ้น · {reserved[p.sku].orders.length} ออร์เดอร์</span>
+                      {has && !pulled[p.sku] && <span className="tnum" style={{ fontSize: 11.5, color: "var(--muted)" }}>สต็อกใหม่ {c} − {rs} = <b style={{ color: "var(--fg)" }}>{targetOf(p.sku, c)}</b></span>}
+                    </div>
+                    <div className="row" style={{ gap: 6 }}>
+                      <button className={"m-chip" + (!pulled[p.sku] ? " on" : "")} style={{ flex: 1, justifyContent: "center" }}
+                              onClick={() => setPulled(prev => ({ ...prev, [p.sku]: false }))}>ยังอยู่บนชั้น — หัก {rs}</button>
+                      <button className={"m-chip" + (pulled[p.sku] ? " on" : "")} style={{ flex: 1, justifyContent: "center" }}
+                              onClick={() => setPulled(prev => ({ ...prev, [p.sku]: true }))}>หยิบออกแล้ว — ไม่หัก</button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}

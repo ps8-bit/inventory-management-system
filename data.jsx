@@ -3769,8 +3769,70 @@ function loadStockTake() {
 function saveStockTake(counts) {
   try { localStorage.setItem(STOCKTAKE_KEY, JSON.stringify(counts || {})); } catch (e) {}
 }
+/* ── Pieces cut but not yet packed ──────────────────────────────────────
+   ตัดสต็อก debits products.qty the moment the order is made, but the pieces sit
+   on the shelf until แพ็คสินค้า takes them (pack never moves stock). A count taken
+   in between sees those pieces and — applied as-is — puts them back into stock:
+   2026-10-10 AFG-OT21-BK was counted 0 → 9 while three cut orders still had their
+   pieces on the shelf, leaving the system 3 above reality for good.
+   Returns { sku: { qty, orders: [orderId…] } } over every order still รอแพ็ค
+   (status "picking", no packedAt), from the same pick lines the packer sees. */
+function pendingPackReserved() {
+  const list = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+  const out = {};
+  (list || []).forEach(o => {
+    if (!o || o.deleted || o.status !== "picking" || o.packedAt) return;
+    if (isBlankDraftOrder(o)) return;
+    packLinesForOrder(o).forEach(l => {
+      const r = out[l.sku] || (out[l.sku] = { qty: 0, orders: [] });
+      r.qty += l.qty;
+      if (!r.orders.includes(o.id)) r.orders.push(o.id);
+    });
+  });
+  return out;
+}
+
+/* The count → stock plan shared by both forks' confirm list and applyStockCounts,
+   so what the user approves is exactly what gets written.
+   counts   = { sku: countedQty }
+   reserved = pendingPackReserved() (or null)
+   pulled   = { sku: true } — the user confirmed those รอแพ็ค pieces are already
+              off the shelf, so the counted number is the free stock as-is.
+   Default (not pulled): the counted pile still holds them → subtract.
+   Returns [{ sku, name, from, counted, reserved, subtracted, orders, to, delta }]
+   for SKUs that actually change. */
+function stockCountPlan(counts, reserved, pulled) {
+  const out = [];
+  Object.keys(counts || {}).forEach(sku => {
+    const raw = counts[sku];
+    if (raw === "" || raw == null) return;          // not counted → skip
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (!p) return;
+    const counted = Math.max(0, Math.round(Number(raw) || 0));
+    const r = (reserved && reserved[sku]) || null;
+    const res = r ? r.qty : 0;
+    const subtracted = res > 0 && !(pulled && pulled[sku]);
+    const to = Math.max(0, counted - (subtracted ? res : 0));
+    if (to === p.qty) return;                        // no change
+    out.push({ sku, name: p.name, from: p.qty, counted, reserved: res, subtracted, orders: r ? r.orders : [], to, delta: to - p.qty });
+  });
+  return out;
+}
+
+/* Why the count landed where it did — appended to the ledger reason so the
+   product history explains a count that isn't simply "what was counted". */
+function _countNote(c) {
+  if (!c || !c.reserved) return "";
+  const ids = (c.orders || []).slice(0, 4).map(id => orderShortId({ id })).join(", ")
+    + ((c.orders || []).length > 4 ? ` +${c.orders.length - 4}` : "");
+  return c.subtracted
+    ? ` · นับได้ ${c.counted} − รอแพ็ค ${c.reserved} = ${c.to}${ids ? ` (${ids})` : ""}`
+    : ` · นับได้ ${c.counted} (รอแพ็ค ${c.reserved} ชิ้นหยิบออกจากชั้นแล้ว — ไม่หัก)`;
+}
+
 /* Reconcile system stock to the physical count. counts = { sku: countedQty }.
-   Returns the list of actual changes [{ sku, name, from, to, delta }].
+   opts = { reserved, pulled } — see stockCountPlan; omitted = no รอแพ็ค adjustment.
+   Returns the list of actual changes [{ sku, name, from, to, delta, … }].
 
    Three things must happen together, or a count leaves the data worse than it
    found it — this is the ONE choke point for both forks (StockTake desktop /
@@ -3786,23 +3848,18 @@ function saveStockTake(counts) {
      3. A movement row per sku, so the count shows up in the product's history
         next to receives, sales and corrections instead of only as one lumped
         line in ประวัติการแก้ไข. */
-function applyStockCounts(counts) {
+function applyStockCounts(counts, opts) {
   if (!counts) return [];
-  const changes = [];
-  Object.keys(counts).forEach(sku => {
-    const raw = counts[sku];
-    if (raw === "" || raw == null) return;          // not counted → skip
-    const p = PRODUCTS.find(x => x.sku === sku);
-    if (!p) return;
-    const to = Math.max(0, Math.round(Number(raw) || 0));
-    if (to === p.qty) return;                        // no change
-    changes.push({ sku, name: p.name, from: p.qty, to, delta: to - p.qty });
-    p.qty = to;
+  const o = opts || {};
+  const changes = stockCountPlan(counts, o.reserved || null, o.pulled || null);
+  changes.forEach(c => {
+    const p = PRODUCTS.find(x => x.sku === c.sku);
+    if (p) p.qty = c.to;
   });
   if (!changes.length) return changes;
   // Physical count = truth. The server lands on the counted number; HOW is in
   // _commitCountsToServer (after applyLocPicks has planned, below).
-  const toServer = changes.map(c => ({ sku: c.sku, from: c.from, to: c.to }));
+  const toServer = changes.map(c => ({ sku: c.sku, from: c.from, to: c.to, note: _countNote(c) }));
   if (typeof applyLocPicks === "function") {
     const picks = changes.map(c => {
       const p = PRODUCTS.find(x => x.sku === c.sku);
@@ -3835,13 +3892,13 @@ async function _commitCountsToServer(list) {
   _persistProductsLocal();   // the counted numbers are on screen + in the local cache now
   const legacy = () => {
     _syncProductRows(skus);
-    recordStockMoves(list.map(c => ({ sku: c.sku, delta: c.to - c.from, reason: `ตรวจนับสต็อก (${c.from} → ${c.to})` })));
+    recordStockMoves(list.map(c => ({ sku: c.sku, delta: c.to - c.from, reason: `ตรวจนับสต็อก (${c.from} → ${c.to})${c.note || ""}` })));
   };
   if (!navigator.onLine || typeof dbLoadQtys !== "function" || typeof dbAdjustStock !== "function") { legacy(); return; }
   let server = null;
   try { server = await dbLoadQtys(skus); } catch (e) { server = null; }
   if (!server) { legacy(); return; }
-  const adj = list.map(c => ({ sku: c.sku, to: c.to, delta: c.to - (Number.isFinite(server[c.sku]) ? server[c.sku] : c.from) }))
+  const adj = list.map(c => ({ sku: c.sku, to: c.to, note: c.note || "", delta: c.to - (Number.isFinite(server[c.sku]) ? server[c.sku] : c.from) }))
     .filter(a => a.delta);
   if (!adj.length) { _persistProductsLocal(); return; }   // server already holds the counted numbers
   let res = null;
@@ -3857,8 +3914,8 @@ async function _commitCountsToServer(list) {
     const d = m.after - before;
     if (!d) return;
     rows.push(m.before != null
-      ? { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})`, before, after: m.after }
-      : { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})` });
+      ? { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})${a.note}`, before, after: m.after }
+      : { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})${a.note}` });
   });
   recordStockMoves(rows);
   if (res.error === "PERMISSION_OR_MISSING") {
@@ -4649,7 +4706,7 @@ Object.assign(window, {
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, writeLedgerRows, receiveStockAndRecord,
-  loadStockTake, saveStockTake, applyStockCounts,
+  loadStockTake, saveStockTake, applyStockCounts, pendingPackReserved, stockCountPlan,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   omit,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
