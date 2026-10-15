@@ -3928,7 +3928,15 @@ function isCountReason(reason) { return COUNT_REASON_RE.test(String(reason || ""
 async function loadLatestCounts(skus) {
   if (typeof dbLoadLatestCounts !== "function") return null;
   if (typeof navigator !== "undefined" && navigator.onLine === false) return null;
-  try { return await dbLoadLatestCounts(skus); } catch (e) { return null; }
+  // A hung request (Wi-Fi with no internet keeps onLine true) must not hold the
+  // confirm button for minutes — after 6 s it becomes the "failed" state.
+  let timer;
+  try {
+    return await Promise.race([
+      dbLoadLatestCounts(skus),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), 6000); })
+    ]);
+  } catch (e) { return null; } finally { clearTimeout(timer); }
 }
 function backdateCountConflicts(latest, whenIso, skus) {
   const at = Date.parse(whenIso || "");
@@ -3946,22 +3954,32 @@ function ledgerStampLabel(iso) {
   return d ? `${isoToThai(d)} ${bangkokTimeOf(iso)}`.trim() : "";
 }
 /* Both ปรับสต็อก forks: the latest count per selected SKU, fetched only while
-   the picked date is ย้อนหลัง. { latest, loading, failed }. */
-function useLatestCounts(skus, active) {
+   the picked date is ย้อนหลัง. { latest, loading, failed }.
+   nonce: bump it to force a refetch for the same SKU set (e.g. after a batch
+   that may itself have written a count). A failed result retries on "online". */
+function useLatestCounts(skus, active, nonce) {
   const key = active ? [...new Set((skus || []).filter(Boolean))].sort().join("\n") : "";
+  const fullKey = key ? key + "#" + (nonce || 0) : "";
   const [st, setSt] = React.useState({ key: "", latest: null, failed: false });
+  const [retry, setRetry] = React.useState(0);
   React.useEffect(() => {
-    if (!key) return;
+    if (!fullKey) return;
     let alive = true;
     const t = setTimeout(() => {
       loadLatestCounts(key.split("\n")).then(latest => {
-        if (alive) setSt({ key, latest: latest || null, failed: !latest });
+        if (alive) setSt({ key: fullKey, latest: latest || null, failed: !latest });
       });
     }, 200);
     return () => { alive = false; clearTimeout(t); };
-  }, [key]);
-  if (!key) return { latest: null, loading: false, failed: false };
-  if (st.key !== key) return { latest: null, loading: true, failed: false };
+  }, [fullKey, retry]);
+  React.useEffect(() => {
+    if (!fullKey || st.key !== fullKey || !st.failed) return;
+    const on = () => setRetry(n => n + 1);
+    window.addEventListener("online", on);
+    return () => window.removeEventListener("online", on);
+  }, [fullKey, st.key, st.failed]);
+  if (!fullKey) return { latest: null, loading: false, failed: false };
+  if (st.key !== fullKey) return { latest: null, loading: true, failed: false };
   return { latest: st.latest, loading: false, failed: st.failed };
 }
 

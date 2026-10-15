@@ -4543,6 +4543,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const [pulled, setPulled] = useState({});
   // The backdate-vs-count warning the user accepted (keyed, so a new conflict re-asks).
   const [ackKey, setAckKey] = useState("");
+  const [countNonce, setCountNonce] = useState(0); // forces a backdate re-check after each batch
   const [tick, setTick] = useState(0);
   const busyRef = useRef(false);
   const scanRef = useRef(null);
@@ -4623,7 +4624,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   // inside that count — applying it now moves the stock a second time.
   const backSt = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
   const backdated = !!(backSt && backSt.backdated);
-  const lc = (typeof useLatestCounts === "function") ? useLatestCounts(rows.map(r => r.sku), backdated) : { latest: null, loading: false, failed: false };
+  const lc = (typeof useLatestCounts === "function") ? useLatestCounts(rows.map(r => r.sku), backdated, countNonce) : { latest: null, loading: false, failed: false };
   const conflicts = backdated && typeof backdateCountConflicts === "function"
     ? backdateCountConflicts(lc.latest, backSt.createdAt, changes.map(c => c.sku)) : [];
   const conflictKey = conflicts.length ? backSt.createdAt + "|" + conflicts.map(c => c.sku).sort().join(",") : "";
@@ -4641,7 +4642,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const resetForNext = () => {
     busyRef.current = false; setBusy(false);
     setRows([]); setMode("remove"); setReasonIdRaw(typeof lastAdjustReason === "function" ? lastAdjustReason() : ""); setNote(""); setScan(""); setQ(""); setShowN(30); setPickOpen(true);
-    setPulled({}); setAckKey("");
+    setPulled({}); setAckKey(""); setCountNonce(n => n + 1);
     setTimeout(() => scanRef.current?.focus(), 60);
   };
 
@@ -5930,13 +5931,18 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
 
   const shipValid = ship.name.trim() && ship.phone.trim() && ship.addr1.trim();
 
+  // A sale dated before the SKU's latest count double-deducts (useBackdateGuard).
+  const bdSkus = [];
+  cart.forEach(item => { if (item.type === "product") bdSkus.push(item.sku); else (item.items || []).forEach(ci => bdSkus.push(ci.sku)); });
+  const bdGuard = typeof useBackdateGuard === "function" ? useBackdateGuard(bdSkus, when) : { ok: true };
+
   /* Synchronous double-submit latch. A state flag is NOT enough here: this
      handler awaits applyLocPicks (a network round-trip) before the modal
      closes, so the button sits there live and unchanged for as long as the
      connection takes — and a second tap during that gap deducted the whole cart
      again. A ref flips before React can re-render. */
   const submitOrder = async () => {
-    if (sellBusyRef.current) return;
+    if (sellBusyRef.current || !bdGuard.ok) return;
     sellBusyRef.current = true;
     setSellBusy(true);
     const allDeductions = [];
@@ -6346,6 +6352,7 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
 
               <StockOutWhenField value={when} onChange={setWhen} label="วันเวลาที่ขาย" style={{ marginBottom: 0 }}
                 hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"/>
+              {typeof BackdateCountWarning === "function" && <BackdateCountWarning guard={bdGuard} onRemove={skus => { const d = new Set(skus); setCart(prev => prev.filter(l => l.type === "bundle" ? !(l.items || []).some(ci => d.has(ci.sku)) : !d.has(l.sku))); }}/>}
 
               <div style={{ padding: "12px 14px", background: "var(--info-soft)", borderRadius: 10, fontSize: 12, color: "var(--info)" }}>
                 <div className="row" style={{ gap: 6, fontWeight: 600, marginBottom: 4 }}><Icons.Check size={13}/>พร้อมยืนยัน</div>
@@ -6381,8 +6388,8 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
             <button className="btn" onClick={() => setStep(2)}>
               <Icons.ArrowRight size={14} style={{ transform: "rotate(180deg)" }}/> ย้อนกลับ
             </button>
-            <button className="btn btn-primary" disabled={sellBusy} onClick={submitOrder}
-              style={sellBusy ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
+            <button className="btn btn-primary" disabled={sellBusy || !bdGuard.ok} onClick={submitOrder}
+              style={(sellBusy || !bdGuard.ok) ? { opacity: 0.5, cursor: "not-allowed" } : {}}>
               <Icons.Check size={14}/> ยืนยันการขาย
             </button>
           </>}

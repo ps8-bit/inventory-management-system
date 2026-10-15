@@ -2135,7 +2135,7 @@ function MProductDetail({ ctx }) {
                 <div key={m.id} className="row" style={{ gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
                   <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: m.delta > 0 ? "var(--success)" : "var(--danger)" }}/>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.reason || "ปรับสต็อก"}</div>
+                    <div title={m.reason || "ปรับสต็อก"} style={{ fontSize: 12, overflow: "hidden", whiteSpace: "normal", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", wordBreak: "break-word" }}>{m.reason || "ปรับสต็อก"}</div>
                     <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
                       {isBack
                         ? <span className="badge badge-info" style={{ fontSize: 9.5, padding: "1px 6px" }}>ลงวันที่ย้อนหลัง {stamp}</span>
@@ -3527,9 +3527,13 @@ function MSell({ ctx }) {
 
   const shipValid = ship.name.trim() && ship.phone.trim() && ship.addr1.trim();
   const cartReady = cart.length > 0 && cartErrors.length === 0;
+  // A sale dated before the SKU's latest count double-deducts (useBackdateGuard).
+  const bdSkus = [];
+  cart.forEach(item => { if (item.type === "product") bdSkus.push(item.sku); else (item.items || []).forEach(ci => bdSkus.push(ci.sku)); });
+  const bdGuard = typeof useBackdateGuard === "function" ? useBackdateGuard(bdSkus, when) : { ok: true };
 
   const submitOrder = async () => {
-    if (submitting || submitRef.current) return;   // ref = same-tick double-tap (see MIssue)
+    if (submitting || submitRef.current || !bdGuard.ok) return;   // ref = same-tick double-tap (see MIssue)
     submitRef.current = true;
     if (!navigator.onLine) { ctx.pushToast("ไม่มีการเชื่อมต่ออินเทอร์เน็ต — กรุณาตรวจสอบเครือข่าย"); return; }
     setSubmitting(true);
@@ -3936,6 +3940,7 @@ function MSell({ ctx }) {
             </div>
 
             <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ขาย" hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง"/>
+            {typeof BackdateCountWarning === "function" && <BackdateCountWarning mobile guard={bdGuard} onRemove={skus => { const d = new Set(skus); setCart(prev => prev.filter(l => l.type === "bundle" ? !(l.items || []).some(ci => d.has(ci.sku)) : !d.has(l.sku))); }}/>}
 
             <div className="m-card" style={{ background: "var(--info-soft)", color: "var(--info)", fontSize: 12 }}>
               <div className="row" style={{ gap: 6, fontWeight: 600, marginBottom: 4 }}><Icons.Check size={13}/>พร้อมยืนยัน</div>
@@ -3962,7 +3967,7 @@ function MSell({ ctx }) {
             </button>
           )}
           {step === 3 && (
-            <button className="m-btn-big success" style={{ flex: 1, ...(!cartReady || submitting ? { opacity: 0.5 } : {}) }} disabled={!cartReady || submitting} onClick={submitOrder}>
+            <button className="m-btn-big success" style={{ flex: 1, ...(!cartReady || submitting || !bdGuard.ok ? { opacity: 0.5 } : {}) }} disabled={!cartReady || submitting || !bdGuard.ok} onClick={submitOrder}>
               <Icons.Check size={16}/> ยืนยันการขาย
             </button>
           )}
