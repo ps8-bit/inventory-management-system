@@ -4208,7 +4208,11 @@ function ProductDrawer({ product, onClose, pushToast }) {
           <div style={{ marginTop: 22 }}>
             {/* Every movement kind now lands here — รับเข้า / ตัดสต็อก / ตรวจนับ /
                 ปรับสต็อก — so this panel is the product's real stock history. */}
-            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 10 }}>ประวัติการเคลื่อนไหวสต็อกล่าสุด</div>
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>ประวัติการเคลื่อนไหวสต็อกล่าสุด</div>
+              {/* Entry order (dbLoadStockAdjustments sorts by id) — so before → after chains. */}
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>เรียงตามลำดับที่บันทึก</span>
+            </div>
             <div className="stack" style={{ gap: 8 }}>
               {moves === null && (
                 <div style={{ fontSize: 12, color: "var(--muted)", padding: 10 }}>กำลังโหลด…</div>
@@ -4216,20 +4220,37 @@ function ProductDrawer({ product, onClose, pushToast }) {
               {moves && moves.length === 0 && (
                 <div style={{ fontSize: 12, color: "var(--muted)", padding: 10, background: "var(--surface-2)", borderRadius: 8 }}>ยังไม่มีการเคลื่อนไหวสต็อก</div>
               )}
-              {(moves || []).map(m => (
-                <div key={m.id} className="row" style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8, gap: 12 }}>
-                  <ActivityDot type={m.delta > 0 ? "in" : "out"}/>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.reason || "ปรับสต็อก"}</div>
-                    <div style={{ fontSize: 11, color: "var(--muted)" }}>
-                      {new Date(m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} · {m.created_by || "ระบบ"}
+              {(() => {
+                const back = (typeof ledgerBackdatedIds === "function") ? ledgerBackdatedIds(moves || []) : new Set();
+                return (moves || []).map(m => {
+                  const isBack = back.has(m.id);
+                  const stamp = new Date(m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+                  const hasBA = m.qty_before != null && m.qty_after != null;
+                  return (
+                    <div key={m.id} className="row" style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8, gap: 12 }}>
+                      <ActivityDot type={m.delta > 0 ? "in" : "out"}/>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.reason || ""}>{m.reason || "ปรับสต็อก"}</div>
+                        <div style={{ fontSize: 11, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                          {isBack
+                            ? <span className="badge badge-info" style={{ fontSize: 10, padding: "1px 7px" }}
+                                    title="บันทึกภายหลังโดยลงวันที่ย้อนหลัง — แสดงตรงลำดับที่บันทึก จึงมีวันที่เก่ากว่ารายการด้านล่าง">
+                                ลงวันที่ย้อนหลัง {stamp}
+                              </span>
+                            : <span>{stamp}</span>}
+                          <span>· {m.created_by || "ระบบ"}</span>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0 }}>
+                        <div className="tnum" style={{ fontSize: 14, fontWeight: 500, color: m.delta > 0 ? "var(--success)" : "var(--danger)" }}>
+                          {m.delta > 0 ? "+" : ""}{m.delta}
+                        </div>
+                        {hasBA && <div className="tnum" style={{ fontSize: 11, color: "var(--muted)" }}>{m.qty_before} → {m.qty_after}</div>}
+                      </div>
                     </div>
-                  </div>
-                  <div className="tnum" style={{ fontSize: 14, fontWeight: 500, color: m.delta > 0 ? "var(--success)" : "var(--danger)" }}>
-                    {m.delta > 0 ? "+" : ""}{m.delta}
-                  </div>
-                </div>
-              ))}
+                  );
+                });
+              })()}
             </div>
           </div>
         </div>
@@ -4515,6 +4536,11 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const [pickOpen, setPickOpen] = useState(!product);
   const [busy, setBusy] = useState(false);
   const [fillValue, setFillValue] = useState("");   // "ใส่เท่ากันทุกแถว" box
+  // ตั้งค่าเป็น: SKUs whose รอแพ็ค pieces are already OFF the shelf (ตรวจนับ twin).
+  const [pulled, setPulled] = useState({});
+  // The backdate-vs-count warning the user accepted (keyed, so a new conflict re-asks).
+  const [ackKey, setAckKey] = useState("");
+  const [tick, setTick] = useState(0);
   const busyRef = useRef(false);
   const scanRef = useRef(null);
   const toast = pushToast || (() => {});
@@ -4525,6 +4551,22 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const effQty = (sku) => (typeof getEffectiveQty === "function"
     ? getEffectiveQty(sku)
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
+
+  useEffect(() => {
+    const refresh = () => setTick(t => t + 1);
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change"];
+    evs.forEach(ev => window.addEventListener(ev, refresh));
+    return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
+  }, []);
+  // Pieces cut (ตัดสต็อก) but still รอแพ็ค — on the shelf, already off the system.
+  const reserved = useMemo(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  const resvOf = (sku) => (reserved[sku] && reserved[sku].qty) || 0;
+  // ตั้งค่าเป็น target for a row (null = nothing typed yet).
+  const setPlanOf = (row) => {
+    const n = parseInt(row.amount, 10);
+    if (!Number.isFinite(n) || n < 0 || typeof adjustSetTarget !== "function") return null;
+    return adjustSetTarget(row.sku, n, reserved, !!pulled[row.sku]);
+  };
 
   // Each row carries its own shelf — two SKUs in one batch live in different places.
   const newRow = (sku) => ({ sku, amount: "", loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === sku)) : "" });
@@ -4554,18 +4596,37 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   };
 
   // Per-row delta from the shared mode. หักออก clamps at the current qty so a
-  // typo can't drive stock negative; ตั้งค่าเป็น is an absolute target.
+  // typo can't drive stock negative; ตั้งค่าเป็น is an absolute target — the
+  // typed (counted) number minus the รอแพ็ค pieces still on the shelf.
   const deltaOf = (row) => {
     const n = parseInt(row.amount, 10);
     if (!Number.isFinite(n) || n < 0) return 0;
     const cur = effQty(row.sku);
     if (mode === "add") return n;
     if (mode === "remove") return -Math.min(n, cur);
-    return n - cur;
+    const plan = setPlanOf(row);
+    return (plan ? plan.to : n) - cur;
   };
-  const changes = rows.map(r => ({ sku: r.sku, delta: deltaOf(r) })).filter(c => c.delta !== 0);
+  const changes = rows.map(r => {
+    const plan = mode === "set" ? setPlanOf(r) : null;
+    const detail = plan && typeof pendingPackNote === "function" ? pendingPackNote(plan) : "";
+    return detail ? { sku: r.sku, delta: deltaOf(r), detail } : { sku: r.sku, delta: deltaOf(r) };
+  }).filter(c => c.delta !== 0);
   const net = changes.reduce((s, c) => s + c.delta, 0);
-  const canConfirm = changes.length > 0 && !!reason && (!reason.requireNote || note.trim());
+  // Selected rows that have pieces waiting to be packed.
+  const resvRows = rows.filter(r => resvOf(r.sku) > 0);
+
+  // Backdate guard: a movement dated before the SKU's latest count was already
+  // inside that count — applying it now moves the stock a second time.
+  const backSt = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+  const backdated = !!(backSt && backSt.backdated);
+  const lc = (typeof useLatestCounts === "function") ? useLatestCounts(rows.map(r => r.sku), backdated) : { latest: null, loading: false, failed: false };
+  const conflicts = backdated && typeof backdateCountConflicts === "function"
+    ? backdateCountConflicts(lc.latest, backSt.createdAt, changes.map(c => c.sku)) : [];
+  const conflictKey = conflicts.length ? backSt.createdAt + "|" + conflicts.map(c => c.sku).sort().join(",") : "";
+  const conflictOk = !conflicts.length || ackKey === conflictKey;
+  const canConfirm = changes.length > 0 && !!reason && (!reason.requireNote || note.trim())
+    && !(backdated && lc.loading) && conflictOk;
 
   const filtered = PRODUCTS.filter(p =>
     !q ||
@@ -4577,6 +4638,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
   const resetForNext = () => {
     busyRef.current = false; setBusy(false);
     setRows([]); setMode("remove"); setReasonIdRaw(typeof lastAdjustReason === "function" ? lastAdjustReason() : ""); setNote(""); setScan(""); setQ(""); setShowN(30); setPickOpen(true);
+    setPulled({}); setAckKey("");
     setTimeout(() => scanRef.current?.focus(), 60);
   };
 
@@ -4613,8 +4675,7 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
       if (locRes && locRes.offline) toast("ปรับสต็อกแล้ว — จำนวนตามตำแหน่งจะอัปเดตเมื่อออนไลน์");
       else if (locRes && locRes.errors && locRes.errors.length) toast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ: " + locRes.errors[0].error);
     }
-    const backSt = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
-    const backTxt = backSt && backSt.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backSt)})` : "";
+    const backTxt = backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backSt)})` : "";
     toast((changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
       : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น) — ${reason.label}`) + backTxt);
@@ -4724,27 +4785,63 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
                     </div>
                   )}
                 </div>
-                <div className="stack" style={{ gap: 6, maxHeight: 260, overflowY: "auto", overscrollBehavior: "contain" }}>
+                {mode === "set" && resvRows.length > 0 && (
+                  <div style={{ padding: "10px 12px", marginBottom: 8, borderRadius: 10, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12, lineHeight: 1.55 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>มี {resvRows.length} รายการที่ตัดสต็อกแล้วแต่ยังรอแพ็ค</div>
+                    ชิ้นเหล่านี้ระบบหักออกไปแล้ว แต่ยังวางอยู่บนชั้น — ถ้านับรวมไปด้วย ระบบจะหักออกจากจำนวนที่ใส่ให้อัตโนมัติ
+                    ถ้าหยิบออกจากชั้นไปแล้ว ให้เลือก “หยิบออกจากชั้นแล้ว” ในแถวนั้น
+                  </div>
+                )}
+                <div className="stack" style={{ gap: 6, maxHeight: 320, overflowY: "auto", overscrollBehavior: "contain" }}>
                   {rows.map(r => {
                     const p = PRODUCTS.find(x => x.sku === r.sku);
                     const cur = effQty(r.sku);
                     const d = deltaOf(r);
+                    const rs = resvOf(r.sku);
+                    const plan = mode === "set" ? setPlanOf(r) : null;
                     return (
-                      <div key={r.sku} className="row" style={{ gap: 10, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)" }}>
-                        {typeof ProductImageThumb === "function" && <ProductImageThumb sku={r.sku} size={40} radius={8}/>}
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p ? p.name : r.sku}</div>
-                          <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{r.sku} · คงเหลือ {cur}</div>
-                          {/* Neutral label here — the delta can be positive. */}
-                          <LocPickSelect sku={r.sku} value={r.loc} need={d < 0 ? -d : 0} label="ตำแหน่ง" onChange={loc => setRowLoc(r.sku, loc)}/>
+                      <div key={r.sku} style={{ padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)" }}>
+                        <div className="row" style={{ gap: 10 }}>
+                          {typeof ProductImageThumb === "function" && <ProductImageThumb sku={r.sku} size={40} radius={8}/>}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p ? p.name : r.sku}</div>
+                            <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{r.sku} · คงเหลือ {cur}</div>
+                            {/* Neutral label here — the delta can be positive. */}
+                            <LocPickSelect sku={r.sku} value={r.loc} need={d < 0 ? -d : 0} label="ตำแหน่ง" onChange={loc => setRowLoc(r.sku, loc)}/>
+                          </div>
+                          <QtyStepper value={r.amount} onChange={v => setAmount(r.sku, v)}
+                            max={mode === "remove" ? cur : undefined}
+                            title={`จำนวนสำหรับ ${r.sku}`}/>
+                          <div className="tnum" style={{ width: 76, textAlign: "right", fontSize: 12, flexShrink: 0, color: d === 0 ? "var(--muted)" : d > 0 ? "var(--success)" : "var(--danger)" }}>
+                            {d === 0 ? "—" : `${cur} → ${Math.max(0, cur + d)}`}
+                          </div>
+                          <button className="btn btn-sm btn-ghost btn-icon" title="เอาออกจากรายการ" onClick={() => removeSku(r.sku)} style={{ flexShrink: 0 }}><Icons.X size={13}/></button>
                         </div>
-                        <QtyStepper value={r.amount} onChange={v => setAmount(r.sku, v)}
-                          max={mode === "remove" ? cur : undefined}
-                          title={`จำนวนสำหรับ ${r.sku}`}/>
-                        <div className="tnum" style={{ width: 76, textAlign: "right", fontSize: 12, flexShrink: 0, color: d === 0 ? "var(--muted)" : d > 0 ? "var(--success)" : "var(--danger)" }}>
-                          {d === 0 ? "—" : `${cur} → ${Math.max(0, cur + d)}`}
-                        </div>
-                        <button className="btn btn-sm btn-ghost btn-icon" title="เอาออกจากรายการ" onClick={() => removeSku(r.sku)} style={{ flexShrink: 0 }}><Icons.X size={13}/></button>
+                        {rs > 0 && mode === "set" && (
+                          <div className="row" style={{ gap: 8, flexWrap: "wrap", marginTop: 8, paddingTop: 8, borderTop: "1px dashed var(--border)" }}>
+                            <span className="badge badge-warning" title={reserved[r.sku].orders.map(id => orderShortId({ id })).join(", ")}>
+                              รอแพ็ค {rs} ชิ้น · {reserved[r.sku].orders.length} ออร์เดอร์
+                            </span>
+                            <select className="input" style={{ width: 230, padding: "4px 6px", fontSize: 12 }}
+                                    value={pulled[r.sku] ? "pulled" : "on"}
+                                    onChange={e => { const v = e.target.value === "pulled"; setPulled(prev => ({ ...prev, [r.sku]: v })); }}>
+                              <option value="on">ยังอยู่บนชั้น (นับรวมแล้ว) — หัก {rs}</option>
+                              <option value="pulled">หยิบออกจากชั้นแล้ว — ไม่หัก</option>
+                            </select>
+                            {plan && plan.subtracted && (
+                              <span className="t-mono" style={{ fontSize: 11 }}>
+                                สต็อกใหม่ = {plan.counted} − {rs} = <b>{plan.to}</b>{plan.to === cur ? " (ตรงกับระบบ)" : ""}
+                                {plan.counted < rs ? " · นับได้น้อยกว่าที่รอแพ็ค — หยิบออกไปบ้างแล้ว?" : ""}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {rs > 0 && mode !== "set" && reasonId === "recount" && (
+                          <div style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}>
+                            <span className="badge badge-warning" style={{ fontSize: 10, marginRight: 6 }}>รอแพ็ค {rs} ชิ้น</span>
+                            ยังอยู่บนชั้นแต่ระบบหักไปแล้ว — ถ้านับรวมมาด้วย ใช้ “ตั้งค่าเป็น” แล้วใส่จำนวนที่นับได้ ระบบจะหักให้
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -4767,6 +4864,48 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
               </div>
               <StockOutWhenField value={when} onChange={setWhen} label="วันเวลาที่ปรับสต็อก"
                 hint="ปรับย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง — ประวัติ (และยอดขาย ถ้าเป็นเหตุผล ขายผ่าน…) จะลงวันนั้น"/>
+              {backdated && changes.length > 0 && lc.loading && (
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>กำลังตรวจการนับสต็อกล่าสุดของสินค้าที่เลือก…</div>
+              )}
+              {backdated && changes.length > 0 && lc.failed && (
+                <div style={{ fontSize: 12, color: "var(--muted)", padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)" }}>
+                  ตรวจไม่ได้ว่ามีการนับสต็อกหลังวันที่นี้หรือไม่ (ออฟไลน์?) — ถ้านับสต็อกหลังวันนั้นไปแล้ว ยอดที่นับได้รวมรายการนี้ไว้แล้ว อย่าบันทึกซ้ำ
+                </div>
+              )}
+              {conflicts.length > 0 && (
+                <div style={{ padding: "12px 14px", borderRadius: 10, background: "var(--danger-soft)", border: "1px solid var(--danger)", fontSize: 12, lineHeight: 1.55 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: "var(--danger)", display: "flex", alignItems: "center", gap: 6 }}>
+                    <Icons.Warn size={14}/> วันที่ย้อนหลังนี้อยู่ก่อนการนับสต็อกครั้งล่าสุด — สต็อกจะถูกนับซ้ำ
+                  </div>
+                  <div style={{ marginTop: 4 }}>
+                    การนับครั้งนั้นเห็นของจริงบนชั้นหลังจากรายการนี้เกิดขึ้นแล้ว จำนวนที่นับได้จึงรวมผลของรายการนี้ไว้แล้ว
+                    ถ้าบันทึกตอนนี้ สต็อกจะขยับซ้ำอีกรอบ (เช่น รับเข้า +30 ลงวันที่ 24 ก.ย. ที่บันทึกหลังนับเมื่อ 28 ก.ย. → สต็อกเกินจริง 30 ชิ้น)
+                  </div>
+                  <div className="stack" style={{ gap: 4, marginTop: 8 }}>
+                    {conflicts.map(c => {
+                      const ch = changes.find(x => x.sku === c.sku);
+                      return (
+                        <div key={c.sku} className="row" style={{ gap: 8, padding: "6px 8px", borderRadius: 8, background: "var(--surface)" }}>
+                          <span className="mono" style={{ fontWeight: 600 }}>{c.sku}</span>
+                          {ch && <span className="tnum" style={{ color: ch.delta > 0 ? "var(--success)" : "var(--danger)" }}>{ch.delta > 0 ? "+" : ""}{ch.delta}</span>}
+                          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--muted)" }} title={c.row.reason}>
+                            นับล่าสุด {ledgerStampLabel(c.row.created_at)} · {c.row.reason}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="row" style={{ gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                    <button className="btn btn-sm" onClick={() => { const drop = new Set(conflicts.map(c => c.sku)); setRows(rs => rs.filter(r => !drop.has(r.sku))); }}>
+                      <Icons.X size={12}/> เอา {conflicts.length} รายการนี้ออก
+                    </button>
+                    <label className="row" style={{ gap: 6, cursor: "pointer", fontSize: 12 }}>
+                      <input type="checkbox" checked={ackKey === conflictKey} onChange={e => setAckKey(e.target.checked ? conflictKey : "")}/>
+                      การนับครั้งนั้นยังไม่รวมรายการนี้ — บันทึกต่อ
+                    </label>
+                  </div>
+                </div>
+              )}
               {changes.length > 0 && (
                 <div style={{ padding: 12, background: "var(--surface-2)", borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "var(--muted)" }}>จะปรับ {changes.length} รายการ</span>

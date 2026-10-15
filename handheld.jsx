@@ -2113,7 +2113,11 @@ function MProductDetail({ ctx }) {
         </div>
         </>}
 
-        <div className="m-section-label" style={{ padding: "8px 4px" }}>ความเคลื่อนไหวสต็อกล่าสุด</div>
+        <div className="m-section-label" style={{ padding: "8px 4px", display: "flex", justifyContent: "space-between" }}>
+          <span>ความเคลื่อนไหวสต็อกล่าสุด</span>
+          {/* Entry order (dbLoadStockAdjustments sorts by id) — so before → after chains. */}
+          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>ตามลำดับที่บันทึก</span>
+        </div>
         <div className="m-card" style={{ padding: "6px 10px" }}>
           {moves === null && (
             <div style={{ fontSize: 12, color: "var(--muted)", padding: "10px 0", textAlign: "center" }}>กำลังโหลด…</div>
@@ -2121,20 +2125,34 @@ function MProductDetail({ ctx }) {
           {moves && moves.length === 0 && (
             <div style={{ fontSize: 12, color: "var(--muted)", padding: "10px 0", textAlign: "center" }}>ยังไม่มีการเคลื่อนไหวสต็อก</div>
           )}
-          {(moves || []).map(m => (
-            <div key={m.id} className="row" style={{ gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
-              <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: m.delta > 0 ? "var(--success)" : "var(--danger)" }}/>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.reason || "ปรับสต็อก"}</div>
-                <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1 }}>
-                  {new Date(m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} · {m.created_by || "ระบบ"}
+          {(() => {
+            const back = (typeof ledgerBackdatedIds === "function") ? ledgerBackdatedIds(moves || []) : new Set();
+            return (moves || []).map(m => {
+              const isBack = back.has(m.id);
+              const stamp = new Date(m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+              const hasBA = m.qty_before != null && m.qty_after != null;
+              return (
+                <div key={m.id} className="row" style={{ gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+                  <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: m.delta > 0 ? "var(--success)" : "var(--danger)" }}/>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.reason || "ปรับสต็อก"}</div>
+                    <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                      {isBack
+                        ? <span className="badge badge-info" style={{ fontSize: 9.5, padding: "1px 6px" }}>ลงวันที่ย้อนหลัง {stamp}</span>
+                        : <span>{stamp}</span>}
+                      <span>· {m.created_by || "ระบบ"}</span>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    <div className="tnum" style={{ fontSize: 13, fontWeight: 600, color: m.delta > 0 ? "var(--success)" : "var(--danger)" }}>
+                      {m.delta > 0 ? "+" : ""}{m.delta}
+                    </div>
+                    {hasBA && <div className="tnum" style={{ fontSize: 10, color: "var(--muted)" }}>{m.qty_before} → {m.qty_after}</div>}
+                  </div>
                 </div>
-              </div>
-              <div className="tnum" style={{ fontSize: 13, fontWeight: 600, color: m.delta > 0 ? "var(--success)" : "var(--danger)" }}>
-                {m.delta > 0 ? "+" : ""}{m.delta}
-              </div>
-            </div>
-          ))}
+              );
+            });
+          })()}
         </div>
 
         <div className="m-section-label" style={{ padding: "8px 4px" }}>บาร์โค้ดสินค้า</div>
@@ -2382,7 +2400,17 @@ function MAdjust({ ctx }) {
   const busyRef = useRefM(false);
   const [note, setNote] = useStateM("");
   const [when, setWhen] = useStateM(""); // "" = now; else backdated Bangkok "YYYY-MM-DDTHH:MM"
+  // ตั้งค่าเป็น: SKUs whose รอแพ็ค pieces are already OFF the shelf (desktop twin).
+  const [pulled, setPulled] = useStateM({});
+  const [ackKey, setAckKey] = useStateM("");   // accepted backdate-vs-count warning
+  const [tick, setTick] = useStateM(0);
   useEffectM(() => () => setCamOpen(false), []);
+  useEffectM(() => {
+    const refresh = () => setTick(t => t + 1);
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change"];
+    evs.forEach(ev => window.addEventListener(ev, refresh));
+    return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
+  }, []);
 
   // Same mode filter as the desktop modal (adjustReasonsFor in data.jsx).
   const modeReasons = typeof adjustReasonsFor === "function" ? adjustReasonsFor(mode) : ADJUST_REASONS;
@@ -2390,6 +2418,14 @@ function MAdjust({ ctx }) {
   const effQty = (sku) => (typeof getEffectiveQty === "function"
     ? getEffectiveQty(sku)
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
+  // Pieces cut (ตัดสต็อก) but still รอแพ็ค — on the shelf, already off the system.
+  const reserved = useMemoM(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  const resvOf = (sku) => (reserved[sku] && reserved[sku].qty) || 0;
+  const setPlanOf = (row) => {
+    const n = parseInt(row.amount, 10);
+    if (!Number.isFinite(n) || n < 0 || typeof adjustSetTarget !== "function") return null;
+    return adjustSetTarget(row.sku, n, reserved, !!pulled[row.sku]);
+  };
 
   // Each row carries its own shelf — two SKUs in one batch live in different places.
   const newRow = (sku) => ({ sku, amount: "", loc: (typeof defaultPickLoc === "function") ? defaultPickLoc(PRODUCTS.find(p => p.sku === sku)) : "" });
@@ -2401,18 +2437,36 @@ function MAdjust({ ctx }) {
   const setRowLoc = (sku, loc) => setRows(rs => rs.map(r => (r.sku === sku ? { ...r, loc } : r)));
   const fillAll = (v) => setRows(rs => rs.map(r => ({ ...r, amount: v })));
 
-  // Per-row delta from the shared mode — identical rules to the desktop modal.
+  // Per-row delta from the shared mode — identical rules to the desktop modal
+  // (ตั้งค่าเป็น = typed count minus the รอแพ็ค pieces still on the shelf).
   const deltaOf = (row) => {
     const n = parseInt(row.amount, 10);
     if (!Number.isFinite(n) || n < 0) return 0;
     const cur = effQty(row.sku);
     if (mode === "add") return n;
     if (mode === "remove") return -Math.min(n, cur);
-    return n - cur;
+    const plan = setPlanOf(row);
+    return (plan ? plan.to : n) - cur;
   };
-  const changes = rows.map(r => ({ sku: r.sku, delta: deltaOf(r) })).filter(c => c.delta !== 0);
+  const changes = rows.map(r => {
+    const plan = mode === "set" ? setPlanOf(r) : null;
+    const detail = plan && typeof pendingPackNote === "function" ? pendingPackNote(plan) : "";
+    return detail ? { sku: r.sku, delta: deltaOf(r), detail } : { sku: r.sku, delta: deltaOf(r) };
+  }).filter(c => c.delta !== 0);
   const net = changes.reduce((s, c) => s + c.delta, 0);
-  const canSubmit = changes.length > 0 && !!reason && (!reason.requireNote || note.trim());
+  const resvRows = rows.filter(r => resvOf(r.sku) > 0);
+
+  // Backdate guard (desktop StockAdjustModal twin): a movement dated before the
+  // SKU's latest count is already inside that count.
+  const backSt = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
+  const backdated = !!(backSt && backSt.backdated);
+  const lc = (typeof useLatestCounts === "function") ? useLatestCounts(rows.map(r => r.sku), backdated) : { latest: null, loading: false, failed: false };
+  const conflicts = backdated && typeof backdateCountConflicts === "function"
+    ? backdateCountConflicts(lc.latest, backSt.createdAt, changes.map(c => c.sku)) : [];
+  const conflictKey = conflicts.length ? backSt.createdAt + "|" + conflicts.map(c => c.sku).sort().join(",") : "";
+  const conflictOk = !conflicts.length || ackKey === conflictKey;
+  const canSubmit = changes.length > 0 && !!reason && (!reason.requireNote || note.trim())
+    && !(backdated && lc.loading) && conflictOk;
 
   // Camera selection funnel — exact-match + beeps, same pattern as MStockTake.
   // Continuous mode: the scanner stays up so a whole batch is one session.
@@ -2457,8 +2511,7 @@ function MAdjust({ ctx }) {
       const locRes = await applyLocPicks(picks);
       if (locRes && locRes.errors && locRes.errors.length) ctx.pushToast("ปรับสต็อกสำเร็จ แต่ปรับตำแหน่งไม่สำเร็จ — แก้ที่หน้าสินค้าบนเดสก์ท็อป");
     }
-    const backSt = when && typeof stockOutStamp === "function" ? stockOutStamp(when) : null;
-    const backTxt = backSt && backSt.backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backSt)})` : "";
+    const backTxt = backdated ? ` (ย้อนหลัง ${stockOutStampLabel(backSt)})` : "";
     ctx.pushToast((changes.length === 1
       ? `ปรับสต็อก ${changes[0].sku} ${res.net > 0 ? "+" : ""}${res.net} ชิ้น — ${reason.label}`
       : `ปรับสต็อก ${res.applied} รายการ (สุทธิ ${res.net > 0 ? "+" : ""}${res.net} ชิ้น)`) + backTxt);
@@ -2549,13 +2602,23 @@ function MAdjust({ ctx }) {
               )}
             </div>
 
+            {mode === "set" && resvRows.length > 0 && (
+              <div style={{ padding: "10px 12px", marginBottom: 10, borderRadius: 12, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12, lineHeight: 1.5 }}>
+                <div style={{ fontWeight: 700, marginBottom: 2 }}>มี {resvRows.length} รายการที่ตัดสต็อกแล้วแต่ยังรอแพ็ค</div>
+                ชิ้นเหล่านี้ระบบหักไปแล้วแต่ยังอยู่บนชั้น — ถ้านับรวมไปด้วย ระบบจะหักออกให้ ถ้าหยิบออกไปแล้วให้เลือก “หยิบออกแล้ว” ในแถวนั้น
+              </div>
+            )}
+
             <div className="m-list">
               {rows.map(r => {
                 const p = PRODUCTS.find(x => x.sku === r.sku);
                 const cur = effQty(r.sku);
                 const d = deltaOf(r);
+                const rs = resvOf(r.sku);
+                const plan = mode === "set" ? setPlanOf(r) : null;
                 return (
-                  <div key={r.sku} className="m-row" style={{ cursor: "default" }}>
+                  <React.Fragment key={r.sku}>
+                  <div className="m-row" style={{ cursor: "default" }}>
                     <ProductImageThumb sku={r.sku} size={40} radius={8}/>
                     <div className="m-row-main">
                       <div className="m-row-title" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p ? p.name : r.sku}</div>
@@ -2581,6 +2644,34 @@ function MAdjust({ ctx }) {
                       <Icons.X size={14}/>
                     </button>
                   </div>
+                  {rs > 0 && mode === "set" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px", margin: "0 8px 8px", borderRadius: 10, background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+                      <div className="row" style={{ justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                        <span className="badge badge-warning">รอแพ็ค {rs} ชิ้น · {reserved[r.sku].orders.length} ออร์เดอร์</span>
+                        {plan && plan.subtracted && (
+                          <span className="tnum" style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                            สต็อกใหม่ {plan.counted} − {rs} = <b style={{ color: "var(--fg)" }}>{plan.to}</b>{plan.to === cur ? " (ตรงระบบ)" : ""}
+                          </span>
+                        )}
+                      </div>
+                      <div className="row" style={{ gap: 6 }}>
+                        <button className={"m-chip" + (!pulled[r.sku] ? " on" : "")} style={{ flex: 1, justifyContent: "center" }}
+                                onClick={() => setPulled(prev => ({ ...prev, [r.sku]: false }))}>ยังอยู่บนชั้น — หัก {rs}</button>
+                        <button className={"m-chip" + (pulled[r.sku] ? " on" : "")} style={{ flex: 1, justifyContent: "center" }}
+                                onClick={() => setPulled(prev => ({ ...prev, [r.sku]: true }))}>หยิบออกแล้ว — ไม่หัก</button>
+                      </div>
+                      {plan && plan.subtracted && plan.counted < rs && (
+                        <div style={{ fontSize: 11, color: "var(--warning)" }}>นับได้น้อยกว่าที่รอแพ็ค — หยิบออกไปบ้างแล้ว?</div>
+                      )}
+                    </div>
+                  )}
+                  {rs > 0 && mode !== "set" && reasonId === "recount" && (
+                    <div style={{ margin: "0 8px 8px", fontSize: 11, color: "var(--muted)", lineHeight: 1.5 }}>
+                      <span className="badge badge-warning" style={{ fontSize: 10, marginRight: 6 }}>รอแพ็ค {rs} ชิ้น</span>
+                      ยังอยู่บนชั้นแต่ระบบหักไปแล้ว — ถ้านับรวมมาด้วย ใช้ “ตั้งค่าเป็น” แล้วใส่จำนวนที่นับได้
+                    </div>
+                  )}
+                  </React.Fragment>
                 );
               })}
             </div>
@@ -2596,6 +2687,50 @@ function MAdjust({ ctx }) {
             <input className="m-input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, อ้างอิงการนับ"/>
 
             <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ปรับสต็อก" hint="ปรับย้อนหลัง? เลือกวันเวลาที่เกิดขึ้นจริง"/>
+
+            {backdated && changes.length > 0 && lc.loading && (
+              <div style={{ fontSize: 12, color: "var(--muted)", margin: "8px 4px 0" }}>กำลังตรวจการนับสต็อกล่าสุด…</div>
+            )}
+            {backdated && changes.length > 0 && lc.failed && (
+              <div className="m-card" style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+                ตรวจไม่ได้ว่ามีการนับสต็อกหลังวันที่นี้หรือไม่ (ออฟไลน์?) — ถ้านับไปแล้วหลังวันนั้น ยอดที่นับได้รวมรายการนี้ไว้แล้ว อย่าบันทึกซ้ำ
+              </div>
+            )}
+            {conflicts.length > 0 && (
+              <div style={{ marginTop: 10, padding: "12px", borderRadius: 12, background: "var(--danger-soft)", border: "1px solid var(--danger)", fontSize: 12, lineHeight: 1.5 }}>
+                <div style={{ fontWeight: 700, fontSize: 13, color: "var(--danger)", display: "flex", alignItems: "flex-start", gap: 6 }}>
+                  <Icons.Warn size={14} style={{ flexShrink: 0, marginTop: 3 }}/> <span>วันที่นี้อยู่ก่อนการนับสต็อกครั้งล่าสุด — สต็อกจะถูกนับซ้ำ</span>
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  การนับครั้งนั้นเห็นของจริงบนชั้นหลังจากรายการนี้เกิดขึ้นแล้ว จึงรวมผลของรายการนี้ไว้แล้ว
+                  ถ้าบันทึกตอนนี้ สต็อกจะขยับซ้ำอีกรอบ (เช่น รับเข้า +30 ลงวันที่ 24 ก.ย. ที่บันทึกหลังนับเมื่อ 28 ก.ย. → เกินจริง 30 ชิ้น)
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+                  {conflicts.map(c => {
+                    const ch = changes.find(x => x.sku === c.sku);
+                    return (
+                      <div key={c.sku} style={{ padding: "6px 8px", borderRadius: 8, background: "var(--surface)" }}>
+                        <div className="row" style={{ gap: 6 }}>
+                          <span className="mono" style={{ fontWeight: 600, fontSize: 11.5 }}>{c.sku}</span>
+                          {ch && <span className="tnum" style={{ color: ch.delta > 0 ? "var(--success)" : "var(--danger)" }}>{ch.delta > 0 ? "+" : ""}{ch.delta}</span>}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          นับล่าสุด {ledgerStampLabel(c.row.created_at)} · {c.row.reason}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <button className="m-chip" style={{ marginTop: 10, width: "100%", justifyContent: "center" }}
+                  onClick={() => { const drop = new Set(conflicts.map(c => c.sku)); setRows(rs => rs.filter(r => !drop.has(r.sku))); }}>
+                  เอา {conflicts.length} รายการนี้ออก
+                </button>
+                <label className="row" style={{ gap: 8, marginTop: 10, cursor: "pointer", alignItems: "flex-start" }}>
+                  <input type="checkbox" style={{ marginTop: 2 }} checked={ackKey === conflictKey} onChange={e => setAckKey(e.target.checked ? conflictKey : "")}/>
+                  <span>การนับครั้งนั้นยังไม่รวมรายการนี้ — บันทึกต่อ</span>
+                </label>
+              </div>
+            )}
 
             {changes.length > 0 && (
               <div className="m-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>

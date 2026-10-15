@@ -403,15 +403,37 @@ async function dbLoadQtys(skus) {
   (data || []).forEach(r => { out[r.sku] = Number(r.qty) || 0; });
   return out;
 }
-/* Latest adjustments for one sku — feeds the ProductDrawer movement list. */
+/* Latest adjustments for one sku — feeds the ProductDrawer / MProductDetail
+   movement list. Ordered by id = the order rows were ENTERED, not created_at:
+   a row dated ย้อนหลัง carries an old created_at, so sorting by it dropped the
+   row mid-history (its before/after belong to entry time, so the chain looked
+   broken there) and out of the latest-N list entirely. The forks label those
+   rows with their date (ledgerBackdatedIds in data.jsx). */
 async function dbLoadStockAdjustments(sku, limit = 10) {
   const { data, error } = await sb
     .from('stock_adjustments').select('*')
     .eq('sku', sku)
-    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
     .limit(limit);
   if (error) { console.error('[DB] load stock_adjustments:', error.message); return null; }
   return data || [];
+}
+/* Latest count / correction per sku (ตรวจนับสต็อก… / นับสต็อกผิด…) — by date,
+   since what matters is WHEN the stock was last set to a counted number. Feeds
+   the ปรับสต็อก backdate guard. { sku: row }, null on error. */
+async function dbLoadLatestCounts(skus) {
+  const list = [...new Set((skus || []).filter(Boolean))];
+  if (!list.length) return {};
+  const { data, error } = await sb
+    .from('stock_adjustments').select('*')
+    .in('sku', list)
+    .or('reason.like.ตรวจนับสต็อก*,reason.like.นับสต็อกผิด*')
+    .order('created_at', { ascending: false })
+    .limit(1000);
+  if (error) { console.error('[DB] load latest counts:', error.message); return null; }
+  const out = {};
+  (data || []).forEach(r => { if (r && r.sku && !out[r.sku]) out[r.sku] = r; });
+  return out;
 }
 /* Movement rows behind ONE activity entry (ประวัติการแก้ไข detail view).
    by.order  → every row whose reason names that order (sale + cancel-restock)
@@ -1652,7 +1674,7 @@ Object.assign(window, {
   dbInit, setupRealtimeSync, refreshLiveData,
   dbLoadProducts,      dbUpsertProducts,     dbDeleteProducts,    dbDeductStock,
   dbUpdateProduct,     dbUpdateProducts,     dbAdjustStock,     dbRenameSku,
-  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadSaleAdjustments, dbLoadReceiveDates, dbLoadLedgerFor, dbLoadAuditForOrder, dbLoadQtys, dbActorNames,
+  dbInsertStockAdjustment, dbLoadStockAdjustments, dbLoadLatestCounts, dbLoadSaleAdjustments, dbLoadReceiveDates, dbLoadLedgerFor, dbLoadAuditForOrder, dbLoadQtys, dbActorNames,
   dbLoadProductLocs,   dbSaveProductLocs,
   dbLoadOrders,        dbUpsertOrders,       dbDeleteOrder,
   dbLoadBundles,       dbUpsertBundles,      dbDeleteBundle,
