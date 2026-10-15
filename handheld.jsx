@@ -2410,7 +2410,7 @@ function MAdjust({ ctx }) {
   useEffectM(() => () => setCamOpen(false), []);
   useEffectM(() => {
     const refresh = () => setTick(t => t + 1);
-    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change"];
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-orders-load"];
     evs.forEach(ev => window.addEventListener(ev, refresh));
     return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
   }, []);
@@ -2423,6 +2423,7 @@ function MAdjust({ ctx }) {
     : (PRODUCTS.find(p => p.sku === sku)?.qty ?? 0));
   // Pieces cut (ตัดสต็อก) but still รอแพ็ค — on the shelf, already off the system.
   const reserved = useMemoM(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
+  const ordersLoaded = (typeof packHomeLoadState !== "function") || packHomeLoadState() === "ok";
   const resvOf = (sku) => (reserved[sku] && reserved[sku].qty) || 0;
   const setPlanOf = (row) => {
     const n = parseInt(row.amount, 10);
@@ -2605,6 +2606,9 @@ function MAdjust({ ctx }) {
               )}
             </div>
 
+            {mode === "set" && !ordersLoaded && (
+              <div style={{ padding: "8px 12px", marginBottom: 10, borderRadius: 12, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12 }}>ยังโหลดออร์เดอร์ไม่ครบ — ตัวเลขรอแพ็คอาจไม่ครบ</div>
+            )}
             {mode === "set" && resvRows.length > 0 && (
               <div style={{ padding: "10px 12px", marginBottom: 10, borderRadius: 12, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12, lineHeight: 1.5 }}>
                 <div style={{ fontWeight: 700, marginBottom: 2 }}>มี {resvRows.length} รายการที่ตัดสต็อกแล้วแต่ยังรอแพ็ค</div>
@@ -3535,7 +3539,7 @@ function MSell({ ctx }) {
   const submitOrder = async () => {
     if (submitting || submitRef.current || !bdGuard.ok) return;   // ref = same-tick double-tap (see MIssue)
     submitRef.current = true;
-    if (!navigator.onLine) { ctx.pushToast("ไม่มีการเชื่อมต่ออินเทอร์เน็ต — กรุณาตรวจสอบเครือข่าย"); return; }
+    if (!navigator.onLine) { submitRef.current = false; ctx.pushToast("ไม่มีการเชื่อมต่ออินเทอร์เน็ต — กรุณาตรวจสอบเครือข่าย"); return; }
     setSubmitting(true);
     // Re-validate against live stock at submit time (stock may have changed mid-wizard)
     const liveErrors = cart.map(item => {
@@ -6952,7 +6956,8 @@ function MStockTake({ ctx }) {
   useEffectM(() => () => setCamOpen(false), []);
   const snapReserved = (skus) => updateMeta(m => {
     const r = { ...m.reserved };
-    skus.forEach(sku => { const x = liveReserved[sku]; r[sku] = x ? { qty: x.qty, orders: x.orders.slice() } : { qty: 0, orders: [] }; });
+    // Orders not loaded yet: don't freeze a partial snapshot — drop it so the live value is used.
+    skus.forEach(sku => { if (!ordersLoaded) { delete r[sku]; return; } const x = liveReserved[sku]; r[sku] = x ? { qty: x.qty, orders: x.orders.slice() } : { qty: 0, orders: [] }; });
     return { reserved: r, pulled: m.pulled };
   });
 

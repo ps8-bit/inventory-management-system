@@ -1708,6 +1708,17 @@ async function applyReceiveLocs(lines) {
     const r = await saveLocSplit(job[0], job[1]);
     if (r && r.ok === false) { out.ok = false; out.errors.push({ sku: job[0], error: r.error }); }
   }
+  /* The new rows used the LOCAL p.qty; the server's qty may have landed after.
+     applyLocPicks is difference-based, so it reconciles the rows to the final qty. */
+  if (jobs.length && typeof applyLocPicks === "function") {
+    try {
+      const fix = jobs.map(j => ({ sku: j[0], loc: (j[1][j[1].length - 1] || {}).loc })).filter(x => x.loc);
+      if (fix.length) {
+        const r = await applyLocPicks(fix);
+        if (r && r.offline) out.offline = true;
+      }
+    } catch (e) {}
+  }
   return out;
 }
 
@@ -2938,6 +2949,9 @@ function restockLinesForOrder(order) {
   const own = Array.isArray(order.lineItems) ? order.lineItems.filter(li => li && li.sku) : [];
   const extra = Array.isArray(order.addedItems) ? order.addedItems.filter(li => li && li.sku) : [];
   if (!own.length && !extra.length) return [];
+  // Label-born order + เพิ่มรายการ: only the added lines were cut; without own
+  // lineItems the resolver would fall back to the label's (never debited) items.
+  if (!own.length) return packLinesForOrder(Object.assign({}, order, { lineItems: extra, addedItems: [] }));
   return packLinesForOrder(order);
 }
 
@@ -3791,7 +3805,7 @@ function saveStockTake(counts) {
    (status "picking"; a packed → picking revert counts again) whose sale really
    debited stock (restockLinesForOrder — label-only orders never did), minus
    pieces the packer already took off the shelf (pack progress, per order and
-   per wave: a wave at stage "sort" has picked everything). */
+   per wave; shorted lines are off the shelf too). */
 function pendingPackReserved() {
   const list = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
   const prog = (typeof loadPackProgress === "function") ? loadPackProgress() : {};
@@ -3802,7 +3816,8 @@ function pendingPackReserved() {
     const lines = restockLinesForOrder(o).map(l => ({ sku: l.sku, key: l.key || packKey(l.sku, l.loc), qty: Math.max(0, Number(l.qty) || 0) }));
     if (!lines.length) return;
     const own = (prog[o.id] && prog[o.id].done) || {};
-    lines.forEach(l => { l.left = Math.max(0, l.qty - Math.min(Number(own[l.key]) || 0, l.qty)); });
+    const ownShort = (prog[o.id] && prog[o.id].short) || {};
+    lines.forEach(l => { l.left = ownShort[l.key] ? 0 : Math.max(0, l.qty - Math.min(Number(own[l.key]) || 0, l.qty)); });
     pending.push({ id: o.id, lines });
   });
   const byId = {};
@@ -3811,7 +3826,9 @@ function pendingPackReserved() {
     if (k.indexOf("batch:") !== 0) return;
     const w = prog[k] || {};
     const members = (w.orderIds || []).map(id => byId[id]).filter(Boolean);
-    if (w.stage === "sort") { members.forEach(e => e.lines.forEach(l => { l.left = 0; })); return; }
+    // Shorted pieces are not on the shelf; unpicked ones are (even at stage "sort").
+    const wShort = w.short || {};
+    members.forEach(e => e.lines.forEach(l => { if (wShort[l.key]) l.left = 0; }));
     const done = w.done || {};
     Object.keys(done).forEach(key => {
       let take = Math.max(0, Number(done[key]) || 0);
@@ -3960,14 +3977,22 @@ function ledgerStampLabel(iso) {
 function useLatestCounts(skus, active, nonce) {
   const key = active ? [...new Set((skus || []).filter(Boolean))].sort().join("\n") : "";
   const fullKey = key ? key + "#" + (nonce || 0) : "";
-  const [st, setSt] = React.useState({ key: "", latest: null, failed: false });
+  const [st, setSt] = React.useState({ key: "", latest: null, failed: false, at: 0 });
   const [retry, setRetry] = React.useState(0);
+  // A cached result goes stale: refetch after 60 s (the old one stays on screen
+  // meanwhile, so confirm isn't blocked again). Re-activation changes fullKey
+  // ("" → key), which reruns the fetch effect too.
+  React.useEffect(() => {
+    if (!fullKey || st.key !== fullKey || !st.at) return;
+    const t = setTimeout(() => setRetry(n => n + 1), Math.max(0, 60000 - (Date.now() - st.at)));
+    return () => clearTimeout(t);
+  }, [fullKey, st.key, st.at]);
   React.useEffect(() => {
     if (!fullKey) return;
     let alive = true;
     const t = setTimeout(() => {
       loadLatestCounts(key.split("\n")).then(latest => {
-        if (alive) setSt({ key: fullKey, latest: latest || null, failed: !latest });
+        if (alive) setSt({ key: fullKey, latest: latest || null, failed: !latest, at: Date.now() });
       });
     }, 200);
     return () => { alive = false; clearTimeout(t); };

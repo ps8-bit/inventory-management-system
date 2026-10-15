@@ -4558,13 +4558,14 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
 
   useEffect(() => {
     const refresh = () => setTick(t => t + 1);
-    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change"];
+    const evs = ["ims-products-change", "ims-orders-change", "ims-labels-change", "ims-pack-change", "ims-orders-load"];
     evs.forEach(ev => window.addEventListener(ev, refresh));
     return () => evs.forEach(ev => window.removeEventListener(ev, refresh));
   }, []);
   // Pieces cut (ตัดสต็อก) but still รอแพ็ค — on the shelf, already off the system.
   const reserved = useMemo(() => (typeof pendingPackReserved === "function") ? pendingPackReserved() : {}, [tick]);
   const resvOf = (sku) => (reserved[sku] && reserved[sku].qty) || 0;
+  const ordersLoaded = (typeof packHomeLoadState !== "function") || packHomeLoadState() === "ok";
   // ตั้งค่าเป็น target for a row (null = nothing typed yet).
   const setPlanOf = (row) => {
     const n = parseInt(row.amount, 10);
@@ -4789,6 +4790,9 @@ function StockAdjustModal({ product, onClose, onApply, pushToast }) {
                     </div>
                   )}
                 </div>
+                {mode === "set" && !ordersLoaded && (
+                  <div style={{ padding: "8px 12px", marginBottom: 8, borderRadius: 10, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12 }}>ยังโหลดออร์เดอร์ไม่ครบ — ตัวเลขรอแพ็คอาจไม่ครบ</div>
+                )}
                 {mode === "set" && resvRows.length > 0 && (
                   <div style={{ padding: "10px 12px", marginBottom: 8, borderRadius: 10, background: "var(--warning-soft)", border: "1px solid var(--warning)", fontSize: 12, lineHeight: 1.55 }}>
                     <div style={{ fontWeight: 600, fontSize: 13 }}>มี {resvRows.length} รายการที่ตัดสต็อกแล้วแต่ยังรอแพ็ค</div>
@@ -6436,7 +6440,8 @@ function StockTake({ pushToast }) {
   const targetOf = (sku, counted) => Math.max(0, counted - (pulled[sku] ? 0 : resvOf(sku)));
   const snapReserved = (skus) => updateMeta(m => {
     const r = { ...m.reserved };
-    skus.forEach(sku => { const x = liveReserved[sku]; r[sku] = x ? { qty: x.qty, orders: x.orders.slice() } : { qty: 0, orders: [] }; });
+    // Orders not loaded yet: don't freeze a partial snapshot — drop it so the live value is used.
+    skus.forEach(sku => { if (!ordersLoaded) { delete r[sku]; return; } const x = liveReserved[sku]; r[sku] = x ? { qty: x.qty, orders: x.orders.slice() } : { qty: 0, orders: [] }; });
     return { reserved: r, pulled: m.pulled };
   });
 
