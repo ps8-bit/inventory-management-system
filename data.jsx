@@ -880,7 +880,7 @@ function receiveStockAndRecord(lines, reason, opts) {
    never creates an order. External sales recorded here ("ขายผ่าน …") DO feed
    analytics and the channel cards via saleMoveOrders() — staff record almost
    every sale this way. */
-function applyStockAdjustment({ sku, delta, reason, note, source, when, unitPrice }) {
+function applyStockAdjustment({ sku, delta, reason, note, source, when, unitPrice, detail }) {
   const d = Math.trunc(Number(delta) || 0);
   const p = PRODUCTS.find(x => x.sku === sku);
   if (!p || !d) return { ok: false };
@@ -911,7 +911,10 @@ function applyStockAdjustment({ sku, delta, reason, note, source, when, unitPric
   // keeps its real time: it records when someone keyed it in.
   const back = when ? stockOutStamp(when) : null;
   const backAt = back && back.backdated ? back.createdAt : undefined;
+  // `detail` = this SKU's own explanation (ตั้งค่าเป็น: "นับได้ X − รอแพ็ค Y = Z"),
+  // so the history says why the stock didn't land on the typed number.
   const fullReason = [noteText ? `${reasonLabel} — ${noteText}` : reasonLabel,
+    String(detail || "").trim(),
     backAt ? `ย้อนหลัง ${stockOutStampLabel(back)}` : ""].filter(Boolean).join(" · ");
 
   /* ── Why the history is written AFTER the server answers ──
@@ -1041,7 +1044,7 @@ async function commitQuickSale({ lines, reasonId, note, source, when }) {
    items at once, and both must stay on the single choke point above, so this
    only loops it and aggregates: per-SKU audit rows + stock_adjustments history
    stay granular (the ProductDrawer history panel reads them per product).
-   items = [{ sku, delta }] → { ok, applied, skipped, net, results }. */
+   items = [{ sku, delta, detail? }] → { ok, applied, skipped, net, results }. */
 function applyStockAdjustmentBatch(items, opts) {
   const { reason, note, source, when } = opts || {};
   const list = Array.isArray(items) ? items : [];
@@ -1049,7 +1052,7 @@ function applyStockAdjustmentBatch(items, opts) {
   let applied = 0, skipped = 0, net = 0;
   list.forEach(it => {
     if (!it || !it.sku) { skipped++; return; }
-    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source, when, unitPrice: it.unitPrice }) || { ok: false };
+    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source, when, unitPrice: it.unitPrice, detail: it.detail }) || { ok: false };
     results.push({ sku: it.sku, ...res });
     // eff === 0 means the clamp ate the change (already 0 คงเหลือ) — not applied.
     if (res.ok && res.eff) { applied++; net += res.eff; } else skipped++;
@@ -1620,8 +1623,13 @@ async function moveStockToLocation(sku, code, pieces) {
   const total = Math.max(0, Number(p.qty) || 0);
   const rows = locSplitFor(sku, p.loc);
   if (!rows.length) {
-    // No split recorded: p.loc IS the whole truth, keep the legacy whole-move.
+    // No split recorded: p.loc IS the whole truth, keep the legacy whole-move —
+    // and record the shelf row too, or the pieces show as ยังไม่จัดเก็บ (001-HC).
     updateProductInStore(sku, { loc: target });
+    if (total > 0 && locIsStored(target)) {
+      const res = await saveLocSplit(sku, [{ loc: target, qty: total }]);
+      if (!res || !res.ok) return { ok: false, error: (res && res.error) || "บันทึกตำแหน่งไม่สำเร็จ" };
+    }
     return { ok: true, moved: total, all: true };
   }
   let need = Math.min(total, Math.max(0, Math.round(Number(pieces) || 0)));
@@ -1681,6 +1689,10 @@ async function applyReceiveLocs(lines) {
     const oldQty = Math.max(0, (Number(p.qty) || 0) - n);
     if (!p.loc || p.loc === loc || !locIsStored(p.loc, stored) || oldQty === 0) {
       if ((p.loc || "") !== loc) updateProductInStore(l.sku, { loc: loc });
+      // Also create the shelf row: without it the stock has no product_locations
+      // row and shows as ยังไม่จัดเก็บ (001-HC). Once per sku per batch.
+      const q = Math.max(0, Number(p.qty) || 0);
+      if (q > 0 && locIsStored(loc, stored) && !jobs.some(j => j[0] === l.sku)) jobs.push([l.sku, [{ loc: loc, qty: q }], true]);
       return;
     }
     // Stock recorded elsewhere and this batch lands somewhere new → real split.
@@ -1693,8 +1705,25 @@ async function applyReceiveLocs(lines) {
     if (r && r.errors && r.errors.length) { out.ok = false; out.errors.push(...r.errors); }
   }
   for (const job of jobs) {
+    if (job[2]) {
+      // Single-row job: re-read the CURRENT qty (the server may have landed since).
+      const cur = Math.max(0, Number((PRODUCTS.find(x => x.sku === job[0]) || {}).qty) || 0);
+      if (!cur) continue;
+      job[1][0].qty = cur;
+    }
     const r = await saveLocSplit(job[0], job[1]);
     if (r && r.ok === false) { out.ok = false; out.errors.push({ sku: job[0], error: r.error }); }
+  }
+  /* The new rows used the LOCAL p.qty; the server's qty may have landed after.
+     applyLocPicks is difference-based, so it reconciles the rows to the final qty. */
+  if (jobs.length && typeof applyLocPicks === "function") {
+    try {
+      const fix = jobs.map(j => ({ sku: j[0], loc: (j[1][j[1].length - 1] || {}).loc })).filter(x => x.loc);
+      if (fix.length) {
+        const r = await applyLocPicks(fix);
+        if (r && r.offline) out.offline = true;
+      }
+    } catch (e) {}
   }
   return out;
 }
@@ -2926,6 +2955,9 @@ function restockLinesForOrder(order) {
   const own = Array.isArray(order.lineItems) ? order.lineItems.filter(li => li && li.sku) : [];
   const extra = Array.isArray(order.addedItems) ? order.addedItems.filter(li => li && li.sku) : [];
   if (!own.length && !extra.length) return [];
+  // Label-born order + เพิ่มรายการ: only the added lines were cut; without own
+  // lineItems the resolver would fall back to the label's (never debited) items.
+  if (!own.length) return packLinesForOrder(Object.assign({}, order, { lineItems: extra, addedItems: [] }));
   return packLinesForOrder(order);
 }
 
@@ -3769,8 +3801,308 @@ function loadStockTake() {
 function saveStockTake(counts) {
   try { localStorage.setItem(STOCKTAKE_KEY, JSON.stringify(counts || {})); } catch (e) {}
 }
+/* ── Pieces cut but not yet packed ──────────────────────────────────────
+   ตัดสต็อก debits products.qty the moment the order is made, but the pieces sit
+   on the shelf until แพ็คสินค้า takes them (pack never moves stock). A count taken
+   in between sees those pieces and — applied as-is — puts them back into stock:
+   2026-10-10 AFG-OT21-BK was counted 0 → 9 while three cut orders still had their
+   pieces on the shelf, leaving the system 3 above reality for good.
+   Returns { sku: { qty, orders: [orderId…] } } over every order still รอแพ็ค
+   (status "picking"; a packed → picking revert counts again) whose sale really
+   debited stock (restockLinesForOrder — label-only orders never did), minus
+   pieces the packer already took off the shelf (pack progress, per order and
+   per wave; shorted lines are off the shelf too). */
+function pendingPackReserved() {
+  const list = (typeof buildOrders === "function") ? buildOrders() : loadOrders();
+  const prog = (typeof loadPackProgress === "function") ? loadPackProgress() : {};
+  const pending = [];
+  (list || []).forEach(o => {
+    if (!o || o.deleted || o.status !== "picking") return;
+    if (isBlankDraftOrder(o)) return;
+    const lines = restockLinesForOrder(o).map(l => ({ sku: l.sku, key: l.key || packKey(l.sku, l.loc), qty: Math.max(0, Number(l.qty) || 0) }));
+    if (!lines.length) return;
+    const own = (prog[o.id] && prog[o.id].done) || {};
+    const ownShort = (prog[o.id] && prog[o.id].short) || {};
+    lines.forEach(l => { l.left = ownShort[l.key] ? 0 : Math.max(0, l.qty - Math.min(Number(own[l.key]) || 0, l.qty)); });
+    pending.push({ id: o.id, lines });
+  });
+  const byId = {};
+  pending.forEach(e => { byId[e.id] = e; });
+  Object.keys(prog).forEach(k => {
+    if (k.indexOf("batch:") !== 0) return;
+    const w = prog[k] || {};
+    const members = (w.orderIds || []).map(id => byId[id]).filter(Boolean);
+    // Shorted pieces are not on the shelf; unpicked ones are (even at stage "sort").
+    const wShort = w.short || {};
+    members.forEach(e => e.lines.forEach(l => { if (wShort[l.key]) l.left = 0; }));
+    const done = w.done || {};
+    Object.keys(done).forEach(key => {
+      let take = Math.max(0, Number(done[key]) || 0);
+      members.forEach(e => e.lines.forEach(l => {
+        if (take <= 0 || l.key !== key) return;
+        const t = Math.min(take, l.left);
+        l.left -= t; take -= t;
+      }));
+    });
+  });
+  const out = {};
+  pending.forEach(e => e.lines.forEach(l => {
+    if (l.left <= 0) return;
+    const r = out[l.sku] || (out[l.sku] = { qty: 0, orders: [] });
+    r.qty += l.left;
+    if (!r.orders.includes(e.id)) r.orders.push(e.id);
+  }));
+  return out;
+}
+
+/* Count-time snapshot of pendingPackReserved per counted SKU + the "pulled"
+   choices, so a count applied later still subtracts what was on the shelf when
+   it was counted (packing doesn't move stock). Cleared with the counts. */
+const STOCKTAKE_META_KEY = "ims_stocktake_meta_v1";
+function loadStockTakeMeta() {
+  try {
+    const o = JSON.parse(localStorage.getItem(STOCKTAKE_META_KEY) || "{}") || {};
+    return { reserved: (o.reserved && typeof o.reserved === "object") ? o.reserved : {}, pulled: (o.pulled && typeof o.pulled === "object") ? o.pulled : {} };
+  } catch (e) { return { reserved: {}, pulled: {} }; }
+}
+function saveStockTakeMeta(meta) {
+  try { localStorage.setItem(STOCKTAKE_META_KEY, JSON.stringify({ reserved: (meta && meta.reserved) || {}, pulled: (meta && meta.pulled) || {} })); } catch (e) {}
+}
+// Reserved map to plan with: the count-time snapshot where one exists, else current.
+function stockTakeReserved(current, snap) {
+  const out = Object.assign({}, current || {});
+  Object.keys(snap || {}).forEach(sku => { out[sku] = snap[sku]; });
+  return out;
+}
+
+/* The count → stock plan shared by both forks' confirm list and applyStockCounts,
+   so what the user approves is exactly what gets written.
+   counts   = { sku: countedQty }
+   reserved = pendingPackReserved() (or null)
+   pulled   = { sku: true } — the user confirmed those รอแพ็ค pieces are already
+              off the shelf, so the counted number is the free stock as-is.
+   Default (not pulled): the counted pile still holds them → subtract.
+   Returns [{ sku, name, from, counted, reserved, subtracted, orders, to, delta }]
+   for SKUs that actually change. */
+function stockCountPlan(counts, reserved, pulled) {
+  const out = [];
+  Object.keys(counts || {}).forEach(sku => {
+    const raw = counts[sku];
+    if (raw === "" || raw == null) return;          // not counted → skip
+    const p = PRODUCTS.find(x => x.sku === sku);
+    if (!p) return;
+    const counted = Math.max(0, Math.round(Number(raw) || 0));
+    const r = (reserved && reserved[sku]) || null;
+    const res = r ? r.qty : 0;
+    const subtracted = res > 0 && !(pulled && pulled[sku]);
+    const to = Math.max(0, counted - (subtracted ? res : 0));
+    if (to === p.qty) return;                        // no change
+    out.push({ sku, name: p.name, from: p.qty, counted, reserved: res, subtracted, orders: r ? r.orders : [], to, delta: to - p.qty });
+  });
+  return out;
+}
+
+/* Why a count landed where it did — written into the ledger reason so the
+   product history explains a count that isn't simply "what was counted".
+   Shared by ตรวจนับ (_countNote) and ปรับสต็อก ตั้งค่าเป็น (adjustSetTarget). */
+function pendingPackNote(c) {
+  if (!c || !c.reserved) return "";
+  // No order ids here: an SO-… id in a ledger reason makes loadAuditEntryMoves
+  // read the count row as that order's sale.
+  const k = (c.orders || []).length;
+  return c.subtracted
+    ? `นับได้ ${c.counted} − รอแพ็ค ${c.reserved} ชิ้น${k ? ` · ${k} ออร์เดอร์` : ""} = ${c.to}`
+    : `นับได้ ${c.counted} (รอแพ็ค ${c.reserved} ชิ้นหยิบออกจากชั้นแล้ว — ไม่หัก)`;
+}
+function _countNote(c) {
+  const n = pendingPackNote(c);
+  return n ? " · " + n : "";
+}
+
+/* ── ปรับสต็อก ตั้งค่าเป็น = a count too ─────────────────────────────────
+   ตั้งค่าเป็น is a number read off the shelf, so it has the same hole the
+   ตรวจนับ screen had: pieces cut (ตัดสต็อก) but still รอแพ็ค sit on the shelf
+   while the system has already taken them off. 3 of the 6 bad corrections
+   since 2026-10-06 came through here (นับสต็อกผิด / แก้ไขยอด → ตั้งค่าเป็น),
+   e.g. AFG-OT21-BK 0 → 9 with 4 pieces still waiting to be packed.
+   Same rule and the same choice as stockCountPlan: by default the typed number
+   still includes them → subtract; pulled = the user says they are already off
+   the shelf → write the number as typed.
+   Returns { counted, reserved, orders, subtracted, to }. */
+function adjustSetTarget(sku, typed, reserved, pulled) {
+  const counted = Math.max(0, Math.round(Number(typed) || 0));
+  const r = (reserved && reserved[sku]) || null;
+  const res = r ? r.qty : 0;
+  const subtracted = res > 0 && !pulled;
+  return { counted, reserved: res, orders: r ? r.orders : [], subtracted, to: Math.max(0, counted - (subtracted ? res : 0)) };
+}
+
+/* ── Backdated movement vs the SKU's latest count ──────────────────────
+   A count (ตรวจนับสต็อก…) or correction (นับสต็อกผิด…) sets stock to what was
+   physically there at that moment, so every movement that happened BEFORE it is
+   already inside the number. A ปรับสต็อก entered later but dated before that
+   count moves the stock a second time: 10 SKUs drifted this way by 2026-10-15
+   (AFG-OT21-BK: a +30 receive dated 09-24, entered after the 09-28 count).
+   loadLatestCounts(skus) → { sku: latest such ledger row } (null = couldn't check).
+   backdateCountConflicts(latest, whenIso, skus) → [{ sku, row }] for the SKUs
+   whose latest count is dated after the movement. */
+const COUNT_REASON_RE = /^(ตรวจนับสต็อก|นับสต็อกผิด)/;
+function isCountReason(reason) { return COUNT_REASON_RE.test(String(reason || "")); }
+async function loadLatestCounts(skus) {
+  if (typeof dbLoadLatestCounts !== "function") return null;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return null;
+  // A hung request (Wi-Fi with no internet keeps onLine true) must not hold the
+  // confirm button for minutes — after 6 s it becomes the "failed" state.
+  let timer;
+  try {
+    return await Promise.race([
+      dbLoadLatestCounts(skus),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), 6000); })
+    ]);
+  } catch (e) { return null; } finally { clearTimeout(timer); }
+}
+function backdateCountConflicts(latest, whenIso, skus) {
+  const at = Date.parse(whenIso || "");
+  if (!latest || !Number.isFinite(at)) return [];
+  const out = [];
+  [...new Set(skus || [])].forEach(sku => {
+    const row = latest[sku];
+    if (row && isCountReason(row.reason) && Date.parse(row.created_at) > at) out.push({ sku, row });
+  });
+  return out;
+}
+// "28 ก.ย. 2569 14:30" (Bangkok) for a stored ledger timestamp.
+function ledgerStampLabel(iso) {
+  const d = bangkokDateOf(iso);
+  return d ? `${isoToThai(d)} ${bangkokTimeOf(iso)}`.trim() : "";
+}
+/* Both ปรับสต็อก forks: the latest count per selected SKU, fetched only while
+   the picked date is ย้อนหลัง. { latest, loading, failed }.
+   nonce: bump it to force a refetch for the same SKU set (e.g. after a batch
+   that may itself have written a count). A failed result retries on "online". */
+function useLatestCounts(skus, active, nonce) {
+  const key = active ? [...new Set((skus || []).filter(Boolean))].sort().join("\n") : "";
+  const fullKey = key ? key + "#" + (nonce || 0) : "";
+  const [st, setSt] = React.useState({ key: "", latest: null, failed: false, at: 0 });
+  const [retry, setRetry] = React.useState(0);
+  // A cached result goes stale: refetch after 60 s (the old one stays on screen
+  // meanwhile, so confirm isn't blocked again). Re-activation changes fullKey
+  // ("" → key), which reruns the fetch effect too.
+  React.useEffect(() => {
+    if (!fullKey || st.key !== fullKey || !st.at) return;
+    const t = setTimeout(() => setRetry(n => n + 1), Math.max(0, 60000 - (Date.now() - st.at)));
+    return () => clearTimeout(t);
+  }, [fullKey, st.key, st.at]);
+  React.useEffect(() => {
+    if (!fullKey) return;
+    let alive = true;
+    const t = setTimeout(() => {
+      loadLatestCounts(key.split("\n")).then(latest => {
+        if (alive) setSt(prev => {
+          if (latest) return { key: fullKey, latest: latest, failed: false, at: Date.now() };
+          // A failed refresh must not erase a conflict already loaded for this key.
+          if (prev && prev.key === fullKey && prev.latest) return Object.assign({}, prev, { failed: false, at: Date.now() });
+          return { key: fullKey, latest: null, failed: true, at: Date.now() };
+        });
+      });
+    }, 200);
+    return () => { alive = false; clearTimeout(t); };
+  }, [fullKey, retry]);
+  React.useEffect(() => {
+    if (!fullKey || st.key !== fullKey || !st.failed) return;
+    const on = () => setRetry(n => n + 1);
+    window.addEventListener("online", on);
+    return () => window.removeEventListener("online", on);
+  }, [fullKey, st.key, st.failed]);
+  if (!fullKey) return { latest: null, loading: false, failed: false };
+  if (st.key !== fullKey) return { latest: null, loading: true, failed: false };
+  return { latest: st.latest, loading: false, failed: st.failed };
+}
+
+/* The same guard for the sell screens (ขายออก, ตัดสต็อก) — a backdated sale
+   entered after a count double-deducts exactly like a backdated ปรับสต็อก.
+   skus = the SKUs that will move; when = the picker value.
+   → { ok, loading, failed, conflicts, acked, setAcked, remove? } — `ok` gates submit. */
+function useBackdateGuard(skus, when) {
+  const st = (when && typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+  const backdated = !!(st && st.backdated);
+  const lc = useLatestCounts(skus, backdated);
+  const conflicts = backdated ? backdateCountConflicts(lc.latest, st.createdAt, skus) : [];
+  const key = conflicts.length ? st.createdAt + "|" + conflicts.map(c => c.sku).sort().join(",") : "";
+  const [ackKey, setAckKey] = React.useState("");
+  const acked = !!key && ackKey === key;
+  return {
+    backdated, loading: backdated && lc.loading, failed: backdated && lc.failed, conflicts, acked,
+    setAcked: (v) => setAckKey(v ? key : ""),
+    ok: !(backdated && lc.loading) && (!conflicts.length || acked)
+  };
+}
+/* Warning panel for useBackdateGuard — shared by desktop and mobile sell screens.
+   onRemove(skus) drops the conflicting lines from the cart. */
+function BackdateCountWarning({ guard, onRemove, mobile }) {
+  if (!guard || !guard.backdated) return null;
+  if (guard.loading) return <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>กำลังตรวจการนับสต็อกล่าสุด…</div>;
+  if (guard.failed) return (
+    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)", lineHeight: 1.5 }}>
+      ตรวจไม่ได้ว่ามีการนับสต็อกหลังวันที่นี้หรือไม่ (ออฟไลน์?) — ถ้านับไปแล้วหลังวันนั้น ยอดที่นับได้รวมรายการนี้ไว้แล้ว อย่าบันทึกซ้ำ
+    </div>
+  );
+  if (!guard.conflicts.length) return null;
+  return (
+    <div style={{ marginTop: 10, padding: 12, borderRadius: mobile ? 12 : 10, background: "var(--danger-soft)", border: "1px solid var(--danger)", fontSize: 12, lineHeight: 1.5 }}>
+      <div style={{ fontWeight: 700, fontSize: 13, color: "var(--danger)", display: "flex", alignItems: "flex-start", gap: 6 }}>
+        {typeof Icons !== "undefined" && Icons.Warn && <Icons.Warn size={14} style={{ flexShrink: 0, marginTop: 3 }}/>}
+        <span>วันที่ย้อนหลังนี้อยู่ก่อนการนับสต็อกครั้งล่าสุด — สต็อกจะถูกหักซ้ำ</span>
+      </div>
+      <div style={{ marginTop: 4 }}>
+        การนับครั้งนั้นเห็นของจริงบนชั้นหลังจากขายไปแล้ว จำนวนที่นับได้จึงหักชิ้นที่ขายไว้แล้ว ถ้าบันทึกตอนนี้ สต็อกจะถูกหักซ้ำอีกรอบ (ระบบจะต่ำกว่าของจริง)
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+        {guard.conflicts.map(c => (
+          <div key={c.sku} style={{ padding: "6px 8px", borderRadius: 8, background: "var(--surface)" }}>
+            <span className="mono" style={{ fontWeight: 600, fontSize: 11.5 }}>{c.sku}</span>
+            <span style={{ fontSize: 11, color: "var(--muted)" }}> · นับล่าสุด {ledgerStampLabel(c.row.created_at)} · {c.row.reason}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+        {onRemove && (
+          <button type="button" className={mobile ? "m-chip" : "btn btn-sm"} style={mobile ? { width: "100%", justifyContent: "center" } : undefined}
+                  onClick={() => onRemove(guard.conflicts.map(c => c.sku))}>
+            เอา {guard.conflicts.length} รายการนี้ออก
+          </button>
+        )}
+        <label style={{ display: "flex", gap: 6, cursor: "pointer", alignItems: "flex-start" }}>
+          <input type="checkbox" style={{ marginTop: 2 }} checked={guard.acked} onChange={e => guard.setAcked(e.target.checked)}/>
+          <span>การนับครั้งนั้นยังไม่รวมการขายนี้ — บันทึกต่อ</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+/* ── Movement history in entry order ───────────────────────────────────
+   The product history lists stock_adjustments by id (the order rows were
+   entered), so qty_before → qty_after reads as one unbroken chain. A row dated
+   ย้อนหลัง then sits where it was entered, with a date older than the rows
+   below it — this returns the ids to label, so that date doesn't look like a
+   sorting bug. rows = any order; a row counts as backdated when its reason says
+   so or an earlier-entered row carries a later date (10-minute slack for rows
+   that only waited in the offline queue). */
+function ledgerBackdatedIds(rows) {
+  const out = new Set();
+  let maxSeen = -Infinity;
+  (rows || []).slice().sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0)).forEach(r => {
+    const t = Date.parse(r && r.created_at);
+    if (/ย้อนหลัง/.test(String((r && r.reason) || "")) || (Number.isFinite(t) && maxSeen - t > 10 * 60 * 1000)) out.add(r.id);
+    if (Number.isFinite(t) && t > maxSeen) maxSeen = t;
+  });
+  return out;
+}
+
 /* Reconcile system stock to the physical count. counts = { sku: countedQty }.
-   Returns the list of actual changes [{ sku, name, from, to, delta }].
+   opts = { reserved, pulled } — see stockCountPlan; omitted = no รอแพ็ค adjustment.
+   Returns the list of actual changes [{ sku, name, from, to, delta, … }].
 
    Three things must happen together, or a count leaves the data worse than it
    found it — this is the ONE choke point for both forks (StockTake desktop /
@@ -3786,23 +4118,18 @@ function saveStockTake(counts) {
      3. A movement row per sku, so the count shows up in the product's history
         next to receives, sales and corrections instead of only as one lumped
         line in ประวัติการแก้ไข. */
-function applyStockCounts(counts) {
+function applyStockCounts(counts, opts) {
   if (!counts) return [];
-  const changes = [];
-  Object.keys(counts).forEach(sku => {
-    const raw = counts[sku];
-    if (raw === "" || raw == null) return;          // not counted → skip
-    const p = PRODUCTS.find(x => x.sku === sku);
-    if (!p) return;
-    const to = Math.max(0, Math.round(Number(raw) || 0));
-    if (to === p.qty) return;                        // no change
-    changes.push({ sku, name: p.name, from: p.qty, to, delta: to - p.qty });
-    p.qty = to;
+  const o = opts || {};
+  const changes = stockCountPlan(counts, o.reserved || null, o.pulled || null);
+  changes.forEach(c => {
+    const p = PRODUCTS.find(x => x.sku === c.sku);
+    if (p) p.qty = c.to;
   });
   if (!changes.length) return changes;
   // Physical count = truth. The server lands on the counted number; HOW is in
   // _commitCountsToServer (after applyLocPicks has planned, below).
-  const toServer = changes.map(c => ({ sku: c.sku, from: c.from, to: c.to }));
+  const toServer = changes.map(c => ({ sku: c.sku, from: c.from, to: c.to, note: _countNote(c) }));
   if (typeof applyLocPicks === "function") {
     const picks = changes.map(c => {
       const p = PRODUCTS.find(x => x.sku === c.sku);
@@ -3835,13 +4162,13 @@ async function _commitCountsToServer(list) {
   _persistProductsLocal();   // the counted numbers are on screen + in the local cache now
   const legacy = () => {
     _syncProductRows(skus);
-    recordStockMoves(list.map(c => ({ sku: c.sku, delta: c.to - c.from, reason: `ตรวจนับสต็อก (${c.from} → ${c.to})` })));
+    recordStockMoves(list.map(c => ({ sku: c.sku, delta: c.to - c.from, reason: `ตรวจนับสต็อก (${c.from} → ${c.to})${c.note || ""}` })));
   };
   if (!navigator.onLine || typeof dbLoadQtys !== "function" || typeof dbAdjustStock !== "function") { legacy(); return; }
   let server = null;
   try { server = await dbLoadQtys(skus); } catch (e) { server = null; }
   if (!server) { legacy(); return; }
-  const adj = list.map(c => ({ sku: c.sku, to: c.to, delta: c.to - (Number.isFinite(server[c.sku]) ? server[c.sku] : c.from) }))
+  const adj = list.map(c => ({ sku: c.sku, to: c.to, note: c.note || "", delta: c.to - (Number.isFinite(server[c.sku]) ? server[c.sku] : c.from) }))
     .filter(a => a.delta);
   if (!adj.length) { _persistProductsLocal(); return; }   // server already holds the counted numbers
   let res = null;
@@ -3857,8 +4184,8 @@ async function _commitCountsToServer(list) {
     const d = m.after - before;
     if (!d) return;
     rows.push(m.before != null
-      ? { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})`, before, after: m.after }
-      : { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})` });
+      ? { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})${a.note}`, before, after: m.after }
+      : { sku: a.sku, delta: d, reason: `ตรวจนับสต็อก (${before} → ${m.after})${a.note}` });
   });
   recordStockMoves(rows);
   if (res.error === "PERMISSION_OR_MISSING") {
@@ -4649,7 +4976,8 @@ Object.assign(window, {
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, writeLedgerRows, receiveStockAndRecord,
-  loadStockTake, saveStockTake, applyStockCounts,
+  loadStockTake, saveStockTake, loadStockTakeMeta, saveStockTakeMeta, stockTakeReserved, applyStockCounts, pendingPackReserved, stockCountPlan,
+  pendingPackNote, adjustSetTarget, isCountReason, loadLatestCounts, backdateCountConflicts, ledgerStampLabel, useLatestCounts, ledgerBackdatedIds, useBackdateGuard, BackdateCountWarning,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   omit,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,

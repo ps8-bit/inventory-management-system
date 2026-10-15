@@ -177,7 +177,8 @@ function BundleStockAlert({ issues, title }) {
 /* ──────────────────────────────────────
    SELL CONFIRMATION MODAL
 ────────────────────────────────────── */
-function SellConfirmModal({ bundle, qty, channels, when, onWhenChange, onConfirm, onCancel }) {
+function SellConfirmModal({ bundle, qty, channels, when, onWhenChange, bdGuard, onConfirm, onCancel }) {
+  const bdOk = !bdGuard || bdGuard.ok;
   const totalItems = bundle.items.map(item => {
     const p = PRODUCTS.find(x => x.sku === item.sku);
     return { ...item, name: p?.name || item.sku, deduct: item.qty * qty };
@@ -246,10 +247,11 @@ function SellConfirmModal({ bundle, qty, channels, when, onWhenChange, onConfirm
             <StockOutWhenField value={when} onChange={onWhenChange} label="วันเวลาที่ขาย" style={{ marginBottom: 0 }}
               hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"/>
           )}
+          {bdGuard && typeof BackdateCountWarning === "function" && <BackdateCountWarning guard={bdGuard}/>}
         </div>
         <div style={{ padding: "12px 20px 18px", display: "flex", gap: 8 }}>
           <button className="btn" style={{ flex: 1 }} onClick={onCancel}>ยกเลิก</button>
-          <button className="btn btn-primary" style={{ flex: 2 }} onClick={onConfirm}>
+          <button className="btn btn-primary" style={{ flex: 2, ...(bdOk ? {} : { opacity: 0.5, cursor: "not-allowed" }) }} disabled={!bdOk} onClick={onConfirm}>
             <Icons.Check size={14}/> ยืนยันตัดสต็อก
           </button>
         </div>
@@ -442,8 +444,11 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
 
   /* Synchronous double-submit latch — see SellProductModal in screens.jsx for
      why a state flag isn't enough (this awaits applyLocPicks before closing). */
+  // A sale dated before a component's latest count double-deducts (useBackdateGuard).
+  const bdGuard = typeof useBackdateGuard === "function" ? useBackdateGuard(bundle.items.map(it => it.sku), when) : { ok: true };
+
   const confirmSell = async () => {
-    if (sellBusyRef.current) return;
+    if (sellBusyRef.current || !bdGuard.ok) return;
     sellBusyRef.current = true;
     // Capture before-qtys BEFORE deducting so the audit shows the true from→to
     // (the old code read qty AFTER deduction, which is wrong when a deduct clamps at 0).
@@ -664,6 +669,7 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
           channels={selectedChannels}
           when={when}
           onWhenChange={setWhen}
+          bdGuard={bdGuard}
           onConfirm={confirmSell}
           onCancel={() => setShowConfirm(false)}
         />
