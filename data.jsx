@@ -1692,7 +1692,7 @@ async function applyReceiveLocs(lines) {
       // Also create the shelf row: without it the stock has no product_locations
       // row and shows as ยังไม่จัดเก็บ (001-HC). Once per sku per batch.
       const q = Math.max(0, Number(p.qty) || 0);
-      if (q > 0 && locIsStored(loc, stored) && !jobs.some(j => j[0] === l.sku)) jobs.push([l.sku, [{ loc: loc, qty: q }]]);
+      if (q > 0 && locIsStored(loc, stored) && !jobs.some(j => j[0] === l.sku)) jobs.push([l.sku, [{ loc: loc, qty: q }], true]);
       return;
     }
     // Stock recorded elsewhere and this batch lands somewhere new → real split.
@@ -1705,6 +1705,12 @@ async function applyReceiveLocs(lines) {
     if (r && r.errors && r.errors.length) { out.ok = false; out.errors.push(...r.errors); }
   }
   for (const job of jobs) {
+    if (job[2]) {
+      // Single-row job: re-read the CURRENT qty (the server may have landed since).
+      const cur = Math.max(0, Number((PRODUCTS.find(x => x.sku === job[0]) || {}).qty) || 0);
+      if (!cur) continue;
+      job[1][0].qty = cur;
+    }
     const r = await saveLocSplit(job[0], job[1]);
     if (r && r.ok === false) { out.ok = false; out.errors.push({ sku: job[0], error: r.error }); }
   }
@@ -3992,7 +3998,12 @@ function useLatestCounts(skus, active, nonce) {
     let alive = true;
     const t = setTimeout(() => {
       loadLatestCounts(key.split("\n")).then(latest => {
-        if (alive) setSt({ key: fullKey, latest: latest || null, failed: !latest, at: Date.now() });
+        if (alive) setSt(prev => {
+          if (latest) return { key: fullKey, latest: latest, failed: false, at: Date.now() };
+          // A failed refresh must not erase a conflict already loaded for this key.
+          if (prev && prev.key === fullKey && prev.latest) return Object.assign({}, prev, { failed: false, at: Date.now() });
+          return { key: fullKey, latest: null, failed: true, at: Date.now() };
+        });
       });
     }, 200);
     return () => { alive = false; clearTimeout(t); };

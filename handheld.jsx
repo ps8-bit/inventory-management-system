@@ -4721,6 +4721,11 @@ function MLocations({ ctx }) {
       return;
     }
     updateProductInStore(p.sku, { loc: sel.code });
+    // No rows yet: record the shelf row too, or the pieces show as ยังไม่จัดเก็บ.
+    if ((Number(p.qty) || 0) > 0 && typeof saveLocSplit === "function") {
+      const res = await saveLocSplit(p.sku, [{ loc: sel.code, qty: Number(p.qty) || 0 }]);
+      if (res && res.ok === false) { toast(res.error || "บันทึกตำแหน่งไม่สำเร็จ"); return; }
+    }
     toast(from ? `ย้าย ${p.name} จาก ${from.pos} มา ${sel.p} แล้ว` : `เพิ่ม ${p.name} เข้า ${sel.p} แล้ว`);
   };
   // Camera scan → assign to the open position. Resolves like the desktop wedge

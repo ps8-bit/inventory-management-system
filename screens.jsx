@@ -5213,6 +5213,11 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
       return;
     }
     updateProductInStore(p.sku, { loc: loc.code });
+    // No rows yet: record the shelf row too, or the pieces show as ยังไม่จัดเก็บ.
+    if ((Number(p.qty) || 0) > 0 && typeof saveLocSplit === "function") {
+      const res = await saveLocSplit(p.sku, [{ loc: loc.code, qty: Number(p.qty) || 0 }]);
+      if (res && res.ok === false) { toast(res.error || "บันทึกตำแหน่งไม่สำเร็จ"); return; }
+    }
     toast(from ? `ย้าย “${p.name}” จาก ${from.pos} มา ${loc.pos} แล้ว` : `เพิ่ม “${p.name}” เข้า ${loc.pos} แล้ว`);
   };
   const unassign = async (p) => {
