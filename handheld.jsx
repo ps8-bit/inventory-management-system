@@ -2276,7 +2276,9 @@ function MQuickSell({ ctx }) {
   const pieces = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0), 0);
   const total = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0) * (Number(l.price) || 0), 0);
   const overStock = lines.find(l => (parseInt(l.qty, 10) || 0) > effQty(l.sku));
-  const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy;
+  // A sale dated before the SKU's latest count double-deducts (useBackdateGuard).
+  const bdGuard = typeof useBackdateGuard === "function" ? useBackdateGuard(lines.filter(l => (parseInt(l.qty, 10) || 0) > 0).map(l => l.sku), when) : { ok: true };
+  const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy && bdGuard.ok;
 
   const submit = async () => {
     if (!canSubmit || busyRef.current) return;
@@ -2374,6 +2376,7 @@ function MQuickSell({ ctx }) {
         <input className="m-input" value={note} onChange={e => setNote(e.target.value)} placeholder="เช่น เลขออร์เดอร์ Shopee, ชื่อลูกค้า"/>
 
         <MStockOutWhen value={when} onChange={setWhen} label="วันเวลาที่ขาย" hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ยอดขายจะนับเป็นวันนั้น"/>
+        {typeof BackdateCountWarning === "function" && <BackdateCountWarning mobile guard={bdGuard} onRemove={skus => { const d = new Set(skus); setLines(ls => ls.filter(l => !d.has(l.sku))); }}/>}
 
         <button className="m-btn-big" style={{ marginTop: 14 }} disabled={!canSubmit} onClick={submit}>
           <Icons.Check size={16}/> {busy ? "กำลังบันทึก…" : !reasonId ? "เลือกช่องทางขายก่อน" : `ยืนยันขาย${pieces ? " " + pieces + " ชิ้น · ฿" + Math.round(total).toLocaleString("th-TH") : ""}`}
@@ -2942,7 +2945,9 @@ function MIssue({ ctx }) {
   const chSummary = CHANNEL_LIST
     .map(c => ({ ...c, qty: cart.filter(l => l.ch === c.id).reduce((s, l) => s + l.qty, 0) }))
     .filter(c => c.qty > 0);
-  const canSubmit = cart.length > 0 && totalPieces > 0 && shortages.length === 0;
+  // A sale dated before the SKU's latest count double-deducts (useBackdateGuard).
+  const bdGuard = typeof useBackdateGuard === "function" ? useBackdateGuard(Object.keys(needBySku), orderDate) : { ok: true };
+  const canSubmit = cart.length > 0 && totalPieces > 0 && shortages.length === 0 && bdGuard.ok;
 
   const qL = q.toLowerCase();
   const prodMatches = PRODUCTS.filter(p =>
@@ -3133,6 +3138,7 @@ function MIssue({ ctx }) {
 
         {/* Sale date/time — backdating files a late-keyed order under the moment it sold. */}
         <MStockOutWhen value={orderDate} onChange={setOrderDate} label="วันเวลาที่ขาย" hint="ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง"/>
+        {typeof BackdateCountWarning === "function" && <BackdateCountWarning mobile guard={bdGuard} onRemove={skus => { const d = new Set(skus); setCart(prev => prev.filter(l => l.type === "bundle" ? !(l.items || []).some(ci => d.has(ci.sku)) : !d.has(l.sku))); }}/>}
 
         <div className="m-section-label" style={{ padding: "12px 4px 8px" }}>ลูกค้า / อ้างอิง (ไม่จำเป็น)</div>
         <input className="m-input" placeholder="เช่น คุณ ปวีณา / Shopee #2025-119283" value={customer} onChange={e => setCustomer(e.target.value)} style={{ marginBottom: 8 }}/>

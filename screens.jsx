@@ -2589,7 +2589,9 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
     !q || b.name.toLowerCase().includes(qL) || b.id.toLowerCase().includes(qL)
   );
 
-  const canSubmit = cart.length > 0 && totalUnits > 0 && shortages.length === 0 && !busy;
+  // A sale dated before the SKU's latest count double-deducts (useBackdateGuard).
+  const bdGuard = typeof useBackdateGuard === "function" ? useBackdateGuard(Object.keys(needBySku), orderDate) : { ok: true };
+  const canSubmit = cart.length > 0 && totalUnits > 0 && shortages.length === 0 && !busy && bdGuard.ok;
   const submit = async () => {
     if (!canSubmit) return;
     setBusy(true);
@@ -2810,6 +2812,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
           {/* Sale date/time — backdating files a late-keyed order under the moment it sold. */}
           <StockOutWhenField value={orderDate} onChange={setOrderDate} label="วันเวลาที่ขาย"
             hint="ตัดสต็อกย้อนหลัง? เลือกวันเวลาที่ขายจริง — ออร์เดอร์และยอดขายจะนับเป็นวันนั้น"/>
+          {typeof BackdateCountWarning === "function" && <BackdateCountWarning guard={bdGuard} onRemove={skus => { const d = new Set(skus); setCart(prev => prev.filter(l => l.type === "bundle" ? !(l.items || []).some(ci => d.has(ci.sku)) : !d.has(l.sku))); }}/>}
 
           <div className="field" style={{ marginBottom: 14 }}>
             <label>ลูกค้า / เลขที่อ้างอิง <span style={{ color: "var(--muted)", fontWeight: 400 }}>(ไม่จำเป็น)</span></label>
@@ -5713,7 +5716,9 @@ function QuickSellModal({ onClose, pushToast }) {
   const pieces = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0), 0);
   const total = lines.reduce((n, l) => n + (parseInt(l.qty, 10) || 0) * (Number(l.price) || 0), 0);
   const overStock = lines.find(l => (parseInt(l.qty, 10) || 0) > effQty(l.sku));
-  const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy;
+  // A sale dated before the SKU's latest count double-deducts (useBackdateGuard).
+  const bdGuard = typeof useBackdateGuard === "function" ? useBackdateGuard(lines.filter(l => (parseInt(l.qty, 10) || 0) > 0).map(l => l.sku), when) : { ok: true };
+  const canSubmit = !!reasonId && pieces > 0 && !overStock && !busy && bdGuard.ok;
 
   const submit = async () => {
     if (!canSubmit || busyRef.current) return;
@@ -5817,6 +5822,7 @@ function QuickSellModal({ onClose, pushToast }) {
           </div>
           <StockOutWhenField value={when} onChange={setWhen} label="วันเวลาที่ขาย" style={{ marginTop: 14, marginBottom: 0 }}
             hint="ขายย้อนหลัง? เลือกวันเวลาที่ขายจริง — ยอดขายจะนับเป็นวันนั้น"/>
+          {typeof BackdateCountWarning === "function" && <BackdateCountWarning guard={bdGuard} onRemove={skus => { const d = new Set(skus); setLines(ls => ls.filter(l => !d.has(l.sku))); }}/>}
         </div>
         <div className="modal-foot" style={{ alignItems: "center" }}>
           <span style={{ marginRight: "auto", fontSize: 13, color: "var(--muted)" }}>

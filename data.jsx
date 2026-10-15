@@ -3907,6 +3907,68 @@ function useLatestCounts(skus, active) {
   return { latest: st.latest, loading: false, failed: st.failed };
 }
 
+/* The same guard for the sell screens (ขายออก, ตัดสต็อก) — a backdated sale
+   entered after a count double-deducts exactly like a backdated ปรับสต็อก.
+   skus = the SKUs that will move; when = the picker value.
+   → { ok, loading, failed, conflicts, acked, setAcked, remove? } — `ok` gates submit. */
+function useBackdateGuard(skus, when) {
+  const st = (when && typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+  const backdated = !!(st && st.backdated);
+  const lc = useLatestCounts(skus, backdated);
+  const conflicts = backdated ? backdateCountConflicts(lc.latest, st.createdAt, skus) : [];
+  const key = conflicts.length ? st.createdAt + "|" + conflicts.map(c => c.sku).sort().join(",") : "";
+  const [ackKey, setAckKey] = React.useState("");
+  const acked = !!key && ackKey === key;
+  return {
+    backdated, loading: backdated && lc.loading, failed: backdated && lc.failed, conflicts, acked,
+    setAcked: (v) => setAckKey(v ? key : ""),
+    ok: !(backdated && lc.loading) && (!conflicts.length || acked)
+  };
+}
+/* Warning panel for useBackdateGuard — shared by desktop and mobile sell screens.
+   onRemove(skus) drops the conflicting lines from the cart. */
+function BackdateCountWarning({ guard, onRemove, mobile }) {
+  if (!guard || !guard.backdated) return null;
+  if (guard.loading) return <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>กำลังตรวจการนับสต็อกล่าสุด…</div>;
+  if (guard.failed) return (
+    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)", lineHeight: 1.5 }}>
+      ตรวจไม่ได้ว่ามีการนับสต็อกหลังวันที่นี้หรือไม่ (ออฟไลน์?) — ถ้านับไปแล้วหลังวันนั้น ยอดที่นับได้รวมรายการนี้ไว้แล้ว อย่าบันทึกซ้ำ
+    </div>
+  );
+  if (!guard.conflicts.length) return null;
+  return (
+    <div style={{ marginTop: 10, padding: 12, borderRadius: mobile ? 12 : 10, background: "var(--danger-soft)", border: "1px solid var(--danger)", fontSize: 12, lineHeight: 1.5 }}>
+      <div style={{ fontWeight: 700, fontSize: 13, color: "var(--danger)", display: "flex", alignItems: "flex-start", gap: 6 }}>
+        {typeof Icons !== "undefined" && Icons.Warn && <Icons.Warn size={14} style={{ flexShrink: 0, marginTop: 3 }}/>}
+        <span>วันที่ย้อนหลังนี้อยู่ก่อนการนับสต็อกครั้งล่าสุด — สต็อกจะถูกหักซ้ำ</span>
+      </div>
+      <div style={{ marginTop: 4 }}>
+        การนับครั้งนั้นเห็นของจริงบนชั้นหลังจากขายไปแล้ว จำนวนที่นับได้จึงหักชิ้นที่ขายไว้แล้ว ถ้าบันทึกตอนนี้ สต็อกจะถูกหักซ้ำอีกรอบ (ระบบจะต่ำกว่าของจริง)
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+        {guard.conflicts.map(c => (
+          <div key={c.sku} style={{ padding: "6px 8px", borderRadius: 8, background: "var(--surface)" }}>
+            <span className="mono" style={{ fontWeight: 600, fontSize: 11.5 }}>{c.sku}</span>
+            <span style={{ fontSize: 11, color: "var(--muted)" }}> · นับล่าสุด {ledgerStampLabel(c.row.created_at)} · {c.row.reason}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+        {onRemove && (
+          <button type="button" className={mobile ? "m-chip" : "btn btn-sm"} style={mobile ? { width: "100%", justifyContent: "center" } : undefined}
+                  onClick={() => onRemove(guard.conflicts.map(c => c.sku))}>
+            เอา {guard.conflicts.length} รายการนี้ออก
+          </button>
+        )}
+        <label style={{ display: "flex", gap: 6, cursor: "pointer", alignItems: "flex-start" }}>
+          <input type="checkbox" style={{ marginTop: 2 }} checked={guard.acked} onChange={e => guard.setAcked(e.target.checked)}/>
+          <span>การนับครั้งนั้นยังไม่รวมการขายนี้ — บันทึกต่อ</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 /* ── Movement history in entry order ───────────────────────────────────
    The product history lists stock_adjustments by id (the order rows were
    entered), so qty_before → qty_after reads as one unbroken chain. A row dated
@@ -4803,7 +4865,7 @@ Object.assign(window, {
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, writeLedgerRows, receiveStockAndRecord,
   loadStockTake, saveStockTake, applyStockCounts, pendingPackReserved, stockCountPlan,
-  pendingPackNote, adjustSetTarget, isCountReason, loadLatestCounts, backdateCountConflicts, ledgerStampLabel, useLatestCounts, ledgerBackdatedIds,
+  pendingPackNote, adjustSetTarget, isCountReason, loadLatestCounts, backdateCountConflicts, ledgerStampLabel, useLatestCounts, ledgerBackdatedIds, useBackdateGuard, BackdateCountWarning,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   omit,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
