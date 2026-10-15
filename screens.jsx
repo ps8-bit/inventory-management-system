@@ -2900,7 +2900,8 @@ async function commitIssueOrder(data, pushToast) {
 
   const pieces = plan.skuDeducts.reduce((s, d) => s + d.qty, 0);
 
-  deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก · ออร์เดอร์ ${id} (${plan.channelLabel})${dateNote}`);
+  deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก · ออร์เดอร์ ${id} (${plan.channelLabel})${dateNote}`,
+    { at: od.backdated ? od.createdAt : undefined });
   // Same tick as the qty write, before any other await — applyLocPicks re-reads p.qty.
   if (typeof applyLocPicks === "function") {
     const r = await applyLocPicks(plan.locPicks);
@@ -4079,7 +4080,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
   useEffect(() => {
     let dead = false;
     if (typeof dbLoadStockAdjustments === "function") {
-      dbLoadStockAdjustments(product.sku, 12)
+      dbLoadStockAdjustments(product.sku, 60)
         .then(rows => { if (!dead) setMoves(Array.isArray(rows) ? rows : []); })
         .catch(() => { if (!dead) setMoves([]); });
     } else setMoves([]);
@@ -4213,8 +4214,8 @@ function ProductDrawer({ product, onClose, pushToast }) {
                 ปรับสต็อก — so this panel is the product's real stock history. */}
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
               <div style={{ fontWeight: 600, fontSize: 13 }}>ประวัติการเคลื่อนไหวสต็อกล่าสุด</div>
-              {/* Entry order (dbLoadStockAdjustments sorts by id) — so before → after chains. */}
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>เรียงตามลำดับที่บันทึก</span>
+              {/* Event order (ledgerTimeline) — before → after re-derived so it chains in that order. */}
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>เรียงตามเวลาที่เกิดขึ้นจริง</span>
             </div>
             <div className="stack" style={{ gap: 8 }}>
               {moves === null && (
@@ -4224,11 +4225,11 @@ function ProductDrawer({ product, onClose, pushToast }) {
                 <div style={{ fontSize: 12, color: "var(--muted)", padding: 10, background: "var(--surface-2)", borderRadius: 8 }}>ยังไม่มีการเคลื่อนไหวสต็อก</div>
               )}
               {(() => {
-                const back = (typeof ledgerBackdatedIds === "function") ? ledgerBackdatedIds(moves || []) : new Set();
-                return (moves || []).map(m => {
-                  const isBack = back.has(m.id);
-                  const stamp = new Date(m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-                  const hasBA = m.qty_before != null && m.qty_after != null;
+                const tl = (typeof ledgerTimeline === "function") ? ledgerTimeline(moves || [], (PRODUCTS.find(x => x.sku === product.sku) || product).qty, { complete: (moves || []).length < 60 }) : (moves || []);
+                return tl.slice(0, 15).map(m => {
+                  const isBack = !!m.backdated;
+                  const stamp = new Date(m.eventAt || m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+                  const hasBA = m.runAfter != null || (m.qty_before != null && m.qty_after != null);
                   return (
                     <div key={m.id} className="row" style={{ padding: 10, background: "var(--surface-2)", borderRadius: 8, gap: 12 }}>
                       <ActivityDot type={m.delta > 0 ? "in" : "out"}/>
@@ -4237,8 +4238,8 @@ function ProductDrawer({ product, onClose, pushToast }) {
                         <div style={{ fontSize: 11, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                           {isBack
                             ? <span className="badge badge-info" style={{ fontSize: 10, padding: "1px 7px" }}
-                                    title="บันทึกภายหลังโดยลงวันที่ย้อนหลัง — แสดงตรงลำดับที่บันทึก จึงมีวันที่เก่ากว่ารายการด้านล่าง">
-                                ลงวันที่ย้อนหลัง {stamp}
+                                    title="บันทึกภายหลังโดยลงวันที่ย้อนหลัง — แสดงตรงวันเวลาที่เกิดขึ้นจริง">
+                                ย้อนหลัง {stamp}
                               </span>
                             : <span>{stamp}</span>}
                           <span>· {m.created_by || "ระบบ"}</span>
@@ -4248,7 +4249,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
                         <div className="tnum" style={{ fontSize: 14, fontWeight: 500, color: m.delta > 0 ? "var(--success)" : "var(--danger)" }}>
                           {m.delta > 0 ? "+" : ""}{m.delta}
                         </div>
-                        {hasBA && <div className="tnum" style={{ fontSize: 11, color: "var(--muted)" }}>{m.qty_before} → {m.qty_after}</div>}
+                        {hasBA && <div className="tnum" style={{ fontSize: 11, color: "var(--muted)" }}>{m.runAfter != null ? m.runBefore : m.qty_before} → {m.runAfter != null ? m.runAfter : m.qty_after}</div>}
                       </div>
                     </div>
                   );
@@ -5973,7 +5974,8 @@ function SellProductModal({ onClose, onSellComplete, presetSku }) {
     // The order number exists BEFORE the stock moves, so the movement history and
     // the activity entry both name it (ประวัติการแก้ไข → order detail / timeline).
     const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
-    deductManyAndPersist(allDeductions, "ขายสินค้า · " + (ship.name || "ลูกค้าใหม่") + " · ออร์เดอร์ " + orderId);
+    deductManyAndPersist(allDeductions, "ขายสินค้า · " + (ship.name || "ลูกค้าใหม่") + " · ออร์เดอร์ " + orderId,
+      { at: typeof stockOutAt === "function" ? stockOutAt(when) : undefined });
     // Same tick, before any other await: applyLocPicks re-reads the just-written qty.
     if (typeof applyLocPicks === "function") {
       const locRes = await applyLocPicks(locPicks);

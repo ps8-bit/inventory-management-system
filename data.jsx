@@ -643,7 +643,7 @@ function recordStockMoves(entries, reason) {
   if (typeof dbInsertStockAdjustment !== "function") return;
   const rows = (Array.isArray(entries) ? entries : [])
     .map(e => ({ sku: e && e.sku, delta: Math.trunc(Number(e && e.delta) || 0), reason: (e && e.reason) || reason || "",
-                  before: e && e.before, after: e && e.after }))
+                  before: e && e.before, after: e && e.after, createdAt: (e && e.createdAt) || undefined }))
     .filter(e => e.sku && e.delta);
   if (!rows.length) return;
   writeLedgerRows(rows);
@@ -770,7 +770,10 @@ function deductStockAndPersist(sku, qty, reason) {
   const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
   if (sku in adj) { delete adj[sku]; if (typeof applyStockAdj === "function") applyStockAdj(adj); }
 }
-function deductManyAndPersist(deductions, reason) {
+/* opts.at = ISO time the sale really happened (a backdated วันเวลา pick) — the
+   history row is dated then, like a backdated ปรับสต็อก, so the product's
+   timeline sorts it onto the day it sold. Stock still moves now. */
+function deductManyAndPersist(deductions, reason, opts) {
   deductions.forEach(({ sku, qty }) => {
     const p = PRODUCTS.find(x => x.sku === sku);
     if (p) p.qty = Math.max(0, p.qty - qty);
@@ -782,7 +785,7 @@ function deductManyAndPersist(deductions, reason) {
     if (!d || !d.sku) return;
     wanted.set(d.sku, (wanted.get(d.sku) || 0) + (Number(d.qty) || 0));
   });
-  _recordDeduction(_deductRemote(deductions), wanted, reason || "ตัดสต็อก");
+  _recordDeduction(_deductRemote(deductions), wanted, reason || "ตัดสต็อก", opts && opts.at);
   const adj = (typeof getStockAdj === "function") ? { ...getStockAdj() } : {};
   let changed = false;
   deductions.forEach(({ sku }) => { if (sku in adj) { delete adj[sku]; changed = true; } });
@@ -792,7 +795,7 @@ function deductManyAndPersist(deductions, reason) {
    Recording the REQUESTED quantity was wrong in two ways: an oversell that the
    server floors at 0 removed fewer pieces than asked, and an RLS-blocked sku
    removed none at all — both used to be logged as if they had gone through. */
-function _recordDeduction(write, wanted, reason) {
+function _recordDeduction(write, wanted, reason, at) {
   Promise.resolve(write).then(res => {
     const suffix = _pendingSuffix(res);
     const moves = (res && res.ok) ? _serverMoveMap(res.rows) : new Map();
@@ -801,13 +804,13 @@ function _recordDeduction(write, wanted, reason) {
       const d = _movedDelta(res, sku, -(Number(qty) || 0));
       if (!d) return;
       const m = moves.get(sku);
-      rows.push(m && m.before != null ? { sku, delta: d, reason: reason + suffix, before: m.before, after: m.after }
-                                      : { sku, delta: d, reason: reason + suffix });
+      rows.push(m && m.before != null ? { sku, delta: d, reason: reason + suffix, before: m.before, after: m.after, createdAt: at }
+                                      : { sku, delta: d, reason: reason + suffix, createdAt: at });
     });
     recordStockMoves(rows, reason);
   }).catch(() => {
     const rows = [];
-    wanted.forEach((qty, sku) => rows.push({ sku, delta: -(Number(qty) || 0), reason }));
+    wanted.forEach((qty, sku) => rows.push({ sku, delta: -(Number(qty) || 0), reason, createdAt: at }));
     recordStockMoves(rows, reason);
   });
 }
@@ -2922,6 +2925,11 @@ function stockOutStamp(local) {
   const wall = nowBkkLocal(t);
   return { dateIso: wall.slice(0, 10), ts: wall.slice(11, 16), createdAt: new Date(t).toISOString(), backdated: now - t >= 60 * 1000 };
 }
+// The ISO time a backdated pick dates its history row to; undefined = now.
+function stockOutAt(local) {
+  const st = local ? stockOutStamp(local) : null;
+  return st && st.backdated ? st.createdAt : undefined;
+}
 // "30 ก.ย. 2569 14:30" — for toasts / audit notes / history reasons.
 function stockOutStampLabel(stamp) {
   return stamp ? `${isoToThai(stamp.dateIso)} ${stamp.ts}`.trim() : "";
@@ -4100,6 +4108,50 @@ function ledgerBackdatedIds(rows) {
   return out;
 }
 
+/* ── Product stock timeline, in the order things REALLY happened ──
+   The ledger's own before/after belong to ENTRY order (the server stamps them
+   when the row is written), so a sale keyed in today but dated yesterday chains
+   only where it was typed. The owner reads the history as a timeline, so the
+   forks sort by event time and RE-DERIVE before → after from the deltas,
+   anchored on the newest-entered row's server qty_after (= stock right now).
+   Event time = created_at (backdated rows are written with the picked moment),
+   or — for ตัดสต็อก rows written before they were dated — the "ขายวันที่ …"
+   their reason carries. When the fetch hit its limit (opts.complete false), rows
+   whose event time is older than the oldest row fetched are dropped: an
+   unfetched row could belong between them. */
+const _LEDGER_TH_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+function ledgerEventTime(r) {
+  const t = Date.parse(r && r.created_at);
+  const m = /ขายวันที่ (\d{1,2}) (\S+) (\d{4})(?: (\d{2}):(\d{2}))?/.exec(String((r && r.reason) || ""));
+  if (m) {
+    const mi = _LEDGER_TH_MONTHS.indexOf(m[2]);
+    const pad = (n) => String(n).padStart(2, "0");
+    // Date-only (older desktop cuts): the sale time is unknown, so place it at the
+    // END of that day — before it, a same-day receive could look like it came
+    // after the sale and the re-derived stock would dip below zero.
+    const e = mi < 0 ? NaN : Date.parse(`${Number(m[3]) - 543}-${pad(mi + 1)}-${pad(m[1])}T${m[4] ? m[4] + ":" + m[5] + ":00" : "23:59:59"}+07:00`);
+    if (Number.isFinite(e) && (!Number.isFinite(t) || e < t)) return e;
+  }
+  return t;
+}
+// rows = stock_adjustments for ONE sku, any order. nowQty = fallback anchor.
+// opts.complete = rows is the sku's whole history (fewer than the fetch limit).
+// → [{ ...row, eventAt (ms), backdated, runBefore, runAfter }] newest event first.
+function ledgerTimeline(rows, nowQty, opts) {
+  const list = (rows || []).filter(r => r && Number.isFinite(Number(r.delta)));
+  if (!list.length) return [];
+  const byId = list.slice().sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0));
+  const newest = byId[0];
+  let after = newest.qty_after != null && Number.isFinite(Number(newest.qty_after)) ? Number(newest.qty_after) : (Number(nowQty) || 0);
+  const back = ledgerBackdatedIds(list);
+  const enteredFloor = (opts && opts.complete) ? NaN : Date.parse(byId[byId.length - 1].created_at);
+  return list
+    .map(r => { const ev = ledgerEventTime(r); return Object.assign({}, r, { eventAt: ev, backdated: back.has(r.id) || ev < Date.parse(r.created_at) - 60 * 1000 }); })
+    .filter(r => !Number.isFinite(enteredFloor) || !Number.isFinite(r.eventAt) || r.eventAt >= enteredFloor)
+    .sort((a, b) => ((b.eventAt || 0) - (a.eventAt || 0)) || ((Number(b.id) || 0) - (Number(a.id) || 0)))
+    .map(r => { const d = Math.trunc(Number(r.delta)); const o = Object.assign(r, { runAfter: after, runBefore: after - d }); after -= d; return o; });
+}
+
 /* Reconcile system stock to the physical count. counts = { sku: countedQty }.
    opts = { reserved, pulled } — see stockCountPlan; omitted = no รอแพ็ค adjustment.
    Returns the list of actual changes [{ sku, name, from, to, delta, … }].
@@ -4972,7 +5024,7 @@ Object.assign(window, {
   ensureThaiAddrIndex, getThaiAddrIndex, parseThaiAddrTail,
   playScanBeep, playScanErrorBeep, genOrderId, snapLineItem, buildIssuePlan,
   lastIssueChannel, rememberIssueChannel, issueShipFields, cancelOrdersAndRestock, addItemsToPackOrder, removeItemFromPackOrder, packOrderAdds, ISSUE_CARRIERS, issueOrderDate,
-  nowBkkLocal, stockOutStamp, stockOutStampLabel,
+  nowBkkLocal, stockOutStamp, stockOutAt, stockOutStampLabel, ledgerEventTime, ledgerTimeline,
   genOpId, claimCommit, releaseCommit, commitFingerprint, duplicateCommitToast,
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, writeLedgerRows, receiveStockAndRecord,

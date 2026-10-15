@@ -1928,7 +1928,7 @@ function MProductDetail({ ctx }) {
   useEffectM(() => {
     let dead = false;
     if (typeof dbLoadStockAdjustments === "function" && moveSku) {
-      dbLoadStockAdjustments(moveSku, 12)
+      dbLoadStockAdjustments(moveSku, 60)
         .then(rows => { if (!dead) setMoves(Array.isArray(rows) ? rows : []); })
         .catch(() => { if (!dead) setMoves([]); });
     } else setMoves([]);
@@ -2115,8 +2115,8 @@ function MProductDetail({ ctx }) {
 
         <div className="m-section-label" style={{ padding: "8px 4px", display: "flex", justifyContent: "space-between" }}>
           <span>ความเคลื่อนไหวสต็อกล่าสุด</span>
-          {/* Entry order (dbLoadStockAdjustments sorts by id) — so before → after chains. */}
-          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>ตามลำดับที่บันทึก</span>
+          {/* Event order (ledgerTimeline) — before → after re-derived so it chains in that order. */}
+          <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>ตามเวลาที่เกิดขึ้นจริง</span>
         </div>
         <div className="m-card" style={{ padding: "6px 10px" }}>
           {moves === null && (
@@ -2126,11 +2126,11 @@ function MProductDetail({ ctx }) {
             <div style={{ fontSize: 12, color: "var(--muted)", padding: "10px 0", textAlign: "center" }}>ยังไม่มีการเคลื่อนไหวสต็อก</div>
           )}
           {(() => {
-            const back = (typeof ledgerBackdatedIds === "function") ? ledgerBackdatedIds(moves || []) : new Set();
-            return (moves || []).map(m => {
-              const isBack = back.has(m.id);
-              const stamp = new Date(m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-              const hasBA = m.qty_before != null && m.qty_after != null;
+            const tl = (typeof ledgerTimeline === "function") ? ledgerTimeline(moves || [], base && base.qty, { complete: (moves || []).length < 60 }) : (moves || []);
+            return tl.slice(0, 15).map(m => {
+              const isBack = !!m.backdated;
+              const stamp = new Date(m.eventAt || m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+              const hasBA = m.runAfter != null || (m.qty_before != null && m.qty_after != null);
               return (
                 <div key={m.id} className="row" style={{ gap: 10, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
                   <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: m.delta > 0 ? "var(--success)" : "var(--danger)" }}/>
@@ -2138,7 +2138,7 @@ function MProductDetail({ ctx }) {
                     <div title={m.reason || "ปรับสต็อก"} style={{ fontSize: 12, overflow: "hidden", whiteSpace: "normal", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", wordBreak: "break-word" }}>{m.reason || "ปรับสต็อก"}</div>
                     <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 1, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
                       {isBack
-                        ? <span className="badge badge-info" style={{ fontSize: 9.5, padding: "1px 6px" }}>ลงวันที่ย้อนหลัง {stamp}</span>
+                        ? <span className="badge badge-info" style={{ fontSize: 9.5, padding: "1px 6px" }}>ย้อนหลัง {stamp}</span>
                         : <span>{stamp}</span>}
                       <span>· {m.created_by || "ระบบ"}</span>
                     </div>
@@ -2147,7 +2147,7 @@ function MProductDetail({ ctx }) {
                     <div className="tnum" style={{ fontSize: 13, fontWeight: 600, color: m.delta > 0 ? "var(--success)" : "var(--danger)" }}>
                       {m.delta > 0 ? "+" : ""}{m.delta}
                     </div>
-                    {hasBA && <div className="tnum" style={{ fontSize: 10, color: "var(--muted)" }}>{m.qty_before} → {m.qty_after}</div>}
+                    {hasBA && <div className="tnum" style={{ fontSize: 10, color: "var(--muted)" }}>{m.runAfter != null ? m.runBefore : m.qty_before} → {m.runAfter != null ? m.runAfter : m.qty_after}</div>}
                   </div>
                 </div>
               );
@@ -2982,7 +2982,8 @@ function MIssue({ ctx }) {
       : { dateIso: todayStr, ts: "", backdated: false, createdAt: new Date().toISOString() };
     const dateNote = od.backdated ? ` · ขายวันที่ ${typeof isoToThai === "function" ? isoToThai(od.dateIso) : od.dateIso}${od.ts ? " " + od.ts : ""}` : "";
 
-    deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก (มือถือ) · ออร์เดอร์ ${id} (${plan.channelLabel})${dateNote}`);
+    deductManyAndPersist(plan.skuDeducts, `ตัดสต็อก (มือถือ) · ออร์เดอร์ ${id} (${plan.channelLabel})${dateNote}`,
+      { at: od.backdated ? od.createdAt : undefined });
     // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
     if (typeof applyLocPicks === "function") {
       const r = await applyLocPicks(plan.locPicks);
@@ -3565,7 +3566,8 @@ function MSell({ ctx }) {
     });
     // The order number exists BEFORE the stock moves (see SellProductModal).
     const orderId = (typeof genOrderId === "function" ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000));
-    if (typeof deductManyAndPersist === "function") deductManyAndPersist(allDeductions, "ขายสินค้า (มือถือ) · " + (ship.name || "ลูกค้าใหม่") + " · ออร์เดอร์ " + orderId);
+    if (typeof deductManyAndPersist === "function") deductManyAndPersist(allDeductions, "ขายสินค้า (มือถือ) · " + (ship.name || "ลูกค้าใหม่") + " · ออร์เดอร์ " + orderId,
+      { at: typeof stockOutAt === "function" ? stockOutAt(when) : undefined });
     // Same tick as the qty write — applyLocPicks re-reads the new p.qty.
     if (typeof applyLocPicks === "function") {
       const locRes = await applyLocPicks(locPicks);

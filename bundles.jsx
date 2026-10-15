@@ -456,7 +456,8 @@ function BundleDrawer({ bundle, onClose, onEdit, onDelete, onSell, pushToast }) 
     // Order number first, so the stock movement names the order it belongs to.
     const id = (typeof genOrderId === "function") ? genOrderId() : "SO-" + Math.floor(Math.random() * 90000000 + 10000000);
     deductManyAndPersist(bundle.items.map(item => ({ sku: item.sku, qty: item.qty * sellQty })),
-      `ขายชุดสินค้า ${bundle.name} ×${sellQty} · ออร์เดอร์ ${id}`);
+      `ขายชุดสินค้า ${bundle.name} ×${sellQty} · ออร์เดอร์ ${id}`,
+      { at: typeof stockOutAt === "function" ? stockOutAt(when) : undefined });
     /* Third sell path (shared by both forks) — without this every component of a
        bundle sale drifts its per-position split. No per-component picker: each
        takes its own pick-first shelf, the SAME default the other flows use. */
