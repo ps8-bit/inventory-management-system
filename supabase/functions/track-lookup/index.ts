@@ -87,7 +87,8 @@ function rateLimited(ip: string): boolean {
 Deno.serve(async (req) => {
   const cors = corsFor(req);
   const json = (b: unknown, s = 200) =>
-    new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json" } });
+    // no-store: in-app browsers (Facebook/LINE) must never reuse an earlier status.
+    new Response(JSON.stringify(b), { status: s, headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "no-store" } });
 
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405, headers: cors });
