@@ -4116,8 +4116,9 @@ function ledgerBackdatedIds(rows) {
    anchored on the newest-entered row's server qty_after (= stock right now).
    Event time = created_at (backdated rows are written with the picked moment),
    or — for ตัดสต็อก rows written before they were dated — the "ขายวันที่ …"
-   their reason carries. Rows whose event time is older than the oldest row in
-   the fetched window are dropped: an unfetched row could belong between them. */
+   their reason carries. When the fetch hit its limit (opts.complete false), rows
+   whose event time is older than the oldest row fetched are dropped: an
+   unfetched row could belong between them. */
 const _LEDGER_TH_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
 function ledgerEventTime(r) {
   const t = Date.parse(r && r.created_at);
@@ -4125,21 +4126,25 @@ function ledgerEventTime(r) {
   if (m) {
     const mi = _LEDGER_TH_MONTHS.indexOf(m[2]);
     const pad = (n) => String(n).padStart(2, "0");
-    const e = mi < 0 ? NaN : Date.parse(`${Number(m[3]) - 543}-${pad(mi + 1)}-${pad(m[1])}T${m[4] || "12"}:${m[5] || "00"}:00+07:00`);
+    // Date-only (older desktop cuts): the sale time is unknown, so place it at the
+    // END of that day — before it, a same-day receive could look like it came
+    // after the sale and the re-derived stock would dip below zero.
+    const e = mi < 0 ? NaN : Date.parse(`${Number(m[3]) - 543}-${pad(mi + 1)}-${pad(m[1])}T${m[4] ? m[4] + ":" + m[5] + ":00" : "23:59:59"}+07:00`);
     if (Number.isFinite(e) && (!Number.isFinite(t) || e < t)) return e;
   }
   return t;
 }
 // rows = stock_adjustments for ONE sku, any order. nowQty = fallback anchor.
+// opts.complete = rows is the sku's whole history (fewer than the fetch limit).
 // → [{ ...row, eventAt (ms), backdated, runBefore, runAfter }] newest event first.
-function ledgerTimeline(rows, nowQty) {
+function ledgerTimeline(rows, nowQty, opts) {
   const list = (rows || []).filter(r => r && Number.isFinite(Number(r.delta)));
   if (!list.length) return [];
   const byId = list.slice().sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0));
   const newest = byId[0];
   let after = newest.qty_after != null && Number.isFinite(Number(newest.qty_after)) ? Number(newest.qty_after) : (Number(nowQty) || 0);
   const back = ledgerBackdatedIds(list);
-  const enteredFloor = Date.parse(byId[byId.length - 1].created_at);
+  const enteredFloor = (opts && opts.complete) ? NaN : Date.parse(byId[byId.length - 1].created_at);
   return list
     .map(r => { const ev = ledgerEventTime(r); return Object.assign({}, r, { eventAt: ev, backdated: back.has(r.id) || ev < Date.parse(r.created_at) - 60 * 1000 }); })
     .filter(r => !Number.isFinite(enteredFloor) || !Number.isFinite(r.eventAt) || r.eventAt >= enteredFloor)

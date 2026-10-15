@@ -4225,7 +4225,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
                 <div style={{ fontSize: 12, color: "var(--muted)", padding: 10, background: "var(--surface-2)", borderRadius: 8 }}>ยังไม่มีการเคลื่อนไหวสต็อก</div>
               )}
               {(() => {
-                const tl = (typeof ledgerTimeline === "function") ? ledgerTimeline(moves || [], product.qty) : (moves || []);
+                const tl = (typeof ledgerTimeline === "function") ? ledgerTimeline(moves || [], (PRODUCTS.find(x => x.sku === product.sku) || product).qty, { complete: (moves || []).length < 60 }) : (moves || []);
                 return tl.slice(0, 15).map(m => {
                   const isBack = !!m.backdated;
                   const stamp = new Date(m.eventAt || m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });

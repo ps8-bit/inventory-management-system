@@ -2126,7 +2126,7 @@ function MProductDetail({ ctx }) {
             <div style={{ fontSize: 12, color: "var(--muted)", padding: "10px 0", textAlign: "center" }}>ยังไม่มีการเคลื่อนไหวสต็อก</div>
           )}
           {(() => {
-            const tl = (typeof ledgerTimeline === "function") ? ledgerTimeline(moves || [], base && base.qty) : (moves || []);
+            const tl = (typeof ledgerTimeline === "function") ? ledgerTimeline(moves || [], base && base.qty, { complete: (moves || []).length < 60 }) : (moves || []);
             return tl.slice(0, 15).map(m => {
               const isBack = !!m.backdated;
               const stamp = new Date(m.eventAt || m.created_at).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
