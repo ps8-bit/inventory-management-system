@@ -880,7 +880,7 @@ function receiveStockAndRecord(lines, reason, opts) {
    never creates an order. External sales recorded here ("ขายผ่าน …") DO feed
    analytics and the channel cards via saleMoveOrders() — staff record almost
    every sale this way. */
-function applyStockAdjustment({ sku, delta, reason, note, source, when, unitPrice }) {
+function applyStockAdjustment({ sku, delta, reason, note, source, when, unitPrice, detail }) {
   const d = Math.trunc(Number(delta) || 0);
   const p = PRODUCTS.find(x => x.sku === sku);
   if (!p || !d) return { ok: false };
@@ -911,7 +911,10 @@ function applyStockAdjustment({ sku, delta, reason, note, source, when, unitPric
   // keeps its real time: it records when someone keyed it in.
   const back = when ? stockOutStamp(when) : null;
   const backAt = back && back.backdated ? back.createdAt : undefined;
+  // `detail` = this SKU's own explanation (ตั้งค่าเป็น: "นับได้ X − รอแพ็ค Y = Z"),
+  // so the history says why the stock didn't land on the typed number.
   const fullReason = [noteText ? `${reasonLabel} — ${noteText}` : reasonLabel,
+    String(detail || "").trim(),
     backAt ? `ย้อนหลัง ${stockOutStampLabel(back)}` : ""].filter(Boolean).join(" · ");
 
   /* ── Why the history is written AFTER the server answers ──
@@ -1041,7 +1044,7 @@ async function commitQuickSale({ lines, reasonId, note, source, when }) {
    items at once, and both must stay on the single choke point above, so this
    only loops it and aggregates: per-SKU audit rows + stock_adjustments history
    stay granular (the ProductDrawer history panel reads them per product).
-   items = [{ sku, delta }] → { ok, applied, skipped, net, results }. */
+   items = [{ sku, delta, detail? }] → { ok, applied, skipped, net, results }. */
 function applyStockAdjustmentBatch(items, opts) {
   const { reason, note, source, when } = opts || {};
   const list = Array.isArray(items) ? items : [];
@@ -1049,7 +1052,7 @@ function applyStockAdjustmentBatch(items, opts) {
   let applied = 0, skipped = 0, net = 0;
   list.forEach(it => {
     if (!it || !it.sku) { skipped++; return; }
-    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source, when, unitPrice: it.unitPrice }) || { ok: false };
+    const res = applyStockAdjustment({ sku: it.sku, delta: it.delta, reason, note, source, when, unitPrice: it.unitPrice, detail: it.detail }) || { ok: false };
     results.push({ sku: it.sku, ...res });
     // eff === 0 means the clamp ate the change (already 0 คงเหลือ) — not applied.
     if (res.ok && res.eff) { applied++; net += res.eff; } else skipped++;
@@ -3819,15 +3822,170 @@ function stockCountPlan(counts, reserved, pulled) {
   return out;
 }
 
-/* Why the count landed where it did — appended to the ledger reason so the
-   product history explains a count that isn't simply "what was counted". */
-function _countNote(c) {
+/* Why a count landed where it did — written into the ledger reason so the
+   product history explains a count that isn't simply "what was counted".
+   Shared by ตรวจนับ (_countNote) and ปรับสต็อก ตั้งค่าเป็น (adjustSetTarget). */
+function pendingPackNote(c) {
   if (!c || !c.reserved) return "";
   const ids = (c.orders || []).slice(0, 4).map(id => orderShortId({ id })).join(", ")
     + ((c.orders || []).length > 4 ? ` +${c.orders.length - 4}` : "");
   return c.subtracted
-    ? ` · นับได้ ${c.counted} − รอแพ็ค ${c.reserved} = ${c.to}${ids ? ` (${ids})` : ""}`
-    : ` · นับได้ ${c.counted} (รอแพ็ค ${c.reserved} ชิ้นหยิบออกจากชั้นแล้ว — ไม่หัก)`;
+    ? `นับได้ ${c.counted} − รอแพ็ค ${c.reserved} = ${c.to}${ids ? ` (${ids})` : ""}`
+    : `นับได้ ${c.counted} (รอแพ็ค ${c.reserved} ชิ้นหยิบออกจากชั้นแล้ว — ไม่หัก)`;
+}
+function _countNote(c) {
+  const n = pendingPackNote(c);
+  return n ? " · " + n : "";
+}
+
+/* ── ปรับสต็อก ตั้งค่าเป็น = a count too ─────────────────────────────────
+   ตั้งค่าเป็น is a number read off the shelf, so it has the same hole the
+   ตรวจนับ screen had: pieces cut (ตัดสต็อก) but still รอแพ็ค sit on the shelf
+   while the system has already taken them off. 3 of the 6 bad corrections
+   since 2026-10-06 came through here (นับสต็อกผิด / แก้ไขยอด → ตั้งค่าเป็น),
+   e.g. AFG-OT21-BK 0 → 9 with 4 pieces still waiting to be packed.
+   Same rule and the same choice as stockCountPlan: by default the typed number
+   still includes them → subtract; pulled = the user says they are already off
+   the shelf → write the number as typed.
+   Returns { counted, reserved, orders, subtracted, to }. */
+function adjustSetTarget(sku, typed, reserved, pulled) {
+  const counted = Math.max(0, Math.round(Number(typed) || 0));
+  const r = (reserved && reserved[sku]) || null;
+  const res = r ? r.qty : 0;
+  const subtracted = res > 0 && !pulled;
+  return { counted, reserved: res, orders: r ? r.orders : [], subtracted, to: Math.max(0, counted - (subtracted ? res : 0)) };
+}
+
+/* ── Backdated movement vs the SKU's latest count ──────────────────────
+   A count (ตรวจนับสต็อก…) or correction (นับสต็อกผิด…) sets stock to what was
+   physically there at that moment, so every movement that happened BEFORE it is
+   already inside the number. A ปรับสต็อก entered later but dated before that
+   count moves the stock a second time: 10 SKUs drifted this way by 2026-10-15
+   (AFG-OT21-BK: a +30 receive dated 09-24, entered after the 09-28 count).
+   loadLatestCounts(skus) → { sku: latest such ledger row } (null = couldn't check).
+   backdateCountConflicts(latest, whenIso, skus) → [{ sku, row }] for the SKUs
+   whose latest count is dated after the movement. */
+const COUNT_REASON_RE = /^(ตรวจนับสต็อก|นับสต็อกผิด)/;
+function isCountReason(reason) { return COUNT_REASON_RE.test(String(reason || "")); }
+async function loadLatestCounts(skus) {
+  if (typeof dbLoadLatestCounts !== "function") return null;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return null;
+  try { return await dbLoadLatestCounts(skus); } catch (e) { return null; }
+}
+function backdateCountConflicts(latest, whenIso, skus) {
+  const at = Date.parse(whenIso || "");
+  if (!latest || !Number.isFinite(at)) return [];
+  const out = [];
+  [...new Set(skus || [])].forEach(sku => {
+    const row = latest[sku];
+    if (row && isCountReason(row.reason) && Date.parse(row.created_at) > at) out.push({ sku, row });
+  });
+  return out;
+}
+// "28 ก.ย. 2569 14:30" (Bangkok) for a stored ledger timestamp.
+function ledgerStampLabel(iso) {
+  const d = bangkokDateOf(iso);
+  return d ? `${isoToThai(d)} ${bangkokTimeOf(iso)}`.trim() : "";
+}
+/* Both ปรับสต็อก forks: the latest count per selected SKU, fetched only while
+   the picked date is ย้อนหลัง. { latest, loading, failed }. */
+function useLatestCounts(skus, active) {
+  const key = active ? [...new Set((skus || []).filter(Boolean))].sort().join("\n") : "";
+  const [st, setSt] = React.useState({ key: "", latest: null, failed: false });
+  React.useEffect(() => {
+    if (!key) return;
+    let alive = true;
+    const t = setTimeout(() => {
+      loadLatestCounts(key.split("\n")).then(latest => {
+        if (alive) setSt({ key, latest: latest || null, failed: !latest });
+      });
+    }, 200);
+    return () => { alive = false; clearTimeout(t); };
+  }, [key]);
+  if (!key) return { latest: null, loading: false, failed: false };
+  if (st.key !== key) return { latest: null, loading: true, failed: false };
+  return { latest: st.latest, loading: false, failed: st.failed };
+}
+
+/* The same guard for the sell screens (ขายออก, ตัดสต็อก) — a backdated sale
+   entered after a count double-deducts exactly like a backdated ปรับสต็อก.
+   skus = the SKUs that will move; when = the picker value.
+   → { ok, loading, failed, conflicts, acked, setAcked, remove? } — `ok` gates submit. */
+function useBackdateGuard(skus, when) {
+  const st = (when && typeof stockOutStamp === "function") ? stockOutStamp(when) : null;
+  const backdated = !!(st && st.backdated);
+  const lc = useLatestCounts(skus, backdated);
+  const conflicts = backdated ? backdateCountConflicts(lc.latest, st.createdAt, skus) : [];
+  const key = conflicts.length ? st.createdAt + "|" + conflicts.map(c => c.sku).sort().join(",") : "";
+  const [ackKey, setAckKey] = React.useState("");
+  const acked = !!key && ackKey === key;
+  return {
+    backdated, loading: backdated && lc.loading, failed: backdated && lc.failed, conflicts, acked,
+    setAcked: (v) => setAckKey(v ? key : ""),
+    ok: !(backdated && lc.loading) && (!conflicts.length || acked)
+  };
+}
+/* Warning panel for useBackdateGuard — shared by desktop and mobile sell screens.
+   onRemove(skus) drops the conflicting lines from the cart. */
+function BackdateCountWarning({ guard, onRemove, mobile }) {
+  if (!guard || !guard.backdated) return null;
+  if (guard.loading) return <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>กำลังตรวจการนับสต็อกล่าสุด…</div>;
+  if (guard.failed) return (
+    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "var(--surface-2)", lineHeight: 1.5 }}>
+      ตรวจไม่ได้ว่ามีการนับสต็อกหลังวันที่นี้หรือไม่ (ออฟไลน์?) — ถ้านับไปแล้วหลังวันนั้น ยอดที่นับได้รวมรายการนี้ไว้แล้ว อย่าบันทึกซ้ำ
+    </div>
+  );
+  if (!guard.conflicts.length) return null;
+  return (
+    <div style={{ marginTop: 10, padding: 12, borderRadius: mobile ? 12 : 10, background: "var(--danger-soft)", border: "1px solid var(--danger)", fontSize: 12, lineHeight: 1.5 }}>
+      <div style={{ fontWeight: 700, fontSize: 13, color: "var(--danger)", display: "flex", alignItems: "flex-start", gap: 6 }}>
+        {typeof Icons !== "undefined" && Icons.Warn && <Icons.Warn size={14} style={{ flexShrink: 0, marginTop: 3 }}/>}
+        <span>วันที่ย้อนหลังนี้อยู่ก่อนการนับสต็อกครั้งล่าสุด — สต็อกจะถูกหักซ้ำ</span>
+      </div>
+      <div style={{ marginTop: 4 }}>
+        การนับครั้งนั้นเห็นของจริงบนชั้นหลังจากขายไปแล้ว จำนวนที่นับได้จึงหักชิ้นที่ขายไว้แล้ว ถ้าบันทึกตอนนี้ สต็อกจะถูกหักซ้ำอีกรอบ (ระบบจะต่ำกว่าของจริง)
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+        {guard.conflicts.map(c => (
+          <div key={c.sku} style={{ padding: "6px 8px", borderRadius: 8, background: "var(--surface)" }}>
+            <span className="mono" style={{ fontWeight: 600, fontSize: 11.5 }}>{c.sku}</span>
+            <span style={{ fontSize: 11, color: "var(--muted)" }}> · นับล่าสุด {ledgerStampLabel(c.row.created_at)} · {c.row.reason}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+        {onRemove && (
+          <button type="button" className={mobile ? "m-chip" : "btn btn-sm"} style={mobile ? { width: "100%", justifyContent: "center" } : undefined}
+                  onClick={() => onRemove(guard.conflicts.map(c => c.sku))}>
+            เอา {guard.conflicts.length} รายการนี้ออก
+          </button>
+        )}
+        <label style={{ display: "flex", gap: 6, cursor: "pointer", alignItems: "flex-start" }}>
+          <input type="checkbox" style={{ marginTop: 2 }} checked={guard.acked} onChange={e => guard.setAcked(e.target.checked)}/>
+          <span>การนับครั้งนั้นยังไม่รวมการขายนี้ — บันทึกต่อ</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+/* ── Movement history in entry order ───────────────────────────────────
+   The product history lists stock_adjustments by id (the order rows were
+   entered), so qty_before → qty_after reads as one unbroken chain. A row dated
+   ย้อนหลัง then sits where it was entered, with a date older than the rows
+   below it — this returns the ids to label, so that date doesn't look like a
+   sorting bug. rows = any order; a row counts as backdated when its reason says
+   so or an earlier-entered row carries a later date (10-minute slack for rows
+   that only waited in the offline queue). */
+function ledgerBackdatedIds(rows) {
+  const out = new Set();
+  let maxSeen = -Infinity;
+  (rows || []).slice().sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0)).forEach(r => {
+    const t = Date.parse(r && r.created_at);
+    if (/ย้อนหลัง/.test(String((r && r.reason) || "")) || (Number.isFinite(t) && maxSeen - t > 10 * 60 * 1000)) out.add(r.id);
+    if (Number.isFinite(t) && t > maxSeen) maxSeen = t;
+  });
+  return out;
 }
 
 /* Reconcile system stock to the physical count. counts = { sku: countedQty }.
@@ -4707,6 +4865,7 @@ Object.assign(window, {
   pendingStockDeltas, applyPendingStockDeltas, beginProductsFetch, hydrateProductsFromServer,
   recordStockMoves, writeLedgerRows, receiveStockAndRecord,
   loadStockTake, saveStockTake, applyStockCounts, pendingPackReserved, stockCountPlan,
+  pendingPackNote, adjustSetTarget, isCountReason, loadLatestCounts, backdateCountConflicts, ledgerStampLabel, useLatestCounts, ledgerBackdatedIds, useBackdateGuard, BackdateCountWarning,
   loadWooCatalog, saveWooCatalog, wooCatalogLookup, upsertWooCatalog, clearWooCatalog, wooCatalogCount, searchProductCandidates, findSimilarSkus,
   omit,
   PRODUCTS, stockStatus, INBOUND, OUTBOUND, ACTIVITY, LOCATIONS, CHANNELS, CHANNEL_LIST, channelSalesFor, LABEL_SIZES, SAMPLE_LABELS,
