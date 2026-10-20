@@ -4767,7 +4767,8 @@ function MLocations({ ctx }) {
     const svg = (typeof qrSvgMarkup === "function") ? qrSvgMarkup(sel.code, 360) : "";
     const w = window.open("", "_blank", "width=420,height=470");
     if (!w) return;
-    w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>ป้าย ${sel.p}</title>
+    const esc = escHtml;   // same-origin popup — position names are user-typed
+    w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>ป้าย ${esc(sel.p)}</title>
       <style>
         @page{size:50mm 50mm;margin:0}html,body{margin:0;padding:0}
         body{font-family:'IBM Plex Sans Thai','IBM Plex Mono',monospace;text-align:center;padding:4mm}
@@ -4775,8 +4776,8 @@ function MLocations({ ctx }) {
         .pos{font-size:20px;font-weight:700}.path{font-size:11px;color:#555;margin-top:1mm}
       </style></head>
       <body onload="window.focus();window.print();">
-        <div class="qr">${svg}</div><div class="pos">${sel.p}</div>
-        <div class="path">${sel.b} · ${sel.f}</div>
+        <div class="qr">${svg}</div><div class="pos">${esc(sel.p)}</div>
+        <div class="path">${esc(sel.b)} · ${esc(sel.f)}</div>
       </body></html>`);
     w.document.close();
   };

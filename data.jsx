@@ -4780,8 +4780,19 @@ window.addEventListener("online", function() { if (typeof flushOfflineQueue === 
 window.addEventListener("focus", function() { if (typeof flushOfflineQueue === "function") flushOfflineQueue(); });
 document.addEventListener("visibilitychange", function() { if (document.visibilityState === "visible" && typeof flushOfflineQueue === "function") flushOfflineQueue(); });
 
+/* HTML-escape a value for the print windows below and in screens/handheld/tracking.
+   Those are same-origin about:blank popups that inherit the page CSP — which must
+   keep 'unsafe-inline' for in-browser Babel — so any unescaped customer or product
+   text runs as script there, with opener.localStorage (the Supabase session) in
+   reach. Customer names arrive from pasted chat text and platform labels, so this
+   is an account-takeover path, not a cosmetic one. Escapes all five characters so
+   the result is safe in element content AND in quoted attributes. */
+function escHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 function printBarcodeLabels(items, pushToast) {
-  const safe = (str) => String(str == null ? "" : str).replace(/[<>&]/g, "");
+  const safe = escHtml;
   const filtered = (items || []).filter(Boolean);
   if (!filtered.length) { if (typeof pushToast === "function") pushToast("ไม่มีสินค้าให้พิมพ์"); return; }
   const w = window.open("", "_blank", "width=480,height=320");
@@ -4808,10 +4819,10 @@ body{font-family:'IBM Plex Mono',monospace}
 
 function openPickListWindow(orders, pushToast) {
   if (!orders || !orders.length) { if (typeof pushToast === "function") pushToast("ไม่มีออร์เดอร์ที่ต้องหยิบ"); return; }
-  const safe = (str) => String(str == null ? "" : str).replace(/[<>&]/g, "");
+  const safe = escHtml;
   const w = window.open("", "_blank");
   if (!w) { if (typeof pushToast === "function") pushToast("เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วลองใหม่"); return; }
-  const rows = orders.map((o, i) => `<tr><td class="mono">${i+1}</td><td class="mono">${safe(o.id)}</td><td>${safe(o.customer)||"—"}</td><td>${safe(o.channel)||"—"}</td><td style="text-align:center">${o.items||0}</td><td>${safe(o.carrier)||"—"}</td><td>${ORDER_STATUS_TH[o.status]||safe(o.status)}</td></tr>`).join("");
+  const rows = orders.map((o, i) => `<tr><td class="mono">${i+1}</td><td class="mono">${safe(o.id)}</td><td>${safe(o.customer)||"—"}</td><td>${safe(o.channel)||"—"}</td><td style="text-align:center">${safe(o.items||0)}</td><td>${safe(o.carrier)||"—"}</td><td>${safe(ORDER_STATUS_TH[o.status]||o.status)}</td></tr>`).join("");
   w.document.write(`<!DOCTYPE html><html><head><title>Pick List</title>
 <style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 2px;font-size:18px}p{margin:0 0 16px;color:#666}button{padding:8px 18px;cursor:pointer;margin-bottom:16px;font-size:13px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}td{padding:8px 10px;border-bottom:1px solid #eee}tr:hover td{background:#fafafa}.mono{font-family:monospace;font-size:12px}@media print{button{display:none!important}}</style>
 </head><body onload="window.focus();window.print();">
@@ -5057,5 +5068,5 @@ Object.assign(window, {
   bangkokDateStr, workHoursExceptionDate, hasActiveWorkHoursException, workHoursStatusForUser,
   bangkokTimeOf, shiftDayKey, thaiDayLabel, groupAuditByDay, auditTone,
   loadOfflineQueue, enqueueOfflineWrite, flushOfflineQueue,
-  printBarcodeLabels, openPickListWindow
+  escHtml, printBarcodeLabels, openPickListWindow
 });

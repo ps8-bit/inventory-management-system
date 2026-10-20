@@ -1686,7 +1686,8 @@ function ShareLinkModal({ store, onClose, pushToast }) {
     const svg = (typeof qrSvgMarkup === "function") ? qrSvgMarkup(url, 480) : "";
     const w = window.open("", "_blank", "width=520,height=720");
     if (!w) { pushToast("เบราว์เซอร์บล็อกหน้าต่างพิมพ์"); return; }
-    const name = (store && store.name) || "คลังพร้อมส่ง";
+    // Same-origin popup: the store name is admin-typed text, so escape it (see escHtml).
+    const name = escHtml((store && store.name) || "คลังพร้อมส่ง");
     w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>QR ${name}</title>
       <style>
         @page { size: A6; margin: 6mm; }
@@ -1702,7 +1703,7 @@ function ShareLinkModal({ store, onClose, pushToast }) {
         <h1>${name}</h1>
         <div class="qr">${svg}</div>
         <div class="hint">สแกนเพื่อติดตามพัสดุของคุณ</div>
-        <div class="url">${url}</div>
+        <div class="url">${escHtml(url)}</div>
       </body></html>`);
     w.document.close();
   };
@@ -1845,32 +1846,65 @@ function DateModeBtn({ icon, label, sub, active, onClick }) {
 
 /* ============ CUSTOMER LOOKUP (public, no login) ============ */
 
+/* The customer page's branding. An anonymous customer has no store settings on
+   the device, so it used to paint DEFAULT_STORE — "ชื่อร้านค้า / คลังสินค้า" and no
+   phone — until store-info answered. Now: staff copy → the last good public copy
+   cached here → a neutral skeleton (`_ready: false`), never the placeholder. */
+const PUBLIC_STORE_KEY = "ims_public_store_v1";
+function _publicStoreFrom(src, ready) {
+  return { ...DEFAULT_STORE, ...src, sender: { ...DEFAULT_STORE.sender, ...(src && src.sender) }, _ready: ready };
+}
+function initialPublicStore() {
+  if (window._DB_STORE && window._DB_STORE.name) return _publicStoreFrom(window._DB_STORE, true);
+  try {
+    const own = JSON.parse(localStorage.getItem("ims_store") || "null");
+    if (own && own.name) return _publicStoreFrom(own, true);
+  } catch (e) {}
+  try {
+    const c = JSON.parse(localStorage.getItem(PUBLIC_STORE_KEY) || "null");
+    if (c && c.name) return _publicStoreFrom({ name: c.name, logo: c.logo || null, tagline: c.tagline || "", sender: { phone: c.phone || "" } }, true);
+  } catch (e) {}
+  return _publicStoreFrom({ name: "" }, false);
+}
+// "tel:" target for a shop phone as typed ("02-555 0188", "+66 81…"); "" when
+// there is no usable number, so callers hide the line instead of a dead link.
+function storeTelHref(phone) {
+  const d = String(phone || "").replace(/[^\d+]/g, "");
+  return d.length >= 3 ? "tel:" + d : "";
+}
+function StoreHelpPhone({ store }) {
+  const phone = String((store && store.sender && store.sender.phone) || "").trim();
+  const href = storeTelHref(phone);
+  if (!href) return null;
+  return <a className="lnk" href={href}>{phone}</a>;
+}
+
 function CustomerLookup() {
-  const [store, setStore] = useStateTrk(() => {
-    if (window._DB_STORE) return { ...DEFAULT_STORE, ...window._DB_STORE };
-    try { return { ...DEFAULT_STORE, ...JSON.parse(localStorage.getItem("ims_store") || "{}") }; }
-    catch { return DEFAULT_STORE; }
-  });
+  const [store, setStore] = useStateTrk(() => initialPublicStore());
 
   // Public store branding — anon customers have no localStorage copy of the store
   // settings, so fetch the public-safe fields (name/logo/tagline/phone, no address)
   // from the store-info Edge Function so the page shows real branding, not defaults.
+  // The answer is cached (PUBLIC_STORE_KEY) so the next visit paints it instantly.
   useEffectTrk(() => {
-    if (typeof SUPABASE_FUNC_URL !== "string") return;
+    const settle = () => setStore(prev => (prev._ready ? prev : { ...prev, _ready: true }));
+    if (typeof SUPABASE_FUNC_URL !== "string") { settle(); return; }
     fetch(SUPABASE_FUNC_URL + "/store-info")
       .then(r => r.json())
       .then(j => {
-        if (j && j.success && j.store && j.store.name) {
-          setStore(prev => ({
-            ...prev,
-            name: j.store.name || prev.name,
-            logo: j.store.logo || prev.logo,
-            tagline: j.store.tagline || prev.tagline,
-            sender: { ...prev.sender, phone: j.store.phone || prev.sender?.phone },
-          }));
-        }
+        if (!(j && j.success && j.store && j.store.name)) { settle(); return; }
+        const pub = { name: j.store.name, logo: j.store.logo || null, tagline: j.store.tagline || "", phone: j.store.phone || "" };
+        try { localStorage.setItem(PUBLIC_STORE_KEY, JSON.stringify(pub)); } catch (e) {} // quota (big logo) — just no cache
+        setStore(prev => ({
+          ...prev,
+          name: pub.name,
+          logo: pub.logo || prev.logo,
+          tagline: pub.tagline || prev.tagline,
+          sender: { ...prev.sender, phone: pub.phone || prev.sender?.phone },
+          _ready: true,
+        }));
       })
-      .catch(() => {});
+      .catch(settle);
   }, []);
 
   const [q, setQ] = useStateTrk("");
@@ -2063,16 +2097,31 @@ function CustomerLookup() {
   }
 
   const isToday = dateFilter === (typeof todayIso === "function" ? todayIso() : TODAY_ISO);
+  const searching = matches.length === 0 && apiResults === null && q.trim().length >= 3;
+  // The no-results box carries its own help line, so the footer's copy is hidden then.
+  const noResults = searched && matches.length === 0 && !searching;
 
   return (
     <div className="auth-page" style={{ alignItems: "flex-start", paddingTop: 60, paddingBottom: 40 }}>
       <div style={{ width: "100%", maxWidth: 640 }}>
         {/* Branded header */}
         <div style={{ textAlign: "center", marginBottom: 32 }}>
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 14, marginBottom: 14 }}>
-            <StoreLogoMark store={store} size={56}/>
-          </div>
-          <h1 style={{ fontSize: 26, fontWeight: 700, letterSpacing: "-0.02em", margin: "8px 0 4px" }}>{store.name}</h1>
+          {!store._ready ? (
+            /* Neutral skeleton while store-info loads on a first visit — never the settings placeholder. */
+            <>
+              <div aria-hidden="true" style={{ width: 56, height: 56, borderRadius: 8, background: "var(--surface-2)", margin: "0 auto 14px" }}/>
+              <div aria-hidden="true" style={{ width: 200, maxWidth: "60%", height: 26, borderRadius: 8, background: "var(--surface-2)", margin: "8px auto 4px" }}/>
+            </>
+          ) : (
+            <>
+              {(store.logo || store.name) && (
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 14, marginBottom: 14 }}>
+                  <StoreLogoMark store={store} size={56}/>
+                </div>
+              )}
+              {store.name && <h1 style={{ fontSize: 26, fontWeight: 700, letterSpacing: "-0.02em", margin: "8px 0 4px" }}>{store.name}</h1>}
+            </>
+          )}
           <div style={{ fontSize: 13, color: "var(--muted)" }}>ติดตามสถานะพัสดุของคุณได้ตลอด 24 ชม.</div>
         </div>
 
@@ -2149,7 +2198,7 @@ function CustomerLookup() {
 
           {searched && (
             <div style={{ marginTop: 24 }}>
-              {matches.length === 0 && apiResults === null && q.trim().length >= 3 ? (
+              {searching ? (
                 <div style={{ padding: 36, textAlign: "center", background: "var(--surface-2)", borderRadius: 14, fontSize: 13, color: "var(--muted)" }}>
                   กำลังค้นหา…
                 </div>
@@ -2158,8 +2207,9 @@ function CustomerLookup() {
                   <Icons.Search size={32} style={{ color: "var(--muted)", opacity: 0.5, marginBottom: 10 }}/>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>ไม่พบพัสดุที่ตรงกับ "{q}"{dateFilter && " ในวันที่ " + isoToThai(dateFilter)}</div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>
-                    ตรวจสอบเบอร์โทรหรือชื่อให้ตรงกับที่ใช้ตอนสั่งซื้อ<br/>
-                    หากต้องการความช่วยเหลือ ติดต่อ <a className="lnk" href="#">{store.sender?.phone || "02-555-0188"}</a>
+                    ตรวจสอบเบอร์โทรหรือชื่อให้ตรงกับที่ใช้ตอนสั่งซื้อ
+                    {/* tel: link — the old href="#" changed the hash and dropped the customer on the staff login. */}
+                    {storeTelHref(store.sender?.phone) && <><br/>หากต้องการความช่วยเหลือ ติดต่อ <StoreHelpPhone store={store}/></>}
                   </div>
                   {dateFilter && (
                     <button className="btn btn-sm" style={{ marginTop: 14 }} onClick={clearDateFilter}>
@@ -2180,8 +2230,8 @@ function CustomerLookup() {
         </div>
 
         <div style={{ marginTop: 28, textAlign: "center", fontSize: 12, color: "var(--muted)" }}>
-          <div>หากต้องการความช่วยเหลือ ติดต่อ <a className="lnk" href={`tel:${store.sender?.phone}`}>{store.sender?.phone || "02-555-0188"}</a></div>
-          <div style={{ marginTop: 8 }}>© {new Date().getFullYear()} {store.name}</div>
+          {!noResults && storeTelHref(store.sender?.phone) && <div>หากต้องการความช่วยเหลือ ติดต่อ <StoreHelpPhone store={store}/></div>}
+          {store.name && <div style={{ marginTop: 8 }}>© {new Date().getFullYear()} {store.name}</div>}
         </div>
       </div>
     </div>
@@ -2263,6 +2313,7 @@ function CustomerOrderDetail({ order, store, onBack }) {
   const trackUrl = order.tracking && order.carrier && CARRIER_URLS[order.carrier]
     ? CARRIER_URLS[order.carrier](encodeURIComponent(order.tracking))
     : null;
+  const hasHelpPhone = !!storeTelHref(store.sender?.phone);
 
   return (
     <div className="auth-page" style={{ alignItems: "flex-start", paddingTop: 40, paddingBottom: 40 }}>
@@ -2374,14 +2425,17 @@ function CustomerOrderDetail({ order, store, onBack }) {
             </div>
           </div>
 
-          {/* Help footer */}
-          <div style={{ marginTop: 20, padding: 14, background: "var(--info-soft)", color: "var(--fg-2)", borderRadius: 12, fontSize: 12, lineHeight: 1.6 }}>
-            มีคำถามเกี่ยวกับพัสดุนี้? ติดต่อ {store.name} ที่ <a className="lnk" href={`tel:${store.sender?.phone}`}>{store.sender?.phone || "02-555-0188"}</a>
-            {trackUrl
-              ? <><br/>หรือ <a className="lnk" href={trackUrl} target="_blank" rel="noopener noreferrer">ตรวจสอบสถานะที่เว็บไซต์ {order.carrier}</a></>
-              : order.carrier ? <><br/>หรือนำเลขพัสดุไปตรวจสอบที่เว็บไซต์ของ {order.carrier}</> : null
-            }
-          </div>
+          {/* Help footer — the shop line only when a real phone is set (no fake fallback number). */}
+          {(hasHelpPhone || order.carrier) && (
+            <div style={{ marginTop: 20, padding: 14, background: "var(--info-soft)", color: "var(--fg-2)", borderRadius: 12, fontSize: 12, lineHeight: 1.6 }}>
+              มีคำถามเกี่ยวกับพัสดุนี้?{" "}
+              {hasHelpPhone && <>ติดต่อ {store.name || "ร้านค้า"} ที่ <StoreHelpPhone store={store}/></>}
+              {trackUrl
+                ? <>{hasHelpPhone && <><br/>หรือ </>}<a className="lnk" href={trackUrl} target="_blank" rel="noopener noreferrer">ตรวจสอบสถานะที่เว็บไซต์ {order.carrier}</a></>
+                : order.carrier ? <>{hasHelpPhone && <><br/>หรือ</>}นำเลขพัสดุไปตรวจสอบที่เว็บไซต์ของ {order.carrier}</> : null
+              }
+            </div>
+          )}
         </div>
       </div>
     </div>

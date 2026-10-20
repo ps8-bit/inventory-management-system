@@ -2110,6 +2110,8 @@ function Outbound({ goTo, pushToast, focus }) {
             <BulkBtn icon={<Icons.Tag size={13}/>}   label="สร้างฉลาก" onClick={() => { queueLabelsAndGo(orders.filter(o => picked[o.id]), goTo); pushToast(`สร้างฉลาก ${pickedCount} ใบ`); }}/>
             <BulkBtn icon={<Icons.Print size={13}/>} label="พิมพ์ pick list" onClick={() => {
               const toPrint = orders.filter(o => picked[o.id]);
+              // Every interpolated value is escaped: this is a same-origin popup (see escHtml).
+              const esc = escHtml;
               const dateStr = new Date().toLocaleDateString("th-TH", { dateStyle: "full" });
               const timeStr = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
 
@@ -2142,13 +2144,13 @@ function Outbound({ goTo, pushToast, focus }) {
                   <tbody>${skuRows.map(([sku,v]) => `
                     <tr>
                       <td><span class="chk"></span></td>
-                      <td class="mono loc">${v.loc}${v.locSub ? `<div class="small" style="font-weight:400;color:#666">${v.locSub}</div>` : ""}</td>
-                      <td class="mono">${sku}</td>
-                      <td>${v.name}</td>
-                      <td class="num bold">${v.total}${v.shelfQty < v.total ? `<div class="small" style="color:#c62828;font-weight:400">ในชั้นมี ${v.shelfQty}</div>` : ""}</td>
-                      <td class="small">${v.orders.map(r=>`${r.id} (${r.qty})`).join(", ")}</td>
+                      <td class="mono loc">${esc(v.loc)}${v.locSub ? `<div class="small" style="font-weight:400;color:#666">${esc(v.locSub)}</div>` : ""}</td>
+                      <td class="mono">${esc(sku)}</td>
+                      <td>${esc(v.name)}</td>
+                      <td class="num bold">${esc(v.total)}${v.shelfQty < v.total ? `<div class="small" style="color:#c62828;font-weight:400">ในชั้นมี ${esc(v.shelfQty)}</div>` : ""}</td>
+                      <td class="small">${v.orders.map(r=>`${esc(r.id)} (${esc(r.qty)})`).join(", ")}</td>
                     </tr>`).join("")}
-                    <tr class="total-row"><td colspan="4" style="text-align:right;font-weight:600">รวมทั้งหมด</td><td class="num bold">${totalQty}</td><td></td></tr>
+                    <tr class="total-row"><td colspan="4" style="text-align:right;font-weight:600">รวมทั้งหมด</td><td class="num bold">${esc(totalQty)}</td><td></td></tr>
                   </tbody>
                 </table>` : `<div class="note">⚠️ ออร์เดอร์ที่เลือกเป็นฉลาก/ไม่มีรายการสินค้า (line items) — ตารางหยิบตาม SKU จึงว่าง แสดงเฉพาะสรุปออร์เดอร์ด้านล่าง</div>`;
 
@@ -2159,12 +2161,12 @@ function Outbound({ goTo, pushToast, focus }) {
                   <tbody>${toPrint.map((o,i) => `
                     <tr>
                       <td class="mono">${i+1}</td>
-                      <td class="mono">${o.id}</td>
-                      <td>${o.customer||"—"}</td>
-                      <td>${o.channel||"—"}</td>
-                      <td class="num">${Array.isArray(o.lineItems)&&o.lineItems.length ? o.lineItems.reduce((s,x)=>s+(x.qty||1),0) : (o.items||0)}</td>
-                      <td>${o.carrier||"—"}</td>
-                      <td>${ORDER_STATUS_TH[o.status]||o.status}</td>
+                      <td class="mono">${esc(o.id)}</td>
+                      <td>${esc(o.customer||"—")}</td>
+                      <td>${esc(o.channel||"—")}</td>
+                      <td class="num">${esc(Array.isArray(o.lineItems)&&o.lineItems.length ? o.lineItems.reduce((s,x)=>s+(x.qty||1),0) : (o.items||0))}</td>
+                      <td>${esc(o.carrier||"—")}</td>
+                      <td>${esc(ORDER_STATUS_TH[o.status]||o.status)}</td>
                     </tr>`).join("")}
                   </tbody>
                 </table>`;
@@ -2188,9 +2190,10 @@ function Outbound({ goTo, pushToast, focus }) {
                 @media print{.btn{display:none!important}tr{page-break-inside:avoid}}`;
 
               const w = window.open("", "_blank");
-              w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pick List — ${dateStr}</title><style>${css}</style></head><body>
-                <h2>📋 Pick List — ${dateStr} ${timeStr}</h2>
-                <div class="meta">${toPrint.length} ออร์เดอร์ · ${totalQty} ชิ้น · พิมพ์โดย ${(window.__currentUser&&window.__currentUser.name)||"Staff"}</div>
+              if (!w) { pushToast("เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วลองใหม่"); return; }
+              w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Pick List — ${esc(dateStr)}</title><style>${css}</style></head><body>
+                <h2>📋 Pick List — ${esc(dateStr)} ${esc(timeStr)}</h2>
+                <div class="meta">${toPrint.length} ออร์เดอร์ · ${esc(totalQty)} ชิ้น · พิมพ์โดย ${esc((window.__currentUser&&window.__currentUser.name)||"Staff")}</div>
                 <button class="btn" onclick="window.print()">🖨 พิมพ์</button>
                 ${skuTable}${orderTable}
               </body></html>`);
@@ -3189,7 +3192,10 @@ function Inventory({ pushToast, density, goTo, focus }) {
                   <button className="popover-item" onClick={() => {
                     setExportOpen(false);
                     const w = window.open("", "_blank");
-            const rows = filtered.map(p => { const s = stockStatus(p); return `<tr><td class="mono">${p.sku}</td><td>${p.name}</td><td>${p.cat}</td><td class="r mono">${p.qty}</td><td class="r mono">${p.reorder}</td><td class="mono">${p.loc}</td><td>${s.label}</td></tr>`; }).join("");
+                    if (!w) { pushToast("เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วลองใหม่"); return; }
+            // Same-origin popup: every product field is escaped (see escHtml in data.jsx).
+            const esc = escHtml;
+            const rows = filtered.map(p => { const s = stockStatus(p); return `<tr><td class="mono">${esc(p.sku)}</td><td>${esc(p.name)}</td><td>${esc(p.cat)}</td><td class="r mono">${esc(p.qty)}</td><td class="r mono">${esc(p.reorder)}</td><td class="mono">${esc(p.loc)}</td><td>${esc(s.label)}</td></tr>`; }).join("");
             w.document.write(`<!DOCTYPE html><html><head><title>รายงานสินค้าคงคลัง</title><style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 4px}p{margin:0 0 16px;color:#555}button{padding:8px 18px;cursor:pointer;margin-bottom:16px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600}td{padding:7px 10px;border-bottom:1px solid #eee}.mono{font-family:monospace;font-size:12px}.r{text-align:right}@media print{button{display:none!important}}</style></head><body><h2>รายงานสินค้าคงคลัง</h2><p>${new Date().toLocaleDateString("th-TH",{dateStyle:"full"})} · ${filtered.length} รายการ</p><button onclick="window.print()">🖨 พิมพ์</button><table><thead><tr><th>SKU</th><th>ชื่อสินค้า</th><th>หมวด</th><th class="r">คงเหลือ</th><th class="r">จุดสั่ง</th><th>ตำแหน่ง</th><th>สถานะ</th></tr></thead><tbody>${rows}</tbody></table></body></html>`);
             w.document.close();
                   }}>
@@ -4040,7 +4046,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
   // Print a scannable Code 128 barcode label (50×30mm) for this SKU.
   const printBarcode = () => {
     const svg = (typeof barcodeSvgMarkup === "function") ? barcodeSvgMarkup(product.sku, { height: 80, moduleWidth: 2 }) : "";
-    const safe = (str) => String(str == null ? "" : str).replace(/[<>&]/g, "");
+    const safe = escHtml;
     const w = window.open("", "_blank", "width=480,height=320");
     if (!w) { (pushToast || (() => {}))("เบราว์เซอร์บล็อกหน้าต่างพิมพ์ — อนุญาตป๊อปอัปแล้วลองใหม่"); return; }
     w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>บาร์โค้ด ${safe(product.sku)}</title>
@@ -5292,7 +5298,8 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
     const svg = (typeof qrSvgMarkup === "function") ? qrSvgMarkup(loc.code, 360) : "";
     const w = window.open("", "_blank", "width=420,height=470");
     if (!w) return;
-    w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>ป้าย ${loc.pos}</title>
+    const esc = escHtml;   // same-origin popup — position names are user-typed
+    w.document.write(`<!DOCTYPE html><html lang="th"><head><meta charset="utf-8"><title>ป้าย ${esc(loc.pos)}</title>
       <style>
         @page { size: 50mm 50mm; margin: 0; }
         html,body { margin:0; padding:0; }
@@ -5304,8 +5311,8 @@ function LocationDrawer({ loc, onClose, onDelete, highlightSku }) {
       </style></head>
       <body onload="window.focus();window.print();">
         <div class="qr">${svg}</div>
-        <div class="pos">${loc.pos}</div>
-        <div class="path">${loc.building} · ${loc.floor}</div>
+        <div class="pos">${esc(loc.pos)}</div>
+        <div class="path">${esc(loc.building)} · ${esc(loc.floor)}</div>
       </body></html>`);
     w.document.close();
   };

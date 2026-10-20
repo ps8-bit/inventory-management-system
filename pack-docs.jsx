@@ -290,18 +290,24 @@ async function downloadOrderFile(file, fallbackName) {
    only when a PDF label is opened; both scripts as plain <script> tags so pdf.js
    runs its "fake worker" on the main thread (CSP only allows blob:/self workers). */
 const PDFJS_BASE = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+// sha384 SRI for each file (same rule as the <script> tags in the HTML): a changed
+// CDN file is refused instead of running with the user's session.
+const PDFJS_SRI = {
+  "pdf.min.js": "sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e",
+  "pdf.worker.min.js": "sha384-SnzOobpRMLXZ52iJvZm/C0fYw0OQemTXzTjIsdsfMcrCtCEe9qgzxTd3RSklO5x2"
+};
 let _pdfjsP = null;
 function _loadPdfJs() {
   if (window.pdfjsLib && window.pdfjsWorker) return Promise.resolve(window.pdfjsLib);
   if (_pdfjsP) return _pdfjsP;
-  const add = (src) => new Promise((res, rej) => {
+  const add = (file) => new Promise((res, rej) => {
     const s = document.createElement("script");
-    s.src = src; s.crossOrigin = "anonymous";
+    s.src = PDFJS_BASE + file; s.integrity = PDFJS_SRI[file]; s.crossOrigin = "anonymous";
     s.onload = res; s.onerror = () => rej(new Error("โหลดตัวอ่าน PDF ไม่ได้"));
     document.head.appendChild(s);
   });
-  _pdfjsP = add(PDFJS_BASE + "pdf.min.js")
-    .then(() => add(PDFJS_BASE + "pdf.worker.min.js"))
+  _pdfjsP = add("pdf.min.js")
+    .then(() => add("pdf.worker.min.js"))
     .then(() => window.pdfjsLib)
     .catch(e => { _pdfjsP = null; throw e; });
   return _pdfjsP;

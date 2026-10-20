@@ -19,7 +19,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Sarabun:wght@400;700&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="styles.css?v=20261016f"/>
+  <link rel="stylesheet" href="styles.css?v=20261021a"/>
   <style>
     /* Print: only labels print, with proper paper sizing */
     @media print {
@@ -41,38 +41,42 @@
   <!-- Production React builds: the development builds are several times slower on phones. -->
   <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
-  <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <!-- Every CDN script is pinned to an EXACT version and carries a sha384 SRI hash, so a
+       compromised or re-published CDN file is refused instead of running with the user's
+       Supabase session. Upgrading one = new URL + new hash (openssl dgst -sha384 -binary
+       FILE | openssl base64 -A); a stale hash makes the browser block that script. -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js" integrity="sha384-gx12pQMMYnabkTgbCHqqrT65RwDnXI/f/dU2H9JUmT0KUeiMF5bf+yroQBmX0Nuk" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" integrity="sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.118.0/dist/umd/supabase.js" integrity="sha384-TcHRA3zBbn+Lexh5n+Oil4guNPOS3rjNDpGRAN46u/s/mB2IZ50ceC6TYDU2yvgK" crossorigin="anonymous"></script>
   <!-- ZXing: barcode fallback for browsers without native BarcodeDetector -->
-  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js" integrity="sha384-DOP3OlIzNeWpufSZMxZihUYSqCAZFirsVmSAVg8ItvU9ac1FcQF6ZHjQ9CbCznNS" crossorigin="anonymous"></script>
   <!-- html5-qrcode: photo-mode scanning (ZXing-based, handles EXIF orientation) -->
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" integrity="sha384-c9d8RFSL+u3exBOJ4Yp3HUJXS4znl9f+z66d1y54ig+ea249SpqR+w1wyvXz/lk+" crossorigin="anonymous"></script>
   <!-- qrcode-generator: real, scannable QR encoding (exposes global `qrcode`) -->
-  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js" integrity="sha384-8FWZA6BGMXhsfO+BLtrJK0We6gg5o1JyO8xQm6peWDEUs17ACA5ziE/NIAkl9z2k" crossorigin="anonymous"></script>
 
-  <script type="text/babel" src="tweaks-panel.jsx?v=20261016f"></script>
-  <script type="text/babel" src="data.jsx?v=20261016f"></script>
-  <script type="text/babel" src="supabase.jsx?v=20261016f"></script>
-  <script type="text/babel" src="icons.jsx?v=20261016f"></script>
-  <script type="text/babel" src="product-images.jsx?v=20261016f"></script>
-  <script type="text/babel" src="screens.jsx?v=20261016f"></script>
-  <script type="text/babel" src="dashboard.jsx?v=20261016f"></script>
-  <script type="text/babel" src="labels.jsx?v=20261016f"></script>
-  <script type="text/babel" src="settings.jsx?v=20261016f"></script>
-  <script type="text/babel" src="audit.jsx?v=20261016f"></script>
-  <script type="text/babel" src="tracking.jsx?v=20261016f"></script>
-  <script type="text/babel" src="analytics.jsx?v=20261016f"></script>
-  <script type="text/babel" src="handheld.jsx?v=20261016f"></script>
-  <script type="text/babel" src="import.jsx?v=20261016f"></script>
-  <script type="text/babel" src="bundles.jsx?v=20261016f"></script>
-  <script type="text/babel" src="pack-docs.jsx?v=20261016f"></script>
-  <script type="text/babel" src="auth.jsx?v=20261016f"></script>
-  <script type="text/babel" src="app.jsx?v=20261016f"></script>
+  <script type="text/babel" src="tweaks-panel.jsx?v=20261021a"></script>
+  <script type="text/babel" src="data.jsx?v=20261021a"></script>
+  <script type="text/babel" src="supabase.jsx?v=20261021a"></script>
+  <script type="text/babel" src="icons.jsx?v=20261021a"></script>
+  <script type="text/babel" src="product-images.jsx?v=20261021a"></script>
+  <script type="text/babel" src="screens.jsx?v=20261021a"></script>
+  <script type="text/babel" src="dashboard.jsx?v=20261021a"></script>
+  <script type="text/babel" src="labels.jsx?v=20261021a"></script>
+  <script type="text/babel" src="settings.jsx?v=20261021a"></script>
+  <script type="text/babel" src="audit.jsx?v=20261021a"></script>
+  <script type="text/babel" src="tracking.jsx?v=20261021a"></script>
+  <script type="text/babel" src="analytics.jsx?v=20261021a"></script>
+  <script type="text/babel" src="handheld.jsx?v=20261021a"></script>
+  <script type="text/babel" src="import.jsx?v=20261021a"></script>
+  <script type="text/babel" src="bundles.jsx?v=20261021a"></script>
+  <script type="text/babel" src="pack-docs.jsx?v=20261021a"></script>
+  <script type="text/babel" src="auth.jsx?v=20261021a"></script>
+  <script type="text/babel" src="app.jsx?v=20261021a"></script>
   <!-- boot.js runs the text/babel files above through a content-hashed compile cache, loading
        Babel (7.29.0) only when a file actually changed. MUST stay after the last text/babel tag. -->
-  <script src="boot.js?v=20261016f"></script>
+  <script src="boot.js?v=20261021a"></script>
 
   <!-- Register service worker so the app is installable as a standalone PWA -->
   <script>
