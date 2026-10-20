@@ -75,15 +75,13 @@ function maskName(n: string) {
   return parts.length > 1 ? first + " " + Array.from(parts[1])[0] + "." : first;
 }
 
-// Client IP as the platform saw it. cf-connecting-ip is set by Cloudflare in
-// front of the Supabase gateway (overwrites any client value); the LAST
-// X-Forwarded-For hop is the one the proxy appended. Never the first hop — the
-// client writes that one itself.
+// Client IP: the LAST X-Forwarded-For entry, which the Supabase gateway appends.
+// A client-sent XFF is kept in front of it, and cf-connecting-ip / x-real-ip may
+// pass through client values, so neither is trusted.
+// TODO(verify): confirm live with a header-echo function before relying on it.
 function clientIp(req: Request): string {
-  const cf = (req.headers.get("cf-connecting-ip") || "").trim();
-  if (cf) return cf;
   const xff = (req.headers.get("x-forwarded-for") || "").split(",").map((s) => s.trim()).filter(Boolean);
-  return xff[xff.length - 1] || (req.headers.get("x-real-ip") || "").trim();
+  return xff[xff.length - 1] || "";
 }
 
 // Durable per-IP cap shared by every isolate (supabase/track-lookup-rate-limit.sql).
@@ -173,7 +171,7 @@ Deno.serve(async (req) => {
     const hit =
       // A stored phone may hold two numbers or an extension — compare each group.
       (isPhone && (phoneNSN(String(o.phone || "")) === nq ||
-        String(o.phone || "").split(/[^\d+]*[\/,;|]|\s{2,}|ต่อ|ext/i).some((g) => phoneNSN(g) === nq))) ||
+        String(o.phone || "").split(/[^\d+-]+/).some((g) => phoneNSN(g) === nq))) ||
       (q.length >= 6 && String(o.tracking || "").toLowerCase().replace(/\s+/g, "") === q) ||
       (q.length >= 6 && String(o.id || "").toLowerCase() === q);
     if (!hit) return false;
