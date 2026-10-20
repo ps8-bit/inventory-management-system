@@ -35,11 +35,11 @@ alter table public.stock_ops enable row level security;
 
 drop policy if exists "read"   on public.stock_ops;
 drop policy if exists "insert" on public.stock_ops;
--- อ่าน/เขียนได้ทุกคนที่ล็อกอิน: ตารางนี้เป็นแค่กันซ้ำ ไม่ได้ถือข้อมูลสต็อกเอง
+-- อ่าน/เขียนได้ทุกคนที่ล็อกอินและมี role (require-role-claim.sql): ตารางนี้เป็นแค่กันซ้ำ ไม่ได้ถือข้อมูลสต็อกเอง
 -- และการกันซ้ำต้องทำงานแม้ในเวลาที่ within_work_hours() ปิดการเขียน products
 -- อยู่แล้ว (ถ้าเขียน stock_ops ไม่ได้ การกันซ้ำจะเงียบหายไป = อันตรายกว่า)
-create policy "read"   on public.stock_ops for select using (auth.role() = 'authenticated');
-create policy "insert" on public.stock_ops for insert with check (auth.role() = 'authenticated');
+create policy "read"   on public.stock_ops for select using ((select public.has_role_claim()));
+create policy "insert" on public.stock_ops for insert with check ((select public.has_role_claim()));
 
 grant select, insert on public.stock_ops to authenticated;
 

@@ -20,7 +20,7 @@ drop policy if exists "insert" on public.labels;
 drop policy if exists "update" on public.labels;
 drop policy if exists "delete" on public.labels;
 
-create policy "read"   on public.labels for select using (auth.role() = 'authenticated');
+create policy "read"   on public.labels for select using ((select public.has_role_claim()));
 create policy "insert" on public.labels for insert with check (public.auth_role() in ('admin','manager','staff'));
 create policy "update" on public.labels for update using (public.auth_role() in ('admin','manager','staff')) with check (public.auth_role() in ('admin','manager','staff'));
 create policy "delete" on public.labels for delete using (public.auth_role() in ('admin','manager'));

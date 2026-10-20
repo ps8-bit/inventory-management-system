@@ -87,7 +87,7 @@ drop policy if exists "insert" on public.stock_adjustments;
 drop policy if exists "update" on public.stock_adjustments;
 drop policy if exists "delete" on public.stock_adjustments;
 
-create policy "read"   on public.stock_adjustments for select using (auth.role() = 'authenticated');
+create policy "read"   on public.stock_adjustments for select using ((select public.has_role_claim()));
 create policy "insert" on public.stock_adjustments for insert with check (public.auth_role() in ('admin','manager','staff') and public.within_work_hours());
 create policy "update" on public.stock_adjustments for update using (public.auth_role() in ('admin','manager','staff')) with check (public.auth_role() in ('admin','manager','staff') and public.within_work_hours());
 create policy "delete" on public.stock_adjustments for delete using (public.auth_role() in ('admin','manager') and public.within_work_hours());

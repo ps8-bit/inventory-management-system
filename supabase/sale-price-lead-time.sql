@@ -42,7 +42,7 @@ with (security_invoker = false) as
     brand,
     lead_days
    from products p
-  where auth.role() = 'authenticated'::text;
+  where (select public.has_role_claim());   -- require-role-claim.sql
 
 -- products has COLUMN-level SELECT grants (protect-cost-column.sql), so a new
 -- column is invisible to `authenticated` until granted. Not cost — just the
