@@ -75,13 +75,16 @@ function maskName(n: string) {
   return parts.length > 1 ? first + " " + Array.from(parts[1])[0] + "." : first;
 }
 
-// Client IP: the LAST X-Forwarded-For entry, which the Supabase gateway appends.
-// A client-sent XFF is kept in front of it, and cf-connecting-ip / x-real-ip may
-// pass through client values, so neither is trusted.
-// TODO(verify): confirm live with a header-echo function before relying on it.
+// Client IP = cf-connecting-ip. Verified live 2026-10-21 with a header-echo
+// function: Cloudflare in front of *.supabase.co sets it to the real client IP
+// and REJECTS a request carrying a forged one (error 1000); a client-sent
+// X-Forwarded-For is dropped, and the gateway's XFF is "<client>,<client>,
+// <AWS proxy 13.248.x>" — so the last hop is shared by everyone. Fallback: the
+// first XFF entry (gateway-written).
 function clientIp(req: Request): string {
-  const xff = (req.headers.get("x-forwarded-for") || "").split(",").map((s) => s.trim()).filter(Boolean);
-  return xff[xff.length - 1] || "";
+  const cf = (req.headers.get("cf-connecting-ip") || "").trim();
+  if (cf) return cf;
+  return (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
 }
 
 // Durable per-IP cap shared by every isolate (supabase/track-lookup-rate-limit.sql).
