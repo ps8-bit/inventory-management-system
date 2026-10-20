@@ -27,7 +27,7 @@ function corsFor(req: Request) {
 // country code and any leading zero, so "+66 81 552 0917" and "081-552-0917" match.
 function phoneNSN(p: string) {
   let d = String(p || "").replace(/\D/g, "");
-  if (d.startsWith("66")) d = d.slice(2);
+  if (d.startsWith("66") && d.length > 9) d = d.slice(2); // "661234567" is an 06x mobile, not +66
   return d.replace(/^0+/, "");
 }
 
@@ -69,6 +69,7 @@ function labelToPublic(l: any) {
 // scraper doesn't get a full-name list.
 function maskName(n: string) {
   const parts = String(n || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length > 1 && /^(คุณ|นาย|นาง|นางสาว|น\.ส\.|ด\.ช\.|ด\.ญ\.)$/.test(parts[0])) parts.shift();
   if (!parts.length) return "";
   const first = parts[0].length > 12 ? Array.from(parts[0]).slice(0, 12).join("") + "…" : parts[0];
   return parts.length > 1 ? first + " " + Array.from(parts[1])[0] + "." : first;
@@ -114,8 +115,10 @@ Deno.serve(async (req) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
-  const ip = clientIp(req);
-  if (ip) {
+  // TODO(verify): which header the gateway overwrites is not yet confirmed live.
+  // No IP at all → one shared bucket, so a missing header can't mean "unlimited".
+  const ip = clientIp(req) || "no-ip";
+  {
     const { data: ok, error: rlErr } = await admin.rpc("track_lookup_hit", { p_key: ip, p_window_s: RL_WINDOW_S, p_max: RL_MAX });
     if (!rlErr && ok === false) return json({ success: false, error: "คำขอถี่เกินไป กรุณาลองใหม่อีกครั้งในสักครู่", results: [] }, 429);
   }
@@ -168,7 +171,9 @@ Deno.serve(async (req) => {
   // first name must not return other customers' parcels.
   const results = shipments.filter((o) => {
     const hit =
-      (isPhone && phoneNSN(String(o.phone || "")) === nq) ||
+      // A stored phone may hold two numbers or an extension — compare each group.
+      (isPhone && (phoneNSN(String(o.phone || "")) === nq ||
+        String(o.phone || "").split(/[^\d+]*[\/,;|]|\s{2,}|ต่อ|ext/i).some((g) => phoneNSN(g) === nq))) ||
       (q.length >= 6 && String(o.tracking || "").toLowerCase().replace(/\s+/g, "") === q) ||
       (q.length >= 6 && String(o.id || "").toLowerCase() === q);
     if (!hit) return false;
