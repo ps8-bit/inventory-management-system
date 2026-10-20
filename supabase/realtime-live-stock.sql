@@ -27,7 +27,7 @@ end $$;
 --    server-side filtering, masked phones), so reads become authenticated-only.
 --    Publishing orders without this would also stream every new order to
 --    anonymous realtime subscribers.
-alter policy "read" on public.orders using (auth.role() = 'authenticated');
+alter policy "read" on public.orders using ((select public.has_role_claim()));
 
 -- Check: expect the 7 tables above plus app_state and labels, and the orders
 -- policy without 'anon'.

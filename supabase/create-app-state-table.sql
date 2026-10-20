@@ -27,7 +27,7 @@ drop policy if exists "delete" on public.app_state;
 -- The "role_perms" key (per-role permission overrides, edited in ผู้ใช้งานและสิทธิ์)
 -- is admin-only to write — otherwise a restricted role could lift its own limits
 -- by rewriting that blob. Keep this carve-out in sync with rls-policies.sql §4b.
-create policy "read"   on public.app_state for select using (auth.role() = 'authenticated');
+create policy "read"   on public.app_state for select using ((select public.has_role_claim()));
 create policy "insert" on public.app_state for insert with check (
   public.auth_role() in ('admin','manager','staff')
   and (key <> 'role_perms' or public.auth_role() = 'admin')

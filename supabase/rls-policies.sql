@@ -91,7 +91,7 @@ declare t text;
 begin
   foreach t in array array['products','orders','order_items','bundles','bundle_items','stock_adjustments','labels','app_state','product_locations']
   loop
-    execute format($f$create policy "read"   on public.%I for select using (auth.role() = 'authenticated')$f$, t);
+    execute format($f$create policy "read"   on public.%I for select using ((select public.has_role_claim()))$f$, t);
     execute format($f$create policy "insert" on public.%I for insert with check (public.auth_role() in ('admin','manager','staff') and public.within_work_hours())$f$, t);
     execute format($f$create policy "update" on public.%I for update using (public.auth_role() in ('admin','manager','staff')) with check (public.auth_role() in ('admin','manager','staff') and public.within_work_hours())$f$, t);
     execute format($f$create policy "delete" on public.%I for delete using (public.auth_role() in ('admin','manager') and public.within_work_hours())$f$, t);
@@ -138,12 +138,12 @@ create policy "delete" on public.product_locations for delete
   using (public.auth_role() in ('admin','manager','staff') and public.within_work_hours());
 
 -- 5. audit_log — append-only: anyone signed in can read + insert; only admin can delete; no updates.
-create policy "read"   on public.audit_log for select using (auth.role() = 'authenticated');
-create policy "insert" on public.audit_log for insert with check (auth.role() = 'authenticated');
+create policy "read"   on public.audit_log for select using ((select public.has_role_claim()));
+create policy "insert" on public.audit_log for insert with check ((select public.has_role_claim()));
 create policy "delete" on public.audit_log for delete using (public.auth_role() = 'admin');
 
 -- 6. store_settings — read: anyone signed in · write: admin/manager · delete: admin
-create policy "read"   on public.store_settings for select using (auth.role() = 'authenticated');
+create policy "read"   on public.store_settings for select using ((select public.has_role_claim()));
 create policy "insert" on public.store_settings for insert with check (public.auth_role() in ('admin','manager'));
 create policy "update" on public.store_settings for update using (public.auth_role() in ('admin','manager')) with check (public.auth_role() in ('admin','manager'));
 create policy "delete" on public.store_settings for delete using (public.auth_role() = 'admin');

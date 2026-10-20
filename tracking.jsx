@@ -875,7 +875,7 @@ function TrackingPage({ pushToast, store, focus }) {
         </div>
         <div style={{ fontSize: 12, color: "var(--fg-2)", lineHeight: 1.5 }}>
           <div style={{ fontWeight: 600, color: "var(--fg)", fontSize: 13, marginBottom: 4 }}>วิธีให้ลูกค้าใช้งาน</div>
-          ส่งลิงก์ <strong style={{ color: "var(--accent)" }}>ค้นหาของลูกค้า</strong> ไปทาง LINE, SMS หรือแนบในอีเมลยืนยันคำสั่งซื้อ ลูกค้าสามารถใส่เบอร์โทรหรือชื่อเพื่อดูสถานะพัสดุของตัวเองได้โดยไม่ต้องเข้าสู่ระบบ
+          ส่งลิงก์ <strong style={{ color: "var(--accent)" }}>ค้นหาของลูกค้า</strong> ไปทาง LINE, SMS หรือแนบในอีเมลยืนยันคำสั่งซื้อ ลูกค้าใส่เบอร์โทรเต็มหรือเลขพัสดุเพื่อดูสถานะพัสดุของตัวเองได้โดยไม่ต้องเข้าสู่ระบบ
         </div>
       </div>
 
@@ -1805,7 +1805,7 @@ function ShareLinkModal({ store, onClose, pushToast }) {
             สวัสดีค่ะ {dateForUrl ? "ออร์เดอร์ที่จัดส่งวัน" + isoToThai(dateForUrl) : "ออร์เดอร์ของคุณจาก"} <strong>{store?.name || "คลังพร้อมส่ง"}</strong> 🎉<br/>
             ติดตามสถานะพัสดุของคุณได้ที่:<br/>
             <span className="mono" style={{ color: "var(--accent)", fontSize: 12 }}>{url}</span><br/>
-            กรอกชื่อหรือเบอร์โทรที่ใช้สั่งซื้อเพื่อดูสถานะการจัดส่งได้ตลอด 24 ชม.
+            กรอกเบอร์โทรเต็ม หรือเลขพัสดุ / เลขออร์เดอร์ เพื่อดูสถานะการจัดส่งได้ตลอด 24 ชม.
           </div>
         </div>
         <div className="modal-foot">
@@ -2145,7 +2145,7 @@ function CustomerLookup() {
                 {isToday ? "วันนี้ · " : ""}{isoToThai(dateFilter)}
               </div>
               <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>
-                {!hasSession ? "ค้นหาด้วยเบอร์หรือชื่อด้านล่าง" : dateFilteredOrders.length === 0 ? "ไม่มีออร์เดอร์ในวันนี้" : `${dateFilteredOrders.length} ออร์เดอร์ในวันที่นี้ — ค้นหาด้วยเบอร์หรือชื่อด้านล่าง`}
+                {!hasSession ? "ค้นหาด้วยเบอร์โทรเต็มหรือเลขพัสดุด้านล่าง" : dateFilteredOrders.length === 0 ? "ไม่มีออร์เดอร์ในวันนี้" : `${dateFilteredOrders.length} ออร์เดอร์ในวันที่นี้ — ค้นหาด้วยเบอร์โทรเต็มหรือเลขพัสดุด้านล่าง`}
               </div>
             </div>
             <button onClick={clearDateFilter} className="btn btn-sm" style={{ background: "oklch(1 0 0 / 0.15)", color: "white", border: "1px solid oklch(1 0 0 / 0.2)", flexShrink: 0 }}>
@@ -2157,7 +2157,7 @@ function CustomerLookup() {
         <div className="auth-card" style={{ maxWidth: 640 }}>
           <div style={{ marginBottom: 20 }}>
             <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: "-0.02em" }}>ค้นหาพัสดุของคุณ</h2>
-            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>กรอก <strong>เบอร์โทรศัพท์</strong> หรือ <strong>ชื่อ</strong> ที่ใช้สั่งซื้อ</div>
+            <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>กรอก <strong>เบอร์โทรเต็ม</strong> หรือ <strong>เลขพัสดุ / เลขออร์เดอร์</strong></div>
           </div>
 
           <form onSubmit={(e) => { e.preventDefault(); search(); }}>
@@ -2168,7 +2168,7 @@ function CustomerLookup() {
                   ref={inputRef}
                   value={q}
                   onChange={e => setQ(e.target.value)}
-                  placeholder="เช่น 081-552-0917 หรือ ปิยะนุช"
+                  placeholder="เช่น 081-552-0917 หรือเลขพัสดุ"
                   style={{ fontSize: 15 }}
                 />
                 {q && <Icons.X size={14} style={{ cursor: "pointer", color: "var(--muted)" }} onClick={() => { setQ(""); setSearched(false); inputRef.current?.focus(); }}/>}
@@ -2186,7 +2186,7 @@ function CustomerLookup() {
                 {/* Mock format hints only — must NOT expose real customer data on this public page */}
                 {[
                   { icon: <Icons.Search size={11}/>, text: "08X-XXX-XXXX" },
-                  { icon: <Icons.Search size={11}/>, text: "ชื่อ-นามสกุล" },
+                  { icon: <Icons.Search size={11}/>, text: "เลขพัสดุ / เลขออร์เดอร์" },
                 ].map(s => (
                   <span key={s.text} className="btn btn-sm" style={{ cursor: "default", opacity: 0.7 }}>
                     {s.icon} {s.text}
@@ -2207,7 +2207,7 @@ function CustomerLookup() {
                   <Icons.Search size={32} style={{ color: "var(--muted)", opacity: 0.5, marginBottom: 10 }}/>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>ไม่พบพัสดุที่ตรงกับ "{q}"{dateFilter && " ในวันที่ " + isoToThai(dateFilter)}</div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 }}>
-                    ตรวจสอบเบอร์โทรหรือชื่อให้ตรงกับที่ใช้ตอนสั่งซื้อ
+                    กรอกเบอร์โทรให้ครบทุกหลัก หรือเลขพัสดุ / เลขออร์เดอร์แบบเต็ม
                     {/* tel: link — the old href="#" changed the hash and dropped the customer on the staff login. */}
                     {storeTelHref(store.sender?.phone) && <><br/>หากต้องการความช่วยเหลือ ติดต่อ <StoreHelpPhone store={store}/></>}
                   </div>

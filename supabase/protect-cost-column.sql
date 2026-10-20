@@ -13,9 +13,9 @@
 --       admin/manager and NULL to everyone else. The view is deliberately NOT
 --       security_invoker: it runs as its owner, which is the only way it can
 --       read a column the caller may not. It therefore bypasses the table's
---       RLS, so it repeats the read rule (auth.role() = 'authenticated')
---       itself — if products' row policy is ever narrowed per-role, THIS VIEW
---       MUST BE NARROWED THE SAME WAY.
+--       RLS, so it repeats the read rule itself (public.has_role_claim(),
+--       see require-role-claim.sql) — if products' row policy is ever
+--       narrowed per-role, THIS VIEW MUST BE NARROWED THE SAME WAY.
 --    3. A BEFORE trigger keeps a caller that cannot see cost from writing it.
 --       Without this the masking would destroy data: a staff client holds
 --       cost = null/0 for every product, and dbUpsertProducts sends whole
@@ -49,7 +49,7 @@ select
   p.updated_at,
   p.brand
 from public.products p
-where auth.role() = 'authenticated';   -- mirrors the products "read" RLS policy
+where (select public.has_role_claim());   -- mirrors the products "read" RLS policy (require-role-claim.sql)
 
 -- A single-table view is AUTO-UPDATABLE, and this one is not security_invoker,
 -- so any write privilege on it would run as the owner and bypass the products

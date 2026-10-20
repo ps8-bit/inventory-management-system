@@ -278,9 +278,12 @@ function NotifPopover({ onClose, goTo, goToProduct, goToOrder }) {
 }
 
 /* Map a Supabase Auth session to the app's user shape.
-   Role + display name come from user_metadata (set when creating the user
-   in the Supabase dashboard) with a fallback to the USERS constant so
-   existing demo accounts still work during the transition. */
+   Display name/avatar come from user_metadata (display only). The ROLE comes
+   from app_metadata ONLY — user_metadata is self-writable, so it never grants
+   anything. An account without a known app_metadata.role (e.g. one that
+   self-registered while public sign-up was on) gets role null + noAccess: the
+   database returns nothing to it (has_role_claim(), supabase/require-role-
+   claim.sql), so Root shows NoAccessScreen instead of an empty app. */
 let _roleMismatchWarned = false;
 function mapSessionToUser(session) {
   const su   = session.user;
@@ -289,25 +292,24 @@ function mapSessionToUser(session) {
   const email  = su.email || "";
   const found = USERS.find(u => u.email === email);
   const name   = meta.name   || found?.name   || (email ? email.split("@")[0] : "ผู้ใช้");
-  // Authz role comes from app_metadata (tamper-proof, matches RLS). Fall back to
-  // user_metadata/USERS only for accounts created before the app_metadata migration.
-  const role   = app.role    || meta.role   || found?.role || "staff";
+  const knownRoles = (typeof ROLES !== "undefined" ? ROLES : []).map(r => r.id);
+  const role   = knownRoles.includes(app.role) ? app.role : null;
   const avatar = meta.avatar || found?.avatar || name.slice(0, 2);
   // The role RLS enforces (app_metadata, from the JWT) and the role the UI shows
   // (user_metadata) can drift apart — the account then sees admin buttons but the
   // database refuses admin writes with a confusing per-action toast. Surface the
   // drift once, right after login, instead of letting it hide until a write fails.
   // (Delayed so the shell has mounted its ims-toast listener; string detail only.)
-  if (meta.role && (app.role || "viewer") !== meta.role && !_roleMismatchWarned) {
+  if (role && meta.role && role !== meta.role && !_roleMismatchWarned) {
     _roleMismatchWarned = true;
     const msg = "คำเตือน: สิทธิ์บัญชีไม่ตรงกับฐานข้อมูล (แอปเห็น '" + meta.role +
-      "' แต่ฐานข้อมูลใช้ '" + (app.role || "viewer") +
+      "' แต่ฐานข้อมูลใช้ '" + role +
       "') — การบันทึก/ลบอาจถูกปฏิเสธ ให้ผู้ดูแลระบบตั้งบทบาทใหม่ในหน้า ผู้ใช้และสิทธิ์";
     setTimeout(() => {
       try { window.dispatchEvent(new CustomEvent("ims-toast", { detail: msg })); } catch (e) {}
     }, 1800);
   }
-  return { id: su.id, email, name, role, avatar, active: true };
+  return { id: su.id, email, name, role, avatar, active: true, noAccess: !role };
 }
 
 /* ======== TOASTS ========
@@ -401,6 +403,47 @@ function DBLoadingScreen({ onUseCache, sub }) {
           {hasCache && <button className="btn btn-primary" onClick={onUseCache}>เปิดด้วยข้อมูลล่าสุดในเครื่อง</button>}
         </div>
       )}
+    </div>
+  );
+}
+
+/* Signed in, but the account holds no role (see mapSessionToUser). Rendered by
+   Root before the desktop/mobile fork, so one screen serves both. "ตรวจสอบอีกครั้ง"
+   re-mints the token: once an admin assigns a role, TOKEN_REFRESHED reaches
+   Root's authOnChange and the app opens without signing out. */
+function NoAccessScreen({ user, onLogout }) {
+  const [busy, setBusy] = useStateApp(false);
+  const [msg,  setMsg]  = useStateApp("");
+  const recheck = async () => {
+    if (busy) return;
+    setBusy(true); setMsg("");
+    try { if (window.authRefresh) await authRefresh(); } catch (e) {}
+    setBusy(false);
+    setMsg("ยังไม่ได้รับสิทธิ์ — ให้ผู้ดูแลระบบกำหนดบทบาทในหน้า ผู้ใช้งานและสิทธิ์ ก่อน");
+  };
+  return (
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-logo">ค</div>
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 600 }}>บัญชียังไม่ได้รับสิทธิ์</h1>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 6, lineHeight: 1.6 }}>
+            ติดต่อผู้ดูแลระบบเพื่อกำหนดสิทธิ์การใช้งานให้บัญชีนี้
+          </div>
+          {user.email && <div style={{ fontSize: 12, marginTop: 8, wordBreak: "break-all" }}>{user.email}</div>}
+        </div>
+        {msg && (
+          <div role="status" style={{ padding: "10px 12px", marginBottom: 14, background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 12, lineHeight: 1.5 }}>
+            {msg}
+          </div>
+        )}
+        <div className="stack" style={{ gap: 10 }}>
+          <button type="button" className="btn btn-accent" style={{ justifyContent: "center", padding: "12px 16px" }} disabled={busy} onClick={recheck}>
+            {busy ? "กำลังตรวจสอบ…" : "ตรวจสอบอีกครั้ง"}
+          </button>
+          <button type="button" className="btn" style={{ justifyContent: "center" }} onClick={onLogout}>ออกจากระบบ</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -516,8 +559,9 @@ function Root() {
   // (or instantly on focus), with a clear notice on the login screen.
   const userId = user ? user.id : null;
   const userRole = user ? user.role : null;
+  const noAccess = !!(user && user.noAccess);
   useEffectApp(() => {
-    if (!userId) { setGateReady(false); return; }
+    if (!userId || noAccess) { setGateReady(false); return; }
     let alive = true;
     let checking = false;   // single-flight: focus + visibilitychange can fire together
     const forceOut = async (msg) => {
@@ -639,11 +683,11 @@ function Root() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
     };
-  }, [userId, userRole, dbReady, authFlow]);
+  }, [userId, userRole, noAccess, dbReady, authFlow]);
 
   // Load DB data only after a user is authenticated (userId declared above)
   useEffectApp(() => {
-    if (!authReady || !userId) return;
+    if (!authReady || !userId || noAccess) return;   // a role-less account loads nothing
     setDbReady(false);
     if (window.dbInit) {
       window.dbInit().then(() => setDbReady(true)).catch(() => setDbReady(true))
@@ -654,7 +698,7 @@ function Root() {
     } else {
       setDbReady(true);
     }
-  }, [authReady, userId]);
+  }, [authReady, userId, noAccess]);
 
   const isMobile = useIsMobile();
   const logout   = async () => { intentionalLogoutRef.current = true; setLockoutMsg(""); await authSignOut(); };
@@ -687,6 +731,8 @@ function Root() {
   if (view === "track" || view.startsWith("track/")) return <CustomerLookup/>;
 
   if (!user) return <LoginScreen notice={lockoutMsg} onDismissNotice={() => setLockoutMsg("")}/>;
+
+  if (user.noAccess) return <NoAccessScreen user={user} onLogout={logout}/>;
 
   // Hold rendering until the first access check (suspension + working-hours)
   // passes, so a blocked user is bounced to the login notice without ever

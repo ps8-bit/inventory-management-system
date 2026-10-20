@@ -1,5 +1,5 @@
-// Public parcel tracking lookup. Anon-callable: a customer searches by phone or
-// name and gets back ONLY their matching shipments. Uses the service role to read
+// Public parcel tracking lookup. Anon-callable: a customer searches by full phone
+// number, tracking number or order id and gets back ONLY their matching shipments. Uses the service role to read
 // the data but filters server-side, so the full customer table is never exposed
 // to the browser, and phone numbers are masked in the response.
 
@@ -27,7 +27,7 @@ function corsFor(req: Request) {
 // country code and any leading zero, so "+66 81 552 0917" and "081-552-0917" match.
 function phoneNSN(p: string) {
   let d = String(p || "").replace(/\D/g, "");
-  if (d.startsWith("66")) d = d.slice(2);
+  if (d.startsWith("66") && d.length > 9) d = d.slice(2); // "661234567" is an 06x mobile, not +66
   return d.replace(/^0+/, "");
 }
 
@@ -65,24 +65,28 @@ function labelToPublic(l: any) {
   };
 }
 
-// Best-effort in-memory throttle per client IP. Instances are reused (Fluid
-// Compute), so this meaningfully slows a single-source scraper — but it is NOT a
-// hard limit: a distributed attacker across instances can get more through.
-// TODO(security): back this with a shared Postgres counter for a durable cap.
-const RL_WINDOW_MS = 60_000;
-const RL_MAX = 40;
-const rlHits = new Map<string, number[]>();
-function rateLimited(ip: string): boolean {
-  if (!ip) return false;
-  const now = Date.now();
-  const arr = (rlHits.get(ip) || []).filter((t) => now - t < RL_WINDOW_MS);
-  arr.push(now);
-  rlHits.set(ip, arr);
-  if (rlHits.size > 5000) { // crude memory cap — evict stale buckets
-    for (const [k, v] of rlHits) if (!v.length || now - v[v.length - 1] > RL_WINDOW_MS) rlHits.delete(k);
-  }
-  return arr.length > RL_MAX;
+// "สมชาย ใจดี" -> "สมชาย ใ." — the customer recognises their own order, a
+// scraper doesn't get a full-name list.
+function maskName(n: string) {
+  const parts = String(n || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length > 1 && /^(คุณ|นาย|นาง|นางสาว|น\.ส\.|ด\.ช\.|ด\.ญ\.)$/.test(parts[0])) parts.shift();
+  if (!parts.length) return "";
+  const first = parts[0].length > 12 ? Array.from(parts[0]).slice(0, 12).join("") + "…" : parts[0];
+  return parts.length > 1 ? first + " " + Array.from(parts[1])[0] + "." : first;
 }
+
+// Client IP: the LAST X-Forwarded-For entry, which the Supabase gateway appends.
+// A client-sent XFF is kept in front of it, and cf-connecting-ip / x-real-ip may
+// pass through client values, so neither is trusted.
+// TODO(verify): confirm live with a header-echo function before relying on it.
+function clientIp(req: Request): string {
+  const xff = (req.headers.get("x-forwarded-for") || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return xff[xff.length - 1] || "";
+}
+
+// Durable per-IP cap shared by every isolate (supabase/track-lookup-rate-limit.sql).
+const RL_WINDOW_S = 60;
+const RL_MAX = 20;
 
 Deno.serve(async (req) => {
   const cors = corsFor(req);
@@ -93,25 +97,29 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405, headers: cors });
 
-  const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim()
-          || req.headers.get("cf-connecting-ip") || req.headers.get("x-real-ip") || "";
-  if (rateLimited(ip)) return json({ success: false, error: "คำขอถี่เกินไป กรุณาลองใหม่อีกครั้งในสักครู่", results: [] }, 429);
-
   let body: any;
   try { body = await req.json(); } catch { return json({ success: false, error: "Invalid JSON" }, 400); }
 
   const raw = String(body?.query ?? "").trim();
   if (raw.length < 3) return json({ success: false, error: "พิมพ์อย่างน้อย 3 ตัวอักษร", results: [] }, 400);
 
-  const digits = raw.replace(/\D/g, "");
-  const q = raw.toLowerCase();
-  const nq = phoneNSN(digits);
-  const toks = q.split(/\s+/).filter((t) => t.length >= 2);
+  const q = raw.toLowerCase().replace(/\s+/g, "");
+  // A full Thai phone number: only digits / separators / +66, ≥9 national digits.
+  const nq = /^[\d\s+()-]+$/.test(raw) ? phoneNSN(raw) : "";
+  const isPhone = raw.replace(/\D/g, "").length >= 9 && nq.length >= 8 && nq.length <= 9;
 
   const admin = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
+
+  // TODO(verify): which header the gateway overwrites is not yet confirmed live.
+  // No IP at all → one shared bucket, so a missing header can't mean "unlimited".
+  const ip = clientIp(req) || "no-ip";
+  {
+    const { data: ok, error: rlErr } = await admin.rpc("track_lookup_hit", { p_key: ip, p_window_s: RL_WINDOW_S, p_max: RL_MAX });
+    if (!rlErr && ok === false) return json({ success: false, error: "คำขอถี่เกินไป กรุณาลองใหม่อีกครั้งในสักครู่", results: [] }, 429);
+  }
 
   const shipments: any[] = [];
 
@@ -156,22 +164,16 @@ Deno.serve(async (req) => {
 
   // Server-side filter — only rows matching the query ever leave this function.
   const seen = new Set<string>();
+  // Exact matches only: a full phone number, or a whole tracking number / order
+  // id. No substrings and no name search — a fragment like "0812" or a common
+  // first name must not return other customers' parcels.
   const results = shipments.filter((o) => {
-    const phone = String(o.phone || "").replace(/\D/g, "");
-    const name = String(o.customer || "").toLowerCase().replace(/\s+/g, " ");
-    const trk = String(o.tracking || "").toLowerCase();
     const hit =
-      // Phone: raw-digit substring OR format-agnostic national-number match.
-      (digits.length >= 4 && (phone.includes(digits) || (!!nq && phoneNSN(phone).includes(nq)))) ||
-      // Name: full substring OR every typed word present (any order / spacing / title).
-      name.includes(q) ||
-      (toks.length > 0 && toks.every((t) => name.includes(t))) ||
-      // Tracking / order id: require a specific query. A short substring (e.g. any
-      // 4 digits) turns this public endpoint into a 10k-request enumeration of the
-      // whole shipment table — real tracking numbers / order ids are far longer,
-      // and customers paste them in full, so a length floor costs legit users nothing.
-      (q.length >= 8 && trk.includes(q)) ||
-      (q.length >= 6 && String(o.id).toLowerCase().includes(q));
+      // A stored phone may hold two numbers or an extension — compare each group.
+      (isPhone && (phoneNSN(String(o.phone || "")) === nq ||
+        String(o.phone || "").split(/[^\d+-]+/).some((g) => phoneNSN(g) === nq))) ||
+      (q.length >= 6 && String(o.tracking || "").toLowerCase().replace(/\s+/g, "") === q) ||
+      (q.length >= 6 && String(o.id || "").toLowerCase() === q);
     if (!hit) return false;
     const key = o.id + "|" + o.tracking;
     if (seen.has(key)) return false;
@@ -179,7 +181,7 @@ Deno.serve(async (req) => {
     return true;
   })
     .slice(0, 25)
-    .map((o) => ({ ...o, phone: maskPhone(o.phone) }));
+    .map((o) => ({ ...o, customer: maskName(o.customer), phone: maskPhone(o.phone) }));
 
   return json({ success: true, results });
 });
