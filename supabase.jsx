@@ -1228,7 +1228,9 @@ function _subscribeImsSync() {
       // fire ims-images-change with a fresh object ref so React re-renders.
       if (key && key.indexOf('img:') === 0) {
         const sku = key.slice(4);
-        const { data: row } = await sb.from('app_state').select('value, updated_at').eq('key', key).maybeSingle();
+        const { data: row, error } = await sb.from('app_state').select('value, updated_at').eq('key', key).maybeSingle();
+        // A failed read is NOT a deletion: keep the photo and the cache (a deleted row is data:null, no error).
+        if (error) { console.error('[RT] image reload', key, error.message); return; }
         const v = row ? row.value : null;
         _imgCacheRemember(key, row);
         const next = { ...(window._DB_PRODUCT_IMAGES || {}) };
@@ -1243,7 +1245,9 @@ function _subscribeImsSync() {
       // ordering vs that branch doesn't matter.)
       if (key && key.indexOf('locimg:') === 0) {
         const code = key.slice(7);
-        const { data: row } = await sb.from('app_state').select('value, updated_at').eq('key', key).maybeSingle();
+        const { data: row, error } = await sb.from('app_state').select('value, updated_at').eq('key', key).maybeSingle();
+        // A failed read is NOT a deletion: keep the photo and the cache (a deleted row is data:null, no error).
+        if (error) { console.error('[RT] image reload', key, error.message); return; }
         const v = row ? row.value : null;
         _imgCacheRemember(key, row);
         const next = { ...(window._DB_LOCATION_IMAGES || {}) };
