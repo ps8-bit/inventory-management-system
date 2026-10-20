@@ -1,0 +1,21 @@
+# Ship ONLY the app. Before 2026-10-21 every file in this repo was public on
+# psstock.vercel.app: CLAUDE.md/AGENTS.md, all supabase/*.sql + Edge Function source,
+# deploy scripts, server.js, scratch pages. Allowlist: ignore everything at the root,
+# then re-include what the browser actually loads. A NEW runtime file (a .jsx is
+# covered) must be added here, or it 404s in production while working locally.
+# Keep .wranglerignore (Cloudflare Pages) in step.
+/*
+!/Inventory Management System.html
+!/*.jsx
+!/boot.js
+!/sw.js
+!/styles.css
+!/manifest.webmanifest
+!/thai-address.json
+!/apple-touch-icon.png
+!/favicon-32.png
+!/icon-192.png
+!/icon-512.png
+!/icon-maskable-512.png
+!/fonts
+!/vercel.json

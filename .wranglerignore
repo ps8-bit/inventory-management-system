@@ -1,8 +1,16 @@
-# Files that should not be uploaded to Cloudflare Pages
-server.js
-deploy-cf.ps1
-deploy.ps1
+# Files that must not be uploaded to Cloudflare Pages — mirrors .vercelignore
+# (which is an allowlist; this is the same set written as a deny list).
 .git/
 .claude/
-*.sql
+.vercel/
 node_modules/
+supabase/
+*.sql
+*.md
+*.ps1
+server.js
+check.html
+sheet-sync-workflow.html
+.gitignore
+.vercelignore
+.wranglerignore

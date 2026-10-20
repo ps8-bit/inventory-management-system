@@ -772,26 +772,148 @@ async function dbServerTimeMs() {
   } catch (e) { /* fall through to device clock */ }
   return Date.now();
 }
-// Product images live in app_state too — one row per SKU, key "img:<sku>", value
-// is the WebP data-URL string. Stored per-SKU (not one giant blob) so each row
-// stays small. A removed image is stored as null and filtered out on load.
-async function dbLoadProductImages() {
-  const { data, error } = await sb.from('app_state').select('key, value').like('key', 'img:%');
-  if (error) { console.error('[DB] load product images:', error.message); return null; }
-  const m = {};
-  (data || []).forEach(r => { if (r && r.value != null) m[r.key.slice(4)] = r.value; });
-  return m;
+/* Photos: one app_state row per product ("img:<sku>") or position
+   ("locimg:<code>"), value = a WebP data-URL or an image URL. On 2026-10-21 that
+   was 333 rows ≈ 9 MB, and dbInit downloaded ALL of them on every open — 9 MB per
+   launch for a phone on mobile data. Now the rows are kept in IndexedDB
+   ("ims-img-cache") with their updated_at; a launch downloads only the
+   key + updated_at index (a few KB), then fetches just the rows that are new or
+   changed and drops the ones deleted on the server. Every writer goes through
+   dbSaveState, which stamps updated_at, so a changed photo always carries a new
+   stamp; a full reload every IMG_FULL_RESYNC_MS also catches a row edited
+   out-of-band (SQL editor). Any IndexedDB problem (private mode, old Safari,
+   quota) just degrades to the old full download — never to missing photos. */
+const IMG_CACHE_DB = "ims-img-cache";
+const IMG_FULL_RESYNC_MS = 30 * 24 * 3600 * 1000;
+let _imgDbP = null;
+function _imgDb() {
+  if (_imgDbP) return _imgDbP;
+  _imgDbP = new Promise((resolve) => {
+    let done = false;
+    const finish = (db) => { if (!done) { done = true; resolve(db); } };
+    setTimeout(() => finish(null), 2500);   // a hung open must not stall the photos
+    try {
+      const req = indexedDB.open(IMG_CACHE_DB, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains("rows")) db.createObjectStore("rows", { keyPath: "key" });
+        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "id" });
+      };
+      req.onsuccess = () => finish(req.result);
+      req.onerror = () => finish(null);
+      req.onblocked = () => finish(null);
+    } catch (e) { finish(null); }
+  });
+  return _imgDbP;
 }
-// Location (bin/shelf) photos live in app_state too — one row per position code,
-// key "locimg:<code>", value is the WebP data-URL string. Same shape as product
-// images above, just keyed by the position's full locCode() string.
-async function dbLoadLocationImages() {
-  const { data, error } = await sb.from('app_state').select('key, value').like('key', 'locimg:%');
-  if (error) { console.error('[DB] load location images:', error.message); return null; }
-  const m = {};
-  (data || []).forEach(r => { if (r && r.value != null) m[r.key.slice(7)] = r.value; });
-  return m;
+function _idbRead(db, store, fn) {
+  return new Promise((resolve) => {
+    try {
+      const req = fn(db.transaction(store, "readonly").objectStore(store));
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(undefined);
+    } catch (e) { resolve(undefined); }
+  });
 }
+// rows: [{key, value, at}] to store; drop: keys to delete; meta: {id, fullAt} or null.
+function _imgCacheWrite(db, rows, drop, meta) {
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(["rows", "meta"], "readwrite");
+      const st = tx.objectStore("rows");
+      rows.forEach(r => st.put(r));
+      drop.forEach(k => st.delete(k));
+      if (meta) tx.objectStore("meta").put(meta);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+      tx.onabort = () => resolve(false);
+    } catch (e) { resolve(false); }
+  });
+}
+// Keep the cache in step with a realtime image change (row = {value, updated_at} | null).
+// Best effort: a row the cache misses is simply re-fetched on the next launch.
+function _imgCacheRemember(key, row) {
+  _imgDb().then(db => {
+    if (!db) return;
+    if (row && row.value != null) _imgCacheWrite(db, [{ key, value: row.value, at: row.updated_at || "" }], [], null);
+    else _imgCacheWrite(db, [], [key], null);
+  }).catch(() => {});
+}
+// Paged read: PostgREST caps one response at 1000 rows.
+async function _appStatePaged(cols, prefix) {
+  const out = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await sb.from('app_state').select(cols).like('key', prefix + '%').order('key').range(from, from + 999);
+    if (error) return { error };
+    (data || []).forEach(r => out.push(r));
+    if (!data || data.length < 1000) return { rows: out };
+  }
+}
+// → { [key without prefix]: value } of every live row, or null when the server
+// can't be read at all (callers keep what they have, as before).
+async function _dbLoadImageRows(prefix) {
+  const toMap = (rows) => {
+    const m = {};
+    rows.forEach(r => { if (r && r.value != null) m[r.key.slice(prefix.length)] = r.value; });
+    return m;
+  };
+  const db = await _imgDb();
+  if (!db) {
+    const all = await _appStatePaged('key, value', prefix);
+    if (all.error) { console.error('[DB] load', prefix, 'images:', all.error.message); return null; }
+    return toMap(all.rows);
+  }
+  const range = IDBKeyRange.bound(prefix, prefix + "\uffff");
+  const cached = (await _idbRead(db, "rows", st => st.getAll(range))) || [];
+  const idx = await _appStatePaged('key, updated_at', prefix);
+  if (idx.error) {
+    // Offline / server error: the last synced photos beat none (null = keep what the app has).
+    console.error('[DB] list', prefix, 'images:', idx.error.message);
+    return cached.length ? toMap(cached) : null;
+  }
+  const meta = await _idbRead(db, "meta", st => st.get(prefix));
+  const have = new Map(cached.map(r => [r.key, r]));
+  const need = idx.rows.filter(r => { const c = have.get(r.key); return !c || c.at !== r.updated_at; }).map(r => r.key);
+  // Full read: first run on this device, the periodic resync, or when most rows changed
+  // anyway (then one paged read costs the same bytes in far fewer round-trips).
+  const full = !meta || !(Date.now() - meta.fullAt < IMG_FULL_RESYNC_MS) || need.length > idx.rows.length * 0.6;
+
+  let fetched = [], complete = true;
+  if (full) {
+    const all = await _appStatePaged('key, value, updated_at', prefix);
+    if (all.error) { console.error('[DB] load', prefix, 'images:', all.error.message); complete = false; }
+    else fetched = all.rows;
+  } else {
+    // Keys travel in the URL (Thai position codes percent-encode ~9×), so small batches,
+    // a few in flight at a time.
+    const batches = [];
+    for (let i = 0; i < need.length; i += 20) batches.push(need.slice(i, i + 20));
+    for (let i = 0; i < batches.length && complete; i += 4) {
+      const res = await Promise.all(batches.slice(i, i + 4).map(keys =>
+        sb.from('app_state').select('key, value, updated_at').in('key', keys)));
+      res.forEach(({ data, error }) => {
+        if (error) { console.error('[DB] load', prefix, 'images:', error.message); complete = false; }
+        else (data || []).forEach(r => fetched.push(r));
+      });
+    }
+  }
+  const put = fetched.filter(r => r && r.value != null).map(r => ({ key: r.key, value: r.value, at: r.updated_at }));
+  put.forEach(r => have.set(r.key, r));
+  // What stays: a complete full read is authoritative; otherwise the server index.
+  // Anything else was deleted on the server (dbSaveState(key, null)) and leaves the cache.
+  const keep = full && complete ? new Set(put.map(r => r.key)) : new Set(idx.rows.map(r => r.key));
+  const drop = Array.from(have.keys()).filter(k => !keep.has(k));
+  drop.forEach(k => have.delete(k));
+  _imgCacheWrite(db, put, drop.filter(k => k.indexOf(prefix) === 0), full && complete ? { id: prefix, fullAt: Date.now() } : null);
+  // Nothing readable at all → null, exactly like a failed read before: an EMPTY map
+  // would tell dbInit "the cloud has no photos" and re-seed it from localStorage.
+  if (!complete && !have.size) return null;
+  return toMap(Array.from(have.values()));
+}
+// Product images — key "img:<sku>". A removed image is a deleted row (or a legacy null).
+async function dbLoadProductImages() { return _dbLoadImageRows('img:'); }
+// Location (bin/shelf) photos — key "locimg:<code>", keyed by the position's full locCode().
+async function dbLoadLocationImages() { return _dbLoadImageRows('locimg:'); }
 
 /* ═══════════════════════════════════════════
    AUDIT LOG
@@ -1106,7 +1228,11 @@ function _subscribeImsSync() {
       // fire ims-images-change with a fresh object ref so React re-renders.
       if (key && key.indexOf('img:') === 0) {
         const sku = key.slice(4);
-        const v = await dbLoadState(key);
+        const { data: row, error } = await sb.from('app_state').select('value, updated_at').eq('key', key).maybeSingle();
+        // A failed read is NOT a deletion: keep the photo and the cache (a deleted row is data:null, no error).
+        if (error) { console.error('[RT] image reload', key, error.message); return; }
+        const v = row ? row.value : null;
+        _imgCacheRemember(key, row);
         const next = { ...(window._DB_PRODUCT_IMAGES || {}) };
         if (v == null) delete next[sku]; else next[sku] = v;
         window._DB_PRODUCT_IMAGES = next;
@@ -1119,7 +1245,11 @@ function _subscribeImsSync() {
       // ordering vs that branch doesn't matter.)
       if (key && key.indexOf('locimg:') === 0) {
         const code = key.slice(7);
-        const v = await dbLoadState(key);
+        const { data: row, error } = await sb.from('app_state').select('value, updated_at').eq('key', key).maybeSingle();
+        // A failed read is NOT a deletion: keep the photo and the cache (a deleted row is data:null, no error).
+        if (error) { console.error('[RT] image reload', key, error.message); return; }
+        const v = row ? row.value : null;
+        _imgCacheRemember(key, row);
         const next = { ...(window._DB_LOCATION_IMAGES || {}) };
         if (v == null) delete next[code]; else next[code] = v;
         window._DB_LOCATION_IMAGES = next;
