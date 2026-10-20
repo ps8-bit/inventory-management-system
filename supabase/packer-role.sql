@@ -57,7 +57,7 @@ drop policy if exists "read"   on public.order_files;
 drop policy if exists "insert" on public.order_files;
 drop policy if exists "update" on public.order_files;
 drop policy if exists "delete" on public.order_files;
-create policy "read"   on public.order_files for select using (auth.role() = 'authenticated');
+create policy "read"   on public.order_files for select using ((select public.has_role_claim()));
 -- 2026-10-07: the packer may attach / replace a label photo or file too
 -- (owner's request); deleting one stays admin/manager/staff.
 create policy "insert" on public.order_files for insert with check (public.auth_role() in ('admin','manager','staff','packer'));

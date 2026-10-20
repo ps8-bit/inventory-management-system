@@ -33,7 +33,7 @@ alter table public.order_attachments enable row level security;
 drop policy if exists "read"   on public.order_attachments;
 drop policy if exists "insert" on public.order_attachments;
 drop policy if exists "delete" on public.order_attachments;
-create policy "read" on public.order_attachments for select using (auth.role() = 'authenticated');
+create policy "read" on public.order_attachments for select using ((select public.has_role_claim()));
 create policy "insert" on public.order_attachments for insert with check (
   public.auth_role() in ('admin','manager','staff','packer') and created_by = auth.uid()
 );

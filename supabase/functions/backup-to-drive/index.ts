@@ -366,7 +366,10 @@ Deno.serve(async (req) => {
     if (!authHeader) return json({ success: false, error: "Unauthorized" }, 401);
     const { data: { user }, error } = await admin.auth.getUser(authHeader.replace("Bearer ", ""));
     if (error || !user) return json({ success: false, error: "Unauthorized" }, 401);
-    const role = (user.app_metadata as any)?.role || (user.user_metadata as any)?.role;
+    // Authorize on the tamper-proof claim ONLY — user_metadata is self-writable,
+    // and every run prunes Drive to BACKUP_RETENTION, so a forged "admin" could
+    // call this repeatedly and wipe the backup history.
+    const role = (user.app_metadata as any)?.role;
     if (role !== "admin") return json({ success: false, error: "Forbidden — admin only" }, 403);
   }
 
