@@ -1751,9 +1751,17 @@ async function _addrLabelPng(html, size) {
       const r = im.getBoundingClientRect();
       return { src: im.getAttribute("src"), x: (r.left - base.left) * k, y: (r.top - base.top) * k, w: r.width * k, h: r.height * k };
     }).filter(p => p.src && p.w > 0 && p.h > 0);
-    // Only the painted copy may show — Safari still draws the <img>'s border
-    // (not its picture), which doubled the frame wherever layouts disagreed.
-    if (photos.length) lbl.querySelectorAll("img").forEach(im => { im.style.visibility = "hidden"; });
+    // Only the painted copy may show. Swap each <img> for an empty box of the
+    // same size: rasterizeLabel DROPS any <img> not yet decoded (on iPhone a
+    // freshly inserted data: image isn't), and a dropped photo collapsed its
+    // slot so the row's text slid left under the painted photo.
+    if (photos.length) lbl.querySelectorAll("img").forEach(im => {
+      const ph = document.createElement("span");
+      ph.style.cssText = im.style.cssText;
+      ph.style.visibility = "hidden";
+      ph.style.boxSizing = "content-box";
+      im.replaceWith(ph);
+    });
     const png = await rasterizeLabel(lbl, wPx, hPx, scale);
     if (!photos.length) return png;
     return await _paintPhotos(png, photos, scale, mm);
