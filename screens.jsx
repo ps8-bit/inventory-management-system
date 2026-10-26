@@ -7024,7 +7024,7 @@ function PackHome({ goTo, user }) {
   const tiles = [
     { label: "รอแพ็ค",            val: orders.length, unit: "ออร์เดอร์", icon: <Icons.Box size={22}/>,     art: "pk-pending", tone: "accent" },
     { label: "รวมชิ้นที่ต้องหยิบ", val: pieces,        unit: "ชิ้น",      icon: <Icons.Pkg size={22}/>,     art: "pk-items", tone: "info" },
-    { label: "แพ็คเสร็จวันนี้",     val: packedToday,   unit: "ออร์เดอร์", icon: <Icons.Check size={22}/>,   art: "pk-box", tone: "success" },
+    { label: "แพ็คเสร็จวันนี้",     val: packedToday,   unit: "ออร์เดอร์", icon: <Icons.Check size={22}/>,   go: () => openPack({ view: "done", day: "today" }), art: "pk-box", tone: "success" },
     { label: "ค้างเกินกำหนด",      val: late,          unit: "ออร์เดอร์", icon: <Icons.History size={22}/>, art: "pk-overdue", tone: late ? "danger" : "muted" }
   ];
 
@@ -7093,10 +7093,10 @@ function PackHome({ goTo, user }) {
       <div className="ph-section">สรุปงานวันนี้</div>
       <div className="ph-grid dph-grid">
         {tiles.map(t => (
-          <button key={t.label} type="button" className={"ph-tile tone-" + (known ? t.tone : "muted")} onClick={() => openPack()} disabled={!canPack}>
+          <button key={t.label} type="button" className={"ph-tile tone-" + (known ? t.tone : "muted")} onClick={t.go || (() => openPack())} disabled={!canPack}>
             <span className={"ph-tile-icon" + (t.art && typeof illusSrc === "function" ? " has-art" : "")}>{t.art && typeof illusSrc === "function" ? <img src={illusSrc(t.art)} alt="" width="56" height="56" loading="lazy" decoding="async"/> : t.icon}</span>
             <span className="ph-tile-body">
-              <span className="ph-tile-label">{t.label}</span>
+              <span className="ph-tile-label">{t.label}{canPack && <span className="ph-tile-chev" aria-hidden="true"><Icons.Chev size={12}/></span>}</span>
               {known
                 ? <span className="ph-tile-val tnum">{t.val}</span>
                 : <span className="ph-tile-val ph-dash" aria-label={load === "failed" ? "ไม่ทราบ" : "กำลังโหลด"}>–</span>}
