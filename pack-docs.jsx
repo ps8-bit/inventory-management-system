@@ -1129,7 +1129,7 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
 function buildPackListPages(order, lines, size, thumbs) {
   const small = size.w < 100;
   const all = (lines || []).filter(l => l && (Number(l.qty) || 0) > 0);
-  const per = small ? 5 : 8;
+  const per = small ? 4 : 6;
   const chunks = [];
   for (let i = 0; i < all.length; i += per) chunks.push(all.slice(i, i + per));
   if (!chunks.length) chunks.push([]);
@@ -1169,6 +1169,23 @@ async function packListThumbs(lines) {
   }));
   return out;
 }
+/* Black-and-white platform mark for printed sheets (thermal heads print no
+   colour): drawn inline so it needs no asset and rasterises with the page.
+   Shopee bag, Facebook "f", LINE bubble; anything else gets its letter tile. */
+function _platformMarkSvg(platform, mm) {
+  const m = (typeof channelMark === "function") ? channelMark(platform) : null;
+  const id = String((m && m.name) || platform || "").toLowerCase();
+  const wrap = (body) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${mm}mm" height="${mm}mm" style="display:block;flex:none">${body}</svg>`;
+  const txt = (t, size, y) => `<text x="12" y="${y}" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="700" font-size="${size}" fill="#fff">${_escPD(t)}</text>`;
+  if (id.includes("shopee")) return wrap(
+    `<path d="M8 7.5V7a4 4 0 0 1 8 0v.5" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/>` +
+    `<path d="M3.6 7.5h16.8l-1.3 13.1a2 2 0 0 1-2 1.8H6.9a2 2 0 0 1-2-1.8z" fill="#000"/>` + txt("S", 11, 19));
+  if (id.includes("facebook")) return wrap(`<circle cx="12" cy="12" r="11" fill="#000"/>` +
+    `<path d="M13.4 22.9v-7.6h2.5l.4-3h-2.9v-1.9c0-.9.3-1.5 1.5-1.5h1.5V6.2a20 20 0 0 0-2.2-.1c-2.2 0-3.7 1.3-3.7 3.8v2.3H8v3h2.5v7.6z" fill="#fff"/>`);
+  if (id.includes("line")) return wrap(`<path d="M12 2.5c-5.8 0-10.5 3.8-10.5 8.5 0 4.2 3.7 7.7 8.8 8.4.9.2.7.9.6 2-.1.7.4.9 1 .5 3.4-2.2 10.6-6.3 10.6-10.9 0-4.7-4.7-8.5-10.5-8.5z" fill="#000"/>` + txt("LINE", 5.6, 13));
+  const short = (m && /^[A-Z0-9]+$/.test(m.short)) ? m.short : "OT";
+  return wrap(`<rect x="1" y="1" width="22" height="22" rx="6" fill="#000"/>` + txt(short, short.length > 2 ? 7 : 9.5, 15.5));
+}
 /* "ตึกพาณิชย์ › ชั้น 1 › A" → "ชั้น 1 › A": the floor matters (A exists on more
    than one), the building rarely does and costs the row its width. */
 function _packListShelf(loc) {
@@ -1194,7 +1211,10 @@ function _packListPageHtml(order, all, shown, size, k, nPages, thumbs) {
         `<span style="font-size:${pt(13)};font-weight:700;${one}">${_escPD(ref)}</span></div>` +
       // Marketplace orders: the platform's own order no. — what the packer matches
       // against the platform label / app, which never shows our SO id.
-      (order.platformOrderNo ? `<div style="font-size:${pt(11)};font-weight:700;margin-top:0.8mm;${one}">${_escPD((typeof packPlatformOf === "function") ? packPlatformOf(order) : "")} คำสั่งซื้อ ${_escPD(order.platformOrderNo)}</div>` : "") +
+      // Platform mark + name on every order; marketplace orders add their order no.
+      ((pf) => pf ? `<div style="display:flex;align-items:center;gap:1.6mm;margin-top:1mm;font-size:${pt(11)};font-weight:700;min-width:0">` +
+        _platformMarkSvg(pf, small ? 4.5 : 5.5) + `<span style="${one}">${_escPD(pf)}${order.platformOrderNo ? " · คำสั่งซื้อ " + _escPD(order.platformOrderNo) : ""}</span></div>` : "")(
+        (typeof packPlatformOf === "function") ? packPlatformOf(order) : (order.channel || "")) +
       (r.name ? `<div style="font-size:${pt(10)};margin-top:0.6mm;${one}">ผู้รับ: ${_escPD(r.name)}</div>` : "") +
       `<div style="${rule}"></div>` +
       `<div style="display:flex;justify-content:space-between;font-size:${pt(9)};font-weight:700;margin-bottom:0.8mm"><span>ช่อง · สินค้า</span><span>${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
