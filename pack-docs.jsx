@@ -2519,10 +2519,12 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
             {hits.map(h => (
               <button key={h.key} onClick={() => add(h)} disabled={h.stock <= 0}
                 style={{ display: "flex", width: "100%", gap: 10, alignItems: "center", padding: "10px 12px", border: "none", borderBottom: "1px solid var(--border)", background: "var(--surface)", color: "var(--fg)", textAlign: "left", fontFamily: "inherit", cursor: h.stock > 0 ? "pointer" : "not-allowed", opacity: h.stock > 0 ? 1 : 0.5 }}>
-                {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={34}/> : <span style={{ width: 34, textAlign: "center" }}>📦</span>}
+                {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={48}/> : <span style={{ width: 48, textAlign: "center", fontSize: 22 }}>📦</span>}
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span style={{ display: "block", fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.type === "bundle" ? "ชุด: " : ""}{h.name}</span>
-                  <span style={{ fontSize: 11, color: "var(--muted)" }}>{h.sku || "ชุดสินค้า"} · เหลือ {h.stock}</span>
+                  {/* The SKU is how lookalikes (…-RH vs …-LH) are told apart — never cut it off. */}
+                  {h.sku && <span className="mono" style={{ display: "block", fontSize: 13, fontWeight: 700, color: "var(--fg-2)", overflowWrap: "anywhere", lineHeight: 1.3 }}>{h.sku}</span>}
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>{h.sku ? "" : "ชุดสินค้า · "}เหลือ {h.stock}</span>
                 </span>
                 {(() => { const inCart = cart.find(c => c.key === h.key); return inCart
                   ? <span style={{ fontSize: 13, color: "#fff", background: "var(--accent)", borderRadius: 999, padding: "2px 9px", fontWeight: 700 }}>{inCart.qty}</span>
@@ -2535,7 +2537,11 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
             {cart.map(x => (
               <div key={x.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 12, background: "var(--surface-2)" }}>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
+                {x.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={x.sku} size={44} radius={8} zoom caption={x.sku + (x.name ? " · " + x.name : "")}/> : <span style={{ width: 44, textAlign: "center", fontSize: 22 }}>📦</span>}
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
+                  {x.type === "sku" && <span className="mono" style={{ display: "block", fontSize: 13, fontWeight: 700, color: "var(--fg-2)", overflowWrap: "anywhere", lineHeight: 1.3 }}>{x.sku}</span>}
+                </span>
                 <button className="btn btn-sm" style={{ width: 34, height: 34, justifyContent: "center", fontSize: 18 }} onClick={() => setQty(x.key, x.qty - 1)}>−</button>
                 <span className="tnum" style={{ width: 26, textAlign: "center", fontSize: 17, fontWeight: 700 }}>{x.qty}</span>
                 <button className="btn btn-sm" style={{ width: 34, height: 34, justifyContent: "center", fontSize: 18 }} onClick={() => setQty(x.key, x.qty + 1)}>＋</button>
@@ -2645,7 +2651,8 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
                     {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={44}/> : <span className="pn-thumb">📦</span>}
                     <span className="pn-item-main">
                       <span className="pn-item-name">{h.type === "bundle" ? "ชุด: " : ""}{h.name}</span>
-                      <span className="pn-item-sub">{h.sku || "ชุดสินค้า"} · คงเหลือ {h.stock}</span>
+                      {h.sku && <span className="pn-item-sku mono">{h.sku}</span>}
+                      <span className="pn-item-sub">{h.sku ? "" : "ชุดสินค้า · "}คงเหลือ {h.stock}</span>
                     </span>
                     {inCart && <span className="pn-incart tnum">{inCart.qty}</span>}
                     <button type="button" className="pn-add" disabled={h.stock <= 0} onClick={() => add(h)} aria-label={"เพิ่ม " + h.name}><Icons.Plus size={18}/></button>
@@ -2658,7 +2665,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
               <div className="pn-cart-head">สินค้าที่เลือก <span className="pn-badge tnum">{cart.length}</span></div>
               {cart.length === 0 ? (
                 <div className="pn-cart-empty">
-                  <Icons.Cart size={30}/>
+                  {typeof IllusEmpty === "function" ? <img className="illus-empty-img" src={illusSrc("packing")} alt="" width="80" height="80" style={{ width: 80, height: 80 }}/> : <Icons.Cart size={30}/>}
                   <b>ยังไม่ได้เลือกสินค้า</b>
                   <span>กด + เพื่อเพิ่มสินค้าในรายการ</span>
                 </div>
@@ -2669,7 +2676,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
                       {x.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={x.sku} size={40} radius={8} zoom caption={x.sku + (x.name ? " · " + x.name : "")}/> : <span className="pn-thumb">📦</span>}
                       <span className="pn-cart-name">
                         {x.type === "bundle" ? "ชุด: " : ""}{x.name}
-                        {x.type === "sku" && <span className="mono" style={{ display: "block", fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>{x.sku}</span>}
+                        {x.type === "sku" && <span className="pn-item-sku mono">{x.sku}</span>}
                       </span>
                       <button type="button" className="pn-qty" onClick={() => setQty(x.key, x.qty - 1)} aria-label="ลดจำนวน">−</button>
                       <span className="tnum pn-qty-n">{x.qty}</span>

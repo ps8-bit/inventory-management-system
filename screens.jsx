@@ -2286,7 +2286,9 @@ function Outbound({ goTo, pushToast, focus }) {
                 and a filter set from a search hit looks like a broken screen. */}
             {tabOrders.length === 0 && (
               <tr><td colSpan="9" style={{ textAlign: "center", padding: 40, color: "var(--muted)", fontSize: 13 }}>
-                <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
+                {tab === 1 && !filterQ && filterCh === "all" && typeof IllusEmpty === "function"
+                  ? <img className="illus-empty-img" src={illusSrc("pending-orders")} alt="" width="88" height="88" style={{ width: 88, height: 88, margin: "0 auto 6px" }}/>
+                  : <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>}
                 <div>{tab === 1 && !filterQ && filterCh === "all" ? "ไม่มีออร์เดอร์ค้างส่ง" : (filterQ || filterCh !== "all" || TABS[tab].filtered) ? "ไม่พบออร์เดอร์ที่ตรงกับตัวกรอง" : "ยังไม่มีออร์เดอร์"}</div>
                 {tab !== 0 && !filterQ && filterCh === "all" && <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => setTab(0)}>ดูทั้งหมด</button>}
                 {(filterQ || filterCh !== "all") && (
@@ -2750,7 +2752,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
           {/* The cart */}
           {cart.length === 0 ? (
             <div style={{ padding: 22, textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)", borderRadius: 12, marginBottom: 14 }}>
-              <Icons.Out size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>
+              {typeof IllusEmpty === "function" ? <img className="illus-empty-img" src={illusSrc("stock-out")} alt="" width="80" height="80" style={{ width: 80, height: 80, margin: "0 auto 4px" }}/> : <Icons.Out size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>}
               <div>ยังไม่ได้เลือกสินค้า — สแกนบาร์โค้ดหรือกดเลือกจากรายการด้านบน</div>
             </div>
           ) : (
@@ -5804,7 +5806,7 @@ function QuickSellModal({ onClose, pushToast }) {
 
           <div style={{ marginTop: 14 }}>
             {lines.length === 0 && (
-              <div style={{ padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)", borderRadius: 12 }}>
+              typeof IllusEmpty === "function" ? <IllusEmpty art="quick-sale" title="ยังไม่มีสินค้าในรายการขาย" size={80}>สแกนหรือค้นหาด้านบน (สแกนซ้ำ = +1)</IllusEmpty> : <div style={{ padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)", borderRadius: 12 }}>
                 ยังไม่มีสินค้า — สแกนหรือค้นหาด้านบน (สแกนซ้ำ = +1)
               </div>
             )}
@@ -7020,16 +7022,16 @@ function PackHome({ goTo, user }) {
   const custOf = (o) => typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(o.customer) ? o.customer : (o.customer || "—");
 
   const tiles = [
-    { label: "รอแพ็ค",            val: orders.length, unit: "ออร์เดอร์", icon: <Icons.Box size={22}/>,     tone: "accent" },
-    { label: "รวมชิ้นที่ต้องหยิบ", val: pieces,        unit: "ชิ้น",      icon: <Icons.Pkg size={22}/>,     tone: "info" },
-    { label: "แพ็คเสร็จวันนี้",     val: packedToday,   unit: "ออร์เดอร์", icon: <Icons.Check size={22}/>,   tone: "success" },
-    { label: "ค้างเกินกำหนด",      val: late,          unit: "ออร์เดอร์", icon: <Icons.History size={22}/>, tone: late ? "danger" : "muted" }
+    { label: "รอแพ็ค",            val: orders.length, unit: "ออร์เดอร์", icon: <Icons.Box size={22}/>,     art: "pk-pending", tone: "accent" },
+    { label: "รวมชิ้นที่ต้องหยิบ", val: pieces,        unit: "ชิ้น",      icon: <Icons.Pkg size={22}/>,     art: "pk-items", tone: "info" },
+    { label: "แพ็คเสร็จวันนี้",     val: packedToday,   unit: "ออร์เดอร์", icon: <Icons.Check size={22}/>,   art: "pk-box", tone: "success" },
+    { label: "ค้างเกินกำหนด",      val: late,          unit: "ออร์เดอร์", icon: <Icons.History size={22}/>, art: "pk-overdue", tone: late ? "danger" : "muted" }
   ];
 
   return (
     <div className="dph">
       <div className="dph-head">
-        <div className="ph-avatar dph-avatar" aria-hidden="true">{typeof packHomeInitials === "function" ? packHomeInitials(name) : "?"}</div>
+        {typeof illusSrc === "function" ? <img className="ph-team-art dph-team-art" src={illusSrc("pk-team")} alt="" width="96" height="96" decoding="async"/> : <div className="ph-avatar dph-avatar" aria-hidden="true">{typeof packHomeInitials === "function" ? packHomeInitials(name) : "?"}</div>}
         <div style={{ minWidth: 0, flex: 1 }}>
           <div className="ph-eyebrow">ภาพรวมวันนี้</div>
           <h1 className="page-title dph-hello">สวัสดี{firstName ? ", " + firstName : ""}</h1>
@@ -7065,17 +7067,10 @@ function PackHome({ goTo, user }) {
       )}
       {known && (
         <div className={"ph-hero dph-hero" + (empty ? " is-done" : " is-work")}>
-          <svg className="ph-hero-art" viewBox="0 0 120 110" aria-hidden="true">
-            <ellipse cx="60" cy="58" rx="56" ry="48" className="ph-blob"/>
-            <path d="M22 18l5 7M33 12l1 9M14 30l8 3" className="ph-spark"/>
-            <path d="M30 44l32-14 32 14v36l-32 16-32-16z" className="ph-box"/>
-            <path d="M30 44l32 15 32-15M62 59v37" className="ph-box-line"/>
-            <path d="M46 37l32 14v10" className="ph-tape"/>
-            <circle cx="88" cy="80" r="16" className="ph-badge"/>
-            {empty
-              ? <path d="M80 80l6 6 10-11" className="ph-badge-mark"/>
-              : <text x="88" y="86" textAnchor="middle" className="ph-badge-num">{orders.length > 99 ? "99+" : orders.length}</text>}
-          </svg>
+          <span className="ph-hero-pic" aria-hidden="true">
+            {typeof illusSrc === "function" ? <img className="ph-hero-img" src={illusSrc("pk-box")} alt="" width="112" height="112" decoding="async"/> : <Icons.Box size={48}/>}
+            <span className={"ph-hero-badge" + (empty ? " is-done" : "")}>{empty ? <Icons.Check size={16}/> : (orders.length > 99 ? "99+" : orders.length)}</span>
+          </span>
           <span className="ph-hero-text">
             <span className="ph-hero-title">{empty ? <span className="ph-nw">ไม่มีออร์เดอร์รอแพ็ค</span> : <>มี {orders.length} <span className="ph-nw">ออร์เดอร์รอแพ็ค</span></>}</span>
             <span className="ph-hero-sub">
@@ -7099,7 +7094,7 @@ function PackHome({ goTo, user }) {
       <div className="ph-grid dph-grid">
         {tiles.map(t => (
           <button key={t.label} type="button" className={"ph-tile tone-" + (known ? t.tone : "muted")} onClick={() => openPack()} disabled={!canPack}>
-            <span className="ph-tile-icon">{t.icon}</span>
+            <span className={"ph-tile-icon" + (t.art && typeof illusSrc === "function" ? " has-art" : "")}>{t.art && typeof illusSrc === "function" ? <img src={illusSrc(t.art)} alt="" width="56" height="56" loading="lazy" decoding="async"/> : t.icon}</span>
             <span className="ph-tile-body">
               <span className="ph-tile-label">{t.label}</span>
               {known
@@ -7640,8 +7635,8 @@ function PackQueue({ pushToast, goTo, user, focus }) {
             )}
             {rows.length === 0 && (
               <tr><td colSpan="8" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
-                <Icons.Check size={22} style={{ opacity: 0.5, marginBottom: 8, color: "var(--success)" }}/>
-                <div>ไม่มีออร์เดอร์รอแพ็ค</div>
+                {typeof IllusEmpty === "function" ? <img className="illus-empty-img" src={illusSrc("packing")} alt="" width="96" height="96" style={{ width: 96, height: 96, margin: "0 auto 6px" }}/> : <Icons.Check size={22} style={{ opacity: 0.5, marginBottom: 8, color: "var(--success)" }}/>}
+                <div style={{ fontWeight: 700, color: "var(--fg)", fontSize: 14 }}>ไม่มีออร์เดอร์รอแพ็ค</div>
                 <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
                   กดปุ่ม <b>สั่งแพ็คใหม่</b> ด้านบน → เลือกสินค้า + แนบใบปะหน้าหรือวางที่อยู่ → ส่งให้คนแพ็ค
                 </div>

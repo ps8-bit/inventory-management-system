@@ -18,4 +18,6 @@
 !/icon-512.png
 !/icon-maskable-512.png
 !/fonts
+# UI illustrations (ILLUS in icons.jsx) — without this every picture 404s in prod.
+!/img
 !/vercel.json

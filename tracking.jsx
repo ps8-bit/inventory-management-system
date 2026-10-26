@@ -3182,7 +3182,8 @@ const ORDER_PUSH_COPY = {
 
 /* On/off card for this device — mobile notification sheet, desktop bell
    popover and (when off) the mobile home screen. */
-function OrderPushToggle({ onDismiss }) {
+// `art` (optional) = an illustration URL shown instead of the small bell chip.
+function OrderPushToggle({ onDismiss, art }) {
   const [st, setSt] = useStateTrk(() => orderPushState());
   const [busy, setBusy] = useStateTrk(false);
   useEffectTrk(() => {
@@ -3212,8 +3213,8 @@ function OrderPushToggle({ onDismiss }) {
   const off = async () => { setBusy(true); await disableOrderPush(); setBusy(false); setSt(orderPushState()); };
   const c = ORDER_PUSH_COPY[st] || ORDER_PUSH_COPY.off;
   return (
-    <div className={"opt opt-" + st}>
-      <span className="opt-ic"><Icons.Bell size={16}/></span>
+    <div className={"opt opt-" + st + (art ? " opt-art" : "")}>
+      {art ? <img className="opt-art-img" src={art} alt="" width="56" height="56" decoding="async"/> : <span className="opt-ic"><Icons.Bell size={16}/></span>}
       <div className="opt-main">
         <div className="opt-title">{c.title}</div>
         <div className="opt-sub">{c.sub}</div>
@@ -3229,7 +3230,7 @@ function OrderPushToggle({ onDismiss }) {
 }
 
 /* Home-screen nudge (mobile) until this device turns notifications on. */
-function OrderPushNudge() {
+function OrderPushNudge({ art } = {}) {
   const KEY = "ims_push_nudge_hide";
   const [hidden, setHidden] = useStateTrk(() => { try { return Number(localStorage.getItem(KEY) || 0) > Date.now(); } catch (e) { return false; } });
   const [st, setSt] = useStateTrk(() => orderPushState());
@@ -3243,7 +3244,7 @@ function OrderPushNudge() {
     try { localStorage.setItem(KEY, String(Date.now() + 3 * 24 * 3600 * 1000)); } catch (e) {}
     setHidden(true);
   };
-  return <OrderPushToggle onDismiss={dismiss}/>;
+  return <OrderPushToggle onDismiss={dismiss} art={art}/>;
 }
 
 /* One-line summary of an edit for the alert card ("เพิ่ม 1 · เอาออก 1 · ที่อยู่จัดส่ง"). */
@@ -3322,7 +3323,9 @@ function OrderAlerts({ onOpen, mobile }) {
     <>
       <div className={"oa-wrap no-print" + (mobile ? " oa-mobile" : "")} role="alert" aria-live="assertive">
         <div className="oa-head">
-          <span className="oa-head-ic"><Icons.Bell size={14}/></span>
+          {typeof illusSrc === "function"
+            ? <img className="oa-head-art" src={illusSrc("notifications")} alt="" width="36" height="36" decoding="async"/>
+            : <span className="oa-head-ic"><Icons.Bell size={14}/></span>}
           <b>ตรวจสอบออร์เดอร์</b>
           <span className="oa-count tnum">{list.length}</span>
           <span style={{ flex: 1 }}/>

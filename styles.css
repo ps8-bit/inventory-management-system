@@ -2479,6 +2479,8 @@ button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft
 .pn-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .pn-item-name { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pn-item-sub { font-size: 12.5px; color: var(--muted); }
+/* SKU on its own line, never ellipsized — lookalikes differ only at the end. */
+.pn-item-sku { display: block; font-size: 13px; font-weight: 700; color: var(--fg-2); white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
 .pn-incart { min-width: 26px; height: 24px; padding: 0 8px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 800; display: grid; place-items: center; }
 .pn-add { width: 40px; height: 40px; flex-shrink: 0; border-radius: 10px; border: 1.5px solid var(--accent); background: var(--surface); color: var(--accent); display: grid; place-items: center; cursor: pointer; }
 .pn-add:hover:not(:disabled) { background: var(--accent-soft); }
@@ -2843,4 +2845,156 @@ button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft
   .dph-head { flex-wrap: wrap; }
   .ph-hero.dph-hero { flex-wrap: wrap; }
   .ph-link.dph-hero-link { margin: 0; }
+}
+
+/* ── Mobile home (MHome) — dashboard-redesign-v1, 2026-10-24 ─────────────
+   Brand header with the warehouse illustration, two overview cards that each
+   open their list, a stock strip, ขายออก as the one loud button, neutral
+   shortcut tiles, then sales + activity. Illustrations live in img/ui
+   (240px WebP, see ILLUS in icons.jsx) and always sit in fixed-size boxes with
+   object-fit: contain so they never crowd the numbers. */
+/* Grid: brand | art | bell on row 1, greeting across the full width on row 2 —
+   the art never sits on top of text. */
+.mh-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "brand art bell" "hello hello hello";
+  align-items: end; column-gap: 6px; padding: 10px 14px 8px;
+  background: linear-gradient(180deg, var(--surface) 0%, color-mix(in oklab, var(--accent-soft) 35%, var(--surface)) 100%); }
+.mh-brand { grid-area: brand; min-width: 0; }
+.mh-brand-hello { grid-area: hello; }
+.mh-brand-name { font-family: "IBM Plex Sans", "IBM Plex Sans Thai", sans-serif; font-size: 26px; font-weight: 800; letter-spacing: -0.01em; line-height: 1.05; color: var(--fg); }
+.mh-brand-name span { color: var(--accent); }
+.mh-brand-sub { font-size: 14px; font-weight: 600; color: var(--fg-2); margin-top: 2px; }
+.mh-brand-hello { font-size: 12.5px; color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mh-head-art { grid-area: art; justify-self: end; width: 100%; max-width: 170px; height: 64px; object-fit: contain; object-position: right bottom; pointer-events: none; }
+.mh-bell { grid-area: bell; align-self: start; position: relative; }
+.mh-bell-dot { position: absolute; top: 7px; right: 7px; width: 8px; height: 8px; border-radius: 999px; background: var(--danger); box-shadow: 0 0 0 2px var(--surface); }
+
+.mh-content { padding-top: 10px; }
+.mh-search { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 0 6px 0 16px; margin-bottom: 18px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px; color: var(--muted); font: inherit; font-size: 14.5px; cursor: pointer; text-align: left; box-shadow: var(--elev-1, none); }
+.mh-search-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mh-search-cam { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex-shrink: 0; }
+
+.mh-h2 { font-size: 17px; font-weight: 700; color: var(--fg); margin: 0 2px 10px; }
+.mh-h2-row { display: flex; align-items: center; justify-content: space-between; margin: 4px 2px 10px; }
+.mh-link { background: none; border: 0; padding: 0 2px; min-height: 40px; font: inherit; font-size: 13.5px; font-weight: 600; color: var(--accent); cursor: pointer; display: inline-flex; align-items: center; gap: 2px; }
+
+.mh-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 10px; }
+.mh-stat { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-width: 0; min-height: 104px; padding: 14px 10px 14px 14px; border-radius: 18px;
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--elev-1, none); color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.mh-stat:active { transform: scale(0.98); }
+.mh-stat-text { display: flex; flex-direction: column; min-width: 0; }
+.mh-stat-val { font-family: "IBM Plex Sans", "IBM Plex Sans Thai", sans-serif; font-size: 34px; font-weight: 800; line-height: 1.05; letter-spacing: -0.02em; }
+.mh-stat.is-alert .mh-stat-val { color: var(--accent); }
+.mh-stat-label { display: inline-flex; align-items: center; gap: 2px; font-size: 13.5px; color: var(--fg-2); margin-top: 4px; white-space: nowrap; }
+.mh-stat-art { width: 60px; height: 60px; object-fit: contain; flex-shrink: 0; pointer-events: none; }
+@media (max-width: 360px) { .mh-stat { padding: 12px 8px 12px 12px; } .mh-stat-art { width: 40px; height: 40px; } .mh-stat-val { font-size: 28px; } .mh-stat-label { font-size: 12.5px; } }
+
+.mh-strip { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 56px; padding: 8px 14px 8px 10px; margin-bottom: 14px; border-radius: 16px;
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--elev-1, none); color: var(--fg-2); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.mh-strip b { color: var(--fg); font-weight: 700; }
+.mh-strip-art { width: 38px; height: 38px; object-fit: contain; flex-shrink: 0; }
+.mh-strip-sep { width: 1px; height: 20px; background: var(--border); }
+
+.mh-primary { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 76px; padding: 6px 16px 6px 8px; margin-bottom: 12px; border: 0; border-radius: 18px;
+  background: var(--brand-grad); color: #fff; font: inherit; text-align: left; cursor: pointer; box-shadow: var(--elev-2, none); }
+.mh-primary-art { width: 64px; height: 64px; object-fit: contain; flex-shrink: 0; pointer-events: none; }
+.mh-primary-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mh-primary-text b { font-size: 19px; line-height: 1.2; }
+.mh-primary-text small { font-size: 13px; opacity: .92; }
+.mh-primary:active { transform: scale(0.99); }
+
+.mh-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.mh-tile { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 92px; padding: 8px 4px; border-radius: 16px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--fg); font: inherit; cursor: pointer; box-shadow: var(--elev-1, none); }
+.mh-tile:active { transform: scale(0.97); }
+.mh-tile-ic { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+.mh-tile-img { width: 52px; height: 52px; object-fit: contain; display: block; pointer-events: none; user-select: none; }
+.mh-tile-label { font-size: 13px; font-weight: 600; text-align: center; line-height: 1.3; }
+
+.mh-push:empty { display: none; }
+.mh-push { margin-bottom: 14px; }
+.opt.opt-art { align-items: center; border-radius: 18px; padding: 10px 14px 10px 8px; }
+.opt-art-img { width: 56px; height: 56px; object-fit: contain; flex-shrink: 0; }
+
+.mh-card { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--elev-1, none); }
+.mh-sales { padding: 14px 14px 12px; margin-bottom: 18px; }
+.mh-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.mh-card-title { font-size: 15.5px; font-weight: 700; }
+.mh-card-meta { font-size: 13.5px; color: var(--muted); }
+.mh-sales-body { display: flex; align-items: flex-end; gap: 10px; }
+.mh-sales-rows { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.mh-sales-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.mh-sales-name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mh-sales-n { font-size: 14px; font-weight: 700; flex-shrink: 0; }
+.mh-sales-bar { height: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.mh-sales-bar > span { display: block; height: 100%; border-radius: 999px; }
+.mh-sales-art { width: 52px; height: 52px; object-fit: contain; flex-shrink: 0; }
+.mh-empty { font-size: 13.5px; color: var(--muted); padding: 4px 0; }
+
+/* Illustrated empty state (IllusEmpty in icons.jsx) — shared by both forks. */
+.illus-empty { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 18px 16px 20px; text-align: center; border: 1.5px dashed var(--border); border-radius: 16px; background: var(--surface); color: var(--muted); }
+.illus-empty.is-bare { border: 0; background: none; }
+.illus-empty-img { display: block; object-fit: contain; pointer-events: none; user-select: none; }
+.illus-empty-title { font-size: 14.5px; font-weight: 700; color: var(--fg); margin-top: 2px; }
+.illus-empty-sub { font-size: 13px; line-height: 1.55; color: var(--muted); max-width: 32ch; }
+.opt.opt-art .btn-sm { min-height: 40px; padding-inline: 14px; }
+
+/* Packer home illustrations (packer-home-assets-v1). Fixed boxes + object-fit:
+   contain; the hero badge keeps the live count/✓ the old SVG drew. */
+.ph-team-art { flex-shrink: 0; width: 92px; height: 92px; object-fit: contain; margin: -10px -6px -12px 0; pointer-events: none; }
+.dph-team-art { width: 76px; height: 76px; margin: -8px 0; }
+.ph-hero-pic { position: relative; flex-shrink: 0; width: clamp(80px, 26vw, 112px); aspect-ratio: 1; display: grid; place-items: center; color: var(--accent); }
+.ph-hero-img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.ph-hero-badge { position: absolute; right: -2px; bottom: 2px; min-width: 32px; height: 32px; padding: 0 8px; border-radius: 999px; display: grid; place-items: center; background: var(--accent); color: #fff; font-weight: 800; font-size: 15px; font-variant-numeric: tabular-nums; box-shadow: 0 0 0 3px var(--surface); }
+.ph-hero-badge.is-done { background: var(--success); }
+.ph-tile-icon.has-art { width: 52px; height: 52px; border-radius: 14px; background: none !important; }
+.ph-tile-icon.has-art img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.ph-tile.tone-muted .ph-tile-icon.has-art img { filter: grayscale(.6); opacity: .7; }
+@media (max-width: 360px) { .ph-team-art { width: 72px; height: 72px; } .ph-tile-icon.has-art { width: 44px; height: 44px; } }
+
+/* ── PS TACTICAL UI set (ps-tactical-ui-assets-20261025) ─────────────────
+   Illustrations only — cards, badges, active states and numbers stay code.
+   Motion follows implementation/motion-reference.css and is driven by real
+   state only (a new order alert, a tab change); all of it stops under
+   prefers-reduced-motion. */
+
+/* Bottom tab bar: 34px art in a 44px+ hit area; the active tab gets a light
+   orange pill and a bold label. Same tabs, same permission filter. */
+.m-tabbar.has-art { height: 80px; padding: 6px 6px 16px; gap: 2px; }
+.m-tabbar.has-art .m-tab { gap: 2px; padding: 4px 2px; border-radius: 16px; font-size: 11.5px; min-height: 56px; transition: background .2s ease, color .2s ease; }
+.m-tabbar.has-art .m-tab .m-tab-icon { width: 38px; height: 34px; background: none !important; }
+.m-tab-art { width: 34px; height: 34px; object-fit: contain; display: block; pointer-events: none; filter: saturate(.55) opacity(.72); transition: filter .2s ease; }
+.m-tabbar.has-art .m-tab.on { background: color-mix(in oklab, var(--accent-soft) 80%, var(--surface)); color: color-mix(in oklab, var(--accent) 80%, black); font-weight: 700; }
+.m-tabbar.has-art .m-tab.on .m-tab-art { filter: none; }
+@keyframes ps-tab-pick { 0% { transform: translateY(1px) scale(.94); } 60% { transform: translateY(-3px) scale(1.07); } 100% { transform: none; } }
+.m-tabbar.has-art .m-tab[aria-current="page"] .m-tab-icon { animation: ps-tab-pick .26s ease-out 1; }
+
+/* Home bell + scan chip: illustration inside the existing 44px buttons. */
+.mh-bell { width: 46px !important; height: 46px !important; }
+.mh-bell-art { width: 34px; height: 34px; object-fit: contain; pointer-events: none; }
+.mh-search-cam img { width: 32px; height: 32px; object-fit: contain; pointer-events: none; }
+.mh-search-cam { width: 46px; height: 46px; }
+@keyframes ps-bell-ring { 0%,100% { transform: rotate(0); } 16% { transform: rotate(14deg); } 32% { transform: rotate(-12deg); } 48% { transform: rotate(8deg); } 65% { transform: rotate(-5deg); } 82% { transform: rotate(2deg); } }
+.ps-bell-icon { transform-origin: 50% 17%; }
+.ps-bell-icon.is-notifying { animation: ps-bell-ring .72s ease-in-out 1; }
+
+/* More menu rows: illustration thumbs, same rows/filters/order. */
+.m-row-thumb.m-row-art { background: color-mix(in oklab, var(--accent-soft) 55%, var(--surface)) !important; padding: 2px; }
+.m-row-thumb.m-row-art img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+
+/* Existing in-app order alert stack (OrderAlerts): cream card, orange edge,
+   softer corners — same buttons, same acknowledge/review flow. */
+.oa-wrap { border-radius: 20px; border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--border)); background: color-mix(in oklab, var(--accent-soft) 30%, var(--surface)); box-shadow: 0 14px 34px -14px oklch(0.45 0.12 45 / .35); }
+.oa-head-art { width: 34px; height: 34px; object-fit: contain; flex-shrink: 0; margin: -4px 0; }
+.oa-card { border-radius: 14px; }
+
+/* Packer home tiles: picture on top like the reference, numbers stay code. */
+.ph-tile:has(.ph-tile-icon.has-art) { flex-direction: column; align-items: center; text-align: center; gap: 6px; padding: 14px 10px 16px; }
+.ph-tile:has(.ph-tile-icon.has-art) .ph-tile-body { align-items: center; }
+.ph-tile-icon.has-art { width: 60px; height: 60px; }
+.ph-hero.is-work { background: color-mix(in oklab, var(--accent-soft) 70%, var(--surface)); }
+.ph-hero.is-work .ph-hero-title { color: var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ps-bell-icon, .m-tab .m-tab-icon, .m-tab-art, .m-tab { animation: none !important; transition: none !important; }
 }
