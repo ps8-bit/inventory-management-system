@@ -8330,6 +8330,7 @@ function mCanOpenAny(ids) {
 function MHistory({ ctx }) {
   const [logKey, setLogKey] = useStateM(0);
   const [sel, setSel] = useStateM(null);         // entry open in the detail sheet
+  const [openRounds, setOpenRounds] = useStateM({});   // ปรับสต็อก rounds expanded
   const [filter, setFilter] = useStateM("all");
   const [q, setQ] = useStateM("");
   const [day, setDay] = useStateM(null);          // null = ล่าสุด (ทุกวัน)
@@ -8472,7 +8473,39 @@ function MHistory({ ctx }) {
               <span style={{ fontSize: 10, color: "var(--muted)" }}>{entries.length} รายการ</span>
             </div>
             <div className="m-list">
-              {entries.map((e, i) => {
+              {(typeof groupAuditRounds === "function" ? groupAuditRounds(entries) : entries).map((item, i, items) => {
+                if (item.round) {
+                  const isOpen = !!openRounds[item.id];
+                  return (
+                    <div key={item.id} style={{ borderBottom: i < items.length - 1 ? "1px solid var(--border)" : "none" }}>
+                      <button className="m-row" onClick={() => setOpenRounds(s => ({ ...s, [item.id]: !s[item.id] }))}
+                        style={{ borderBottom: "none", alignItems: "flex-start", cursor: "pointer", width: "100%", textAlign: "left", font: "inherit", fontFamily: "inherit" }}>
+                        <div className="m-row-thumb" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}><Icons.Out size={15}/></div>
+                        <div className="m-row-main">
+                          <div className="m-row-title" style={{ fontSize: 13, whiteSpace: "normal" }}>{auditRoundTitle(item)}</div>
+                          {item.note && <div className="m-row-sub" style={{ whiteSpace: "normal", fontStyle: "italic" }}>{item.note}</div>}
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                            {dayKey === today ? mFormatTime(item.ts) : bangkokTimeOf(item.ts)} · {typeof ActorName === "function" ? <ActorName entry={item}/> : (item.user?.name || "ระบบ")}
+                          </div>
+                        </div>
+                        <span style={{ display: "inline-flex", color: "var(--muted)", flexShrink: 0, alignSelf: "center", transform: isOpen ? "rotate(90deg)" : "none" }}><Icons.Chev size={14}/></span>
+                      </button>
+                      {isOpen && (
+                        <div style={{ margin: "0 10px 8px 46px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface-2)" }}>
+                          {item.entries.map((c, j) => (
+                            <button key={c.id} onClick={() => setSel(c)}
+                              style={{ display: "flex", gap: 8, alignItems: "center", width: "100%", textAlign: "left", font: "inherit", fontFamily: "inherit", background: "none", border: 0, padding: "9px 12px", color: "var(--fg)", borderBottom: j < item.entries.length - 1 ? "1px solid var(--border)" : "none" }}>
+                              {typeof ProductImageThumb === "function" && <ProductImageThumb sku={c.entityId} size={30} radius={6}/>}
+                              <span style={{ flex: 1, minWidth: 0, fontSize: 12 }}>{String(c.summary || "").replace(/^ปรับสต็อก\s*/, "")}</span>
+                              <Icons.Chev size={11} style={{ color: "var(--muted)" }}/>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                const e = item;
                 // Entries that name a record they changed become tappable and open it.
                 // Every entry with something to show opens the detail sheet; the
                 // sheet links on to the order / product itself.

@@ -2629,6 +2629,65 @@ function groupAuditByDay(list) {
   });
   return Array.from(map.entries());
 }
+/* One ปรับสต็อก / ขายออก round = N audit rows (one per SKU, applyStockAdjustmentBatch).
+   Fold the rows of a round back into one item so the history reads "what left in
+   this round" — e.g. one walk-in customer buying several items. A round is a run
+   of adjacent adjust rows by the same person, with the same reason/note (the
+   note carries reason + note + ย้อนหลัง, so two different sales never merge), the
+   same direction, each within ROUND_GAP_MS of the previous. audit_log has no
+   batch column, so this is display-only; a lone row stays a plain entry.
+   list is newest-first → [entry | { round: true, id, ts, user, note, entries, pieces }] */
+const ROUND_GAP_MS = 90 * 1000;
+// "ปรับสต็อก <name> (<sku>) -2 ชิ้น (5 → 3)" — anchored on the "(before → after)"
+// tail so digits + ชิ้น inside a product name ("แพ็ค 3 ชิ้น") are never read as the delta.
+const _AUDIT_DELTA_RE = /([+-]\d+) ชิ้น \(\d+ → \d+\)/;
+function _auditRoundKey(e) {
+  if (!e || e.action !== "adjust" || e.entity !== "product") return null;
+  const m = _AUDIT_DELTA_RE.exec(String(e.summary || ""));
+  if (!m) return null;
+  const note = _auditRoundNote(e);
+  return [(e.actorId || (e.user && e.user.name) || ""), note, Number(m[1]) < 0 ? "-" : "+"].join("|");
+}
+/* The note a round shares. Once a row is saved, dbInsertAuditEntry folds its own
+   changes[] into the note (" | จำนวน: 5 ชิ้น → 3 ชิ้น"), so every synced row's note
+   differs — strip that per-item tail, and the "รอซิงค์" marker, before comparing. */
+function _auditRoundNote(e) {
+  return String((e && e.note) || "").replace(/\s\|\sจำนวน:.*$/, "").replace(/\s*·\s*รอซิงค์\s*$/, "");
+}
+function _auditDelta(e) {
+  const m = _AUDIT_DELTA_RE.exec(String((e && e.summary) || ""));
+  return m ? Number(m[1]) || 0 : 0;
+}
+function groupAuditRounds(list) {
+  const out = [];
+  let cur = null, curKey = null, lastT = 0;
+  (list || []).forEach(e => {
+    const key = _auditRoundKey(e);
+    const t = Date.parse(e && e.ts) || 0;
+    if (key && cur && key === curKey && Math.abs(lastT - t) <= ROUND_GAP_MS) {
+      cur.push(e); lastT = t; return;
+    }
+    if (cur) out.push(cur);
+    cur = key ? [e] : null; curKey = key; lastT = t;
+    if (!key) out.push(e);
+  });
+  if (cur) out.push(cur);
+  return out.map(x => {
+    if (!Array.isArray(x)) return x;
+    if (x.length === 1) return x[0];
+    const first = x[0];
+    return {
+      round: true, id: "round-" + x[x.length - 1].id,   // oldest row: stays put as later rows of the round arrive on top
+      ts: first.ts, user: first.user, actorId: first.actorId,
+      note: _auditRoundNote(first),
+      entries: x, pieces: x.reduce((s, e) => s + _auditDelta(e), 0)
+    };
+  });
+}
+function auditRoundTitle(r) {
+  const n = r.entries.length, p = r.pieces;
+  return `${p < 0 ? "ตัดสต็อก" : "เพิ่มสต็อก"} ${n} รายการ · ${p > 0 ? "+" : ""}${p} ชิ้น`;
+}
 // Direction of an audit entry, for the coloured dot: stock in / stock out /
 // neutral edit. Quantity deltas are written into the summary as "-2 ชิ้น".
 function auditTone(e) {
@@ -5066,7 +5125,7 @@ Object.assign(window, {
   loadInboundDraft, saveInboundDraft,
   defaultWorkHours, workHoursStatus, workHoursMessage, hmToMinutes, bangkokParts, WORKHOURS_DAY_LABELS,
   bangkokDateStr, workHoursExceptionDate, hasActiveWorkHoursException, workHoursStatusForUser,
-  bangkokTimeOf, shiftDayKey, thaiDayLabel, groupAuditByDay, auditTone,
+  bangkokTimeOf, shiftDayKey, thaiDayLabel, groupAuditByDay, groupAuditRounds, auditRoundTitle, auditTone,
   loadOfflineQueue, enqueueOfflineWrite, flushOfflineQueue,
   escHtml, printBarcodeLabels, openPickListWindow
 });
