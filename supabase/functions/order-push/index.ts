@@ -16,6 +16,9 @@
 //   VAPID_PUBLIC_KEY   — base64url P-256 public key (same value as the app's ORDER_PUSH_VAPID_PUBLIC)
 //   VAPID_PRIVATE_KEY  — base64url private key (never in the repo)
 //   VAPID_SUBJECT      — "https://psstock.vercel.app" (contact the push services may use)
+//   TELEGRAM_BOT_TOKEN — optional: from @BotFather. With TELEGRAM_CHAT_ID set, every
+//   TELEGRAM_CHAT_ID     alert is ALSO posted to that Telegram group (free, no quota).
+//                        Comma-separate several chat ids. Unset = Telegram off.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import webpush from "npm:web-push@3.6.7";
@@ -109,6 +112,58 @@ function buildPayload(a: any, by: string) {
   return null;
 }
 
+/* ── Telegram (optional second channel) ──────────────────────────────────────
+   One message per alert to the staff group. No 4 KB limit here, so it carries
+   the full line list / diff. HTML parse mode — every value is escaped. */
+const esc = (v: unknown) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function telegramText(a: any, by: string): string {
+  const k = KIND[a.kind] || KIND.edit;
+  const out: string[] = [`${k.icon} <b>${esc(k.tag)} · ${esc(str(a.short || a.id, 40))}</b>`];
+  const head = [str(a.customer, 60), str(a.channel, 20)].filter(Boolean).map(esc).join(" · ");
+  if (head) out.push(head);
+  const diff = (Array.isArray(a.diff) ? a.diff : []).slice(0, 30);
+  const items = (Array.isArray(a.items) ? a.items : []).slice(0, 30);
+  if (a.kind === "edit" && diff.length) {
+    out.push("");
+    diff.forEach((d: any) => {
+      const from = Number(d.from) || 0, to = Number(d.to) || 0;
+      const what = from === 0 ? "➕ เพิ่ม" : to === 0 ? "➖ เอาออก" : "🔁";
+      out.push(`${what} <code>${esc(str(d.sku, 30))}</code> ${esc(str(d.name, 60))} : ${from} → <b>${to}</b>`);
+    });
+  } else if (items.length) {
+    out.push("");
+    items.forEach((i: any) => out.push(`• <code>${esc(str(i.sku, 30))}</code> ${esc(str(i.name, 60))} × <b>${Number(i.qty) || 0}</b>`));
+  }
+  const fields = (Array.isArray(a.fields) ? a.fields : []).slice(0, 7);
+  if (fields.length) {
+    out.push("");
+    fields.forEach((f: any) => out.push(`✏️ ${esc(str(f.label, 20))}: ${esc(str(f.from, 60)) || "-"} → <b>${esc(str(f.to, 60)) || "-"}</b>`));
+  }
+  out.push("", `⚠️ ${esc(k.msg)}${by ? " (โดย " + esc(by) + ")" : ""}`);
+  return out.join("\n").slice(0, 4000);
+}
+
+async function sendTelegram(texts: string[]): Promise<{ sent: number; failed: number } | null> {
+  const token = Deno.env.get("TELEGRAM_BOT_TOKEN") || "";
+  const chats = (Deno.env.get("TELEGRAM_CHAT_ID") || "").split(",").map((c) => c.trim()).filter(Boolean);
+  if (!token || !chats.length || !texts.length) return null;
+  let sent = 0, failed = 0;
+  for (const chat_id of chats) {
+    for (const text of texts) {   // in order, so a "new" never lands after its "edit"
+      try {
+        const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id, text, parse_mode: "HTML", disable_web_page_preview: true }),
+        });
+        if (r.ok) sent++; else { failed++; console.error("telegram", r.status, await r.text().catch(() => "")); }
+      } catch (e) { failed++; console.error("telegram", e); }
+    }
+  }
+  return { sent, failed };
+}
+
 Deno.serve(async (req) => {
   const cors = corsFor(req);
   const json = (body: unknown, status = 200) =>
@@ -129,8 +184,10 @@ Deno.serve(async (req) => {
   const PUB = Deno.env.get("VAPID_PUBLIC_KEY") || "";
   const PRIV = Deno.env.get("VAPID_PRIVATE_KEY") || "";
   const SUBJECT = Deno.env.get("VAPID_SUBJECT") || "https://psstock.vercel.app";
-  if (!PUB || !PRIV) return json({ ok: false, error: "VAPID keys not configured" }, 500);
-  webpush.setVapidDetails(SUBJECT, PUB, PRIV);
+  const hasPush = !!(PUB && PRIV);
+  const hasTelegram = !!(Deno.env.get("TELEGRAM_BOT_TOKEN") && Deno.env.get("TELEGRAM_CHAT_ID"));
+  if (!hasPush && !hasTelegram) return json({ ok: false, error: "VAPID keys not configured" }, 500);
+  if (hasPush) webpush.setVapidDetails(SUBJECT, PUB, PRIV);
 
   let body: any;
   try { body = await req.json(); } catch { return json({ ok: false, error: "Bad JSON" }, 400); }
@@ -141,6 +198,12 @@ Deno.serve(async (req) => {
     ? [{ id: "TEST", kind: "new", short: "ทดสอบ", customer: "การแจ้งเตือนทำงานปกติ", items: [] }]
     : (Array.isArray(body?.alerts) ? body.alerts : []).slice(0, MAX_ALERTS);
   if (!alerts.length) return json({ ok: true, sent: 0 });
+
+  const by = test ? "" : str((user.user_metadata as any)?.name || (user.user_metadata as any)?.full_name || "", 30);
+  // The group is shared, so only an admin's test button posts to it.
+  const tgAlerts = test && role !== "admin" ? [] : alerts;
+  const telegramP = sendTelegram(tgAlerts.map((a: any) => telegramText(a, by)));
+  if (!hasPush) return json({ ok: true, devices: 0, sent: 0, telegram: await telegramP });
 
   // Skip only the DEVICE that made the change (its own endpoint), not the whole
   // account: the owner edits on the desktop and must still get the alert on
@@ -169,7 +232,6 @@ Deno.serve(async (req) => {
   if (stale.length) await admin.from("push_subscriptions").delete().in("endpoint", stale);
   const targets = (subs || []).filter((s: any) => okUser[s.user_id]);
 
-  const by = test ? "" : str((user.user_metadata as any)?.name || (user.user_metadata as any)?.full_name || "", 30);
   const payloads = alerts.map((a: any) => buildPayload(a, by)).filter(Boolean);
 
   let sent = 0, failed = 0;
@@ -192,5 +254,5 @@ Deno.serve(async (req) => {
   }));
   if (dead.length) await admin.from("push_subscriptions").delete().in("endpoint", dead);
 
-  return json({ ok: true, devices: targets.length, sent, failed, removed: dead.length });
+  return json({ ok: true, devices: targets.length, sent, failed, removed: dead.length, telegram: await telegramP });
 });
