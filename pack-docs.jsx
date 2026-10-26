@@ -1142,7 +1142,23 @@ function buildPackListPages(order, lines, size, thumbs) {
    draw. A photo that won't load (no CORS, gone) is just left out. */
 const _packThumbCache = {};
 async function packListThumbs(lines) {
-  const imgs = (typeof loadProductImages === "function") ? (loadProductImages() || {}) : {};
+  let imgs = (typeof loadProductImages === "function") ? (loadProductImages() || {}) : {};
+  // The full photo set loads in the background and can take ~30 s after the app
+  // opens (hundreds of rows, some multi-hundred-KB) — printing before that gave
+  // a pack list with no photos. Until it lands, read just this order's rows.
+  const loaded = window._DB_PRODUCT_IMAGES && Object.keys(window._DB_PRODUCT_IMAGES).length;
+  if (!loaded && typeof sb !== "undefined" && sb) {
+    const want = [...new Set((lines || []).map(l => l && l.sku).filter(Boolean))].map(s => "img:" + s);
+    if (want.length) {
+      try {
+        const { data } = await sb.from("app_state").select("key, value").in("key", want);
+        if (data && data.length) {
+          imgs = { ...imgs };
+          data.forEach(r => { if (r && typeof r.value === "string" && r.value) imgs[r.key.slice(4)] = r.value; });
+        }
+      } catch (e) {}
+    }
+  }
   const out = {};
   await Promise.all((lines || []).map(async (l) => {
     // Same lookup as the A4 ใบรายการแพ็คสินค้า, so both sheets show the same photo.
@@ -1700,8 +1716,51 @@ async function _addrLabelPng(html, size) {
     fitPackLabel(host);
     const lbl = host.firstElementChild;
     const mm = (typeof MM_TO_PX !== "undefined") ? MM_TO_PX : 96 / 25.4;
-    return await rasterizeLabel(lbl, Math.round(size.w * mm), Math.round(size.h * mm), 4);
+    const wPx = Math.round(size.w * mm), hPx = Math.round(size.h * mm), scale = 4;
+    // iOS Safari leaves <img> out when it rasterises an SVG foreignObject (even
+    // data: URIs), so the pack list's product photos came out blank on iPhone.
+    // Measure each photo where the layout put it, then paint it onto the canvas
+    // ourselves after the rasterise — identical on every browser.
+    const base = lbl.getBoundingClientRect();
+    const k = wPx / (base.width || wPx);
+    const photos = Array.from(lbl.querySelectorAll("img")).map(im => {
+      const r = im.getBoundingClientRect();
+      return { src: im.getAttribute("src"), x: (r.left - base.left) * k, y: (r.top - base.top) * k, w: r.width * k, h: r.height * k };
+    }).filter(p => p.src && p.w > 0 && p.h > 0);
+    const png = await rasterizeLabel(lbl, wPx, hPx, scale);
+    if (!photos.length) return png;
+    return await _paintPhotos(png, photos, scale, mm);
   } finally { host.remove(); }
+}
+async function _paintPhotos(png, photos, scale, mm) {
+  const load = (src) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+  const bg = await load(png);
+  const c = document.createElement("canvas");
+  c.width = bg.naturalWidth; c.height = bg.naturalHeight;
+  const g = c.getContext("2d");
+  g.drawImage(bg, 0, 0);
+  for (const p of photos) {
+    let im;
+    try { im = await load(p.src); } catch (e) { continue; }
+    const x = p.x * scale, y = p.y * scale, w = p.w * scale, h = p.h * scale;
+    // object-fit: cover — crop the source to the box's aspect.
+    const s = Math.max(w / im.naturalWidth, h / im.naturalHeight);
+    const sw = w / s, sh = h / s;
+    const rad = Math.min(w, h, 1 * mm * scale);
+    g.save();
+    g.beginPath();
+    if (g.roundRect) g.roundRect(x, y, w, h, rad); else g.rect(x, y, w, h);
+    g.clip();
+    g.fillStyle = "#fff"; g.fillRect(x, y, w, h);
+    g.drawImage(im, (im.naturalWidth - sw) / 2, (im.naturalHeight - sh) / 2, sw, sh, x, y, w, h);
+    g.restore();
+    g.beginPath();
+    if (g.roundRect) g.roundRect(x, y, w, h, rad); else g.rect(x, y, w, h);
+    g.lineWidth = Math.max(1, 0.2 * mm * scale); g.strokeStyle = "#000"; g.stroke();
+  }
+  const out = c.toDataURL("image/png");
+  c.width = c.height = 0;
+  return out;
 }
 /* Returns how many pages went out (phone PDF may drop a page that won't rasterise). */
 async function printLabelPages(pages, size, name) {
