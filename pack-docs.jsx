@@ -1409,7 +1409,7 @@ function printOrderFile(file) {
         const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h], orientation: "portrait" });
         const k = Math.min(size.w / im.naturalWidth, size.h / im.naturalHeight);
         const w = im.naturalWidth * k, h = im.naturalHeight * k;
-        pdf.addImage(f.dataUrl, (/png/i.test(f.type) ? "PNG" : "JPEG"), (size.w - w) / 2, (size.h - h) / 2, w, h);
+        pdf.addImage(f.dataUrl, (/png/i.test(f.type) ? "PNG" : "JPEG"), (size.w - w) / 2, (size.h - h) / 2, w, h, undefined, "FAST");
         savePdf(pdf, String(f.name || "label").replace(/\.[a-z0-9]+$/i, "").replace(/[/\\:*?"<>|]/g, "_") + "_" + size.id + ".pdf");
       } catch (e) { _printPDHtml(img, size); }
     };
@@ -1584,7 +1584,7 @@ async function printLabelPages(pages, size, name) {
       if (added) pdf.addPage([size.w, size.h], orient);
       const k = Math.min(size.w / img.w, size.h / img.h);
       const w = img.w * k, h = img.h * k;
-      pdf.addImage(img.dataUrl, img.fmt, (size.w - w) / 2, (size.h - h) / 2, w, h);
+      pdf.addImage(img.dataUrl, img.fmt, (size.w - w) / 2, (size.h - h) / 2, w, h, undefined, "FAST");
       added++;
     }
     if (added) savePdf(pdf, name + ".pdf");

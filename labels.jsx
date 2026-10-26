@@ -205,7 +205,7 @@ async function exportLabelPDF(el, size, soId, pushToast, scale) {
   });
   const { jsPDF } = window.jspdf;
   const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h] });
-  pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h);
+  pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h, undefined, "FAST");
   const filename = String(soId || "label").replace(/[/\\:*?"<>|]/g, "_") + "_label.pdf";
   if (typeof savePdf === "function") savePdf(pdf, filename); else pdf.save(filename);
   if (pushToast) pushToast("ดาวน์โหลด " + filename + " แล้ว ✓");
@@ -436,7 +436,7 @@ async function labelsToPDF(els, size, soId, pushToast) {
       continue;
     }
     if (added > 0) pdf.addPage([size.w, size.h], orient);
-    pdf.addImage(png, "PNG", 0, 0, size.w, size.h);
+    pdf.addImage(png, "PNG", 0, 0, size.w, size.h, undefined, "FAST");
     added++;
   }
   if (!added) { if (pushToast) pushToast("ไม่สามารถสร้าง PDF ได้ — กรุณาลองใหม่"); return false; }
@@ -1145,7 +1145,7 @@ function Labels({ pushToast, store }) {
     const canvas = await _capturePaper(el);
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({ unit: "mm", format: [size.w, size.h] });
-    pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h);
+    pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h, undefined, "FAST");
     const filename = (active.soId || "label").replace(/[/\\:*?"<>|]/g, "_") + "_label.pdf";
     if (typeof savePdf === "function") savePdf(pdf, filename); else pdf.save(filename);
     pushToast("ดาวน์โหลด " + filename + " แล้ว ✓");
@@ -1161,7 +1161,7 @@ function Labels({ pushToast, store }) {
     for (let i = 0; i < paperEls.length; i++) {
       if (i > 0) pdf.addPage([size.w, size.h]);
       const canvas = await _capturePaper(paperEls[i]);
-      pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h);
+      pdf.addImage(canvas.toDataURL("image/png"), "PNG", 0, 0, size.w, size.h, undefined, "FAST");
     }
     const filename = "labels_batch_" + sel.length + "pcs.pdf";
     if (typeof savePdf === "function") savePdf(pdf, filename); else pdf.save(filename);
