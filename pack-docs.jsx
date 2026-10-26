@@ -979,10 +979,11 @@ const PACK_LABEL_FIELDS = [
   { group: "ผู้ส่ง",  items: [["sender", "แสดงผู้ส่ง"], ["senderName", "ชื่อ"], ["senderAddr", "ที่อยู่"], ["senderPhone", "เบอร์โทร"]] },
   { group: "ผู้รับ",  items: [["recvPhone", "เบอร์โทร"], ["cod", "เก็บเงินปลายทาง (COD)"], ["carrier", "ขนส่ง"]] },
   { group: "สินค้า", items: [["items", "แสดงรายการสินค้า"], ["itemSku", "รหัส (SKU)"], ["itemName", "ชื่อสินค้า"], ["itemQty", "จำนวน"]] },
-  { group: "โน้ต",   items: [["notes", "โน้ตเตือนพนักงาน (ออร์เดอร์ + ช่อง)"]] }
+  { group: "โน้ต",   items: [["notes", "โน้ตเตือนพนักงาน (ออร์เดอร์ + ช่อง)"]] },
+  { group: "พิมพ์รวม", items: [["packList", "แนบหน้ารายการแพ็คต่อท้ายใบปะหน้าแต่ละออร์เดอร์"]] }
 ];
 const PACK_LABEL_DEFAULT = { header: true, sender: true, senderName: true, senderAddr: true, senderPhone: true,
-  recvPhone: true, cod: true, carrier: true, items: true, itemSku: true, itemName: true, itemQty: true, notes: true };
+  recvPhone: true, cod: true, carrier: true, items: true, itemSku: true, itemName: true, itemQty: true, notes: true, packList: false };
 function packLabelConfig() {
   let st = window._DB_STORE;
   if (!st) { try { st = JSON.parse(localStorage.getItem("ims_store") || "null"); } catch (e) {} }
@@ -1118,6 +1119,58 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
           `</div>`).join("") +
         `<div class="__pdNMore" style="display:none;font-size:${pt(8.5)};font-weight:700;margin-top:0.6mm">… ดูโน้ตเต็มในแอป</div>` +
       `</div>` : "") +
+    `</div>`);
+}
+/* The page that follows an order's ใบปะหน้า in a batch when "แนบรายการแพ็ค" is
+   on: every pick line (shelf · SKU · name · qty) with a tick box, at the label's
+   own size so it prints on the same roll. A long list continues on more pages
+   (หน้า 1/2 …) instead of shrinking past legibility; notes go on the last page.
+   Returns an array of page html strings. */
+function buildPackListPages(order, lines, size) {
+  const small = size.w < 100;
+  const all = (lines || []).filter(l => l && (Number(l.qty) || 0) > 0);
+  const per = small ? 6 : 11;
+  const chunks = [];
+  for (let i = 0; i < all.length; i += per) chunks.push(all.slice(i, i + per));
+  if (!chunks.length) chunks.push([]);
+  return chunks.map((rows, k) => _packListPageHtml(order, all, rows, size, k, chunks.length));
+}
+function _packListPageHtml(order, all, shown, size, k, nPages) {
+  const small = size.w < 100;
+  const pt = (n) => Math.max(small ? 8 : 9, Math.round(n * (small ? 0.8 : 1) * 2) / 2) + "pt";
+  const fit = (n) => `calc(${pt(n)} * var(--fit,1))`;
+  const pad = small ? 4 : 5.5;
+  const rule = `border-top:${small ? 0.35 : 0.45}mm solid #000;margin:${small ? 1.6 : 2.2}mm 0`;
+  const one = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+  const ref = (typeof orderShortId === "function") ? orderShortId(order) : order.id;
+  const r = packRecipientFor(order) || {};
+  const pcs = all.reduce((n, l) => n + (Number(l.qty) || 0), 0);
+  const notes = k === nPages - 1 ? packLabelNotes(order, all) : [];
+  const box = `display:inline-block;width:${small ? 3 : 3.6}mm;height:${small ? 3 : 3.6}mm;border:0.35mm solid #000;flex:none`;
+  return (
+    `<div class="__pdLbl" data-nmin="0.7" style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;overflow:hidden;line-height:1.3;font-weight:500">` +
+      `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
+        `<span style="font-size:${pt(13)};font-weight:700;white-space:nowrap">รายการแพ็ค${nPages > 1 ? `<span style="font-size:${pt(9)}"> หน้า ${k + 1}/${nPages}</span>` : ""}</span>` +
+        `<span style="font-size:${pt(13)};font-weight:700;${one}">${_escPD(ref)}</span></div>` +
+      (r.name ? `<div style="font-size:${pt(10)};margin-top:0.6mm;${one}">ผู้รับ: ${_escPD(r.name)}</div>` : "") +
+      `<div style="${rule}"></div>` +
+      `<div style="display:flex;justify-content:space-between;font-size:${pt(9)};font-weight:700;margin-bottom:0.8mm"><span>ช่อง · สินค้า</span><span>${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
+      (all.length ? shown.map((l, i) =>
+        `<div style="display:flex;gap:1.6mm;align-items:center;font-size:${fit(10.5)};padding:${small ? 0.7 : 1}mm 0;${i ? "border-top:0.2mm dashed #000;" : ""}">` +
+          `<span style="${box}"></span>` +
+          `<div style="flex:1;min-width:0">` +
+            `<div style="display:flex;gap:1.4mm;align-items:baseline"><span style="font-weight:700;white-space:nowrap">${_escPD(l.sku || "")}</span>` +
+            (l.loc && l.loc !== "-" ? `<span style="font-size:${fit(8.5)};${one}">ช่อง ${_escPD((l.parts && l.parts.pos) || l.loc)}</span>` : "") + `</div>` +
+            (l.name && l.name !== l.sku ? `<div style="font-size:${fit(9.5)};${one}">${_escPD(l.name)}</div>` : "") +
+          `</div>` +
+          `<span style="font-size:${fit(13)};font-weight:700;white-space:nowrap">× ${_escPD(l.qty)}</span>` +
+        `</div>`).join("")
+        : `<div style="font-size:${pt(10)}">ไม่มีรายการสินค้าในระบบ — ดูในแอป</div>`) +
+      (k < nPages - 1 ? `<div style="font-size:${pt(10)};font-weight:700;margin-top:0.8mm;text-align:right">ต่อหน้าถัดไป →</div>` : "") +
+      (notes.length ? `<div style="border:0.6mm solid #000;border-radius:1mm;padding:1mm 1.6mm;margin-top:${small ? 1.4 : 2}mm">` +
+        notes.map((n, i) => `<div class="__pdNB" style="font-size:calc(${pt(9.5)} * var(--nfit,1));font-weight:700;${i ? "margin-top:0.8mm;" : ""}word-break:break-word">` +
+          `${_escPD(n.tag)}: ` + String(n.text).replace(/\n\s*\n+/g, "\n").split("\n").map(t => `<span class="__pdNL">${_escPD(t)} </span>`).join("") + `</div>`).join("") +
+        `<div class="__pdNMore" style="display:none;font-size:${pt(8.5)};font-weight:700">… ดูโน้ตเต็มในแอป</div></div>` : "") +
     `</div>`);
 }
 /* Phones (iOS Safari, Android Chrome, the installed PWA) ignore @page size:
@@ -1521,6 +1574,7 @@ function _labelBatchName(groupName, count) {
    Returns { pages:[{dataUrl,fmt,w,h} | {html}], okIds, failed:[order], fromAddr } in list order. */
 async function collectOrderLabelPages(orders, size, onProgress, opts) {
   const addrFallback = !opts || opts.addrFallback !== false;
+  const packList = !!(opts && opts.packList);
   const res = new Array(orders.length);
   let next = 0, done = 0;
   const work = async () => {
@@ -1535,6 +1589,11 @@ async function collectOrderLabelPages(orders, size, onProgress, opts) {
           res[i] = { o, pages: [{ html: buildPackLabelHtml(o, lines, size) }], addr: true };
         } else res[i] = { o, pages: [] };
       } catch (e) { res[i] = { o, pages: [] }; }
+      // "แนบรายการแพ็ค": the order's pick list right behind its own label page(s).
+      if (packList && res[i].pages.length) {
+        const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
+        buildPackListPages(o, lines, size).forEach(html => res[i].pages.push({ html }));
+      }
       done++;
       if (onProgress) onProgress(done, orders.length);
     }
@@ -1699,7 +1758,7 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
     setBusy({ key, done: 0, total: todo.length });
     let r;
     try {
-      r = await collectOrderLabelPages(todo, size, (d, t) => setBusy({ key, done: d, total: t }), { addrFallback: useAddr });
+      r = await collectOrderLabelPages(todo, size, (d, t) => setBusy({ key, done: d, total: t }), { addrFallback: useAddr, packList: packLabelConfig().packList });
       if (r.pages.length) {
         if (sizeId !== packLabelSize().id) setPackLabelSize(sizeId);
         r.sent = await printLabelPages(r.pages, size, _labelBatchName(name, r.okIds.length));
@@ -1711,7 +1770,7 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
     setPrintedRev(x => x + 1);
     const short = (o) => (typeof orderShortId === "function") ? orderShortId(o) : o.id;
     const lost = r.pages.length - r.sent;
-    pushToast(`${name}: เตรียมใบปะหน้า ${r.sent} ใบ` + (r.fromAddr ? ` (จากที่อยู่ในระบบ ${r.fromAddr})` : "") +
+    pushToast(`${name}: เตรียมใบปะหน้า ${r.okIds.length} ออร์เดอร์ (${r.sent} หน้า)` + (r.fromAddr ? ` (จากที่อยู่ในระบบ ${r.fromAddr})` : "") +
       (r.failed.length ? ` · เปิดไม่ได้ ${r.failed.length} (${r.failed.slice(0, 3).map(short).join(", ")}${r.failed.length > 3 ? "…" : ""})` : "") +
       (lost > 0 ? ` · สร้างไม่สำเร็จ ${lost} ใบ` : ""));
     // Say it in the dialog too — a toast is gone before anyone reads the ids.
@@ -1773,6 +1832,9 @@ function PackLabelBatch({ orders, preset, pushToast, onClose }) {
               onChange={e => { setUseAddr(e.target.checked); try { localStorage.setItem("ims_label_batch_addr", e.target.checked ? "1" : "0"); } catch (x) {} }}/>
             <span>ออร์เดอร์ที่ไม่ได้แนบไฟล์ ให้พิมพ์ใบปะหน้าจากที่อยู่ในระบบแทน<br/><span style={{ fontSize: 11.5, color: "var(--muted)" }}>เช่น Facebook / LINE ที่ไม่มีใบปะหน้าจากแพลตฟอร์ม</span></span>
           </label>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
+            หน้ารายการแพ็คต่อท้ายแต่ละออร์เดอร์: <b style={{ color: "var(--fg)" }}>{packLabelConfig().packList ? "เปิด" : "ปิด"}</b> · เปลี่ยนได้ที่ ⚙ ตั้งค่าใบปะหน้า
+          </div>
           {groups.length > 1 && row("_all", "ทุกแพลตฟอร์ม", allStat, <span className="pp-icon pp-icon-all pp-icon-lg"><Icons.Grid size={18}/></span>)}
           {groups.map(g => {
             const m = (typeof channelMark === "function") ? channelMark(g.name) : null;
