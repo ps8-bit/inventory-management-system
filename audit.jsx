@@ -273,6 +273,7 @@ function HistoryPage({ pushToast, goToProduct, goToOrder }) {
   });
   const [actionFilter, setActionFilter] = useStateAud("all");
   const [sel, setSel] = useStateAud(null);       // entry open in the detail panel
+  const [openRounds, setOpenRounds] = useStateAud({});   // ปรับสต็อก rounds expanded
   const [day, setDay] = useStateAud(null);        // null = ทุกวันที่โหลดไว้
   const [dayRows, setDayRows] = useStateAud(null);
   const [busy, setBusy] = useStateAud(false);
@@ -439,10 +440,48 @@ function HistoryPage({ pushToast, goToProduct, goToOrder }) {
               </div>
 
               <div className="card card-tight">
-                {entries.map((e, i) => {
+                {groupAuditRounds(entries).map((item, i, items) => {
+                  const last = i === items.length - 1;
+                  if (item.round) {
+                    const isOpen = !!openRounds[item.id];
+                    return (
+                      <div key={item.id} style={{ borderBottom: last ? "none" : "1px solid var(--border)" }}>
+                        <div style={{ padding: "14px 18px", display: "flex", gap: 14, alignItems: "flex-start", cursor: "pointer" }}
+                          onClick={() => setOpenRounds(s => ({ ...s, [item.id]: !s[item.id] }))}>
+                          <div className="user-avatar" style={{ background: "oklch(0.55 0.15 " + ((item.user?.name?.charCodeAt(0) || 0) * 4 % 360) + ")", width: 32, height: 32, fontSize: 11, flexShrink: 0 }}>{item.user?.avatar || "?"}</div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="row" style={{ gap: 8, marginBottom: 2 }}>
+                              <ActorName entry={item} style={{ fontSize: 13, fontWeight: 500 }}/>
+                              <span className={"badge " + (ACTION_TONES.adjust || "badge-neutral")} style={{ fontSize: 10 }}>{ACTION_LABELS.adjust || "adjust"}</span>
+                              <span className="badge badge-neutral" style={{ fontSize: 10 }}>รอบเดียวกัน</span>
+                            </div>
+                            <div style={{ fontSize: 13, fontWeight: 600 }}>{auditRoundTitle(item)}</div>
+                            {item.note && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{item.note}</div>}
+                          </div>
+                          <div style={{ textAlign: "right", flexShrink: 0 }}>
+                            <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{bangkokTimeOf(item.ts)}</div>
+                            <span style={{ display: "inline-flex", color: "var(--muted)", marginTop: 2, transform: isOpen ? "rotate(90deg)" : "none" }}><Icons.Chev size={12}/></span>
+                          </div>
+                        </div>
+                        {isOpen && (
+                          <div style={{ margin: "0 18px 12px 64px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--surface-2)" }}>
+                            {item.entries.map((c, j) => (
+                              <div key={c.id} onClick={() => setSel(c)}
+                                style={{ padding: "8px 12px", display: "flex", gap: 10, alignItems: "center", cursor: "pointer", borderBottom: j < item.entries.length - 1 ? "1px solid var(--border)" : "none" }}>
+                                {typeof ProductImageThumb === "function" && <ProductImageThumb sku={c.entityId} size={30} radius={6}/>}
+                                <span style={{ flex: 1, minWidth: 0, fontSize: 12 }}>{String(c.summary || "").replace(/^ปรับสต็อก\s*/, "")}</span>
+                                <Icons.Chev size={11} style={{ color: "var(--muted)" }}/>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  const e = item;
                   const hasDetails = (e.changes && e.changes.length > 0) || e.note || auditEntryMovesStock(e);
                   return (
-                    <div key={e.id} style={{ borderBottom: i < entries.length - 1 ? "1px solid var(--border)" : "none" }}>
+                    <div key={e.id} style={{ borderBottom: last ? "none" : "1px solid var(--border)" }}>
                       <div
                         style={{ padding: "14px 18px", display: "flex", gap: 14, alignItems: "flex-start", cursor: hasDetails ? "pointer" : "default" }}
                         onClick={() => hasDetails && setSel(e)}
