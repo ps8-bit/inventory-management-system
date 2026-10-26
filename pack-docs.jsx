@@ -1226,22 +1226,30 @@ function _packListPageHtml(order, all, shown, size, k, nPages, thumbs) {
   const ph = ((small ? 9 : 13) * d).toFixed(1);
   const bx = ((small ? 3 : 3.6) * Math.max(0.8, d)).toFixed(1);
   const box = `display:inline-block;width:${bx}mm;height:${bx}mm;border:0.35mm solid #000;flex:none`;
+  // Every block above and including the rows has a FIXED height in mm, so where
+  // a photo sits never depends on font metrics. On phones the photos are painted
+  // onto the canvas at positions measured in the page (iOS drops <img> from the
+  // rasterised SVG); with content-sized rows, the page's and the rasteriser's
+  // slightly different line heights drifted every photo further off its frame.
+  const rpad = (small ? 0.7 : 1) * d;
+  const rowH = (Number(ph) + 2 * rpad + 0.2).toFixed(2);   // + the dashed separator
+  const fixed = (mm) => `height:${mm}mm;box-sizing:border-box;overflow:hidden;flex:none`;
   return (
     `<div class="__pdLbl" data-nmin="0.7" style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;overflow:hidden;line-height:1.3;font-weight:500">` +
-      `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
+      `<div style="display:flex;justify-content:space-between;align-items:center;gap:2mm;${fixed(small ? 5 : 6.4)}">` +
         `<span style="font-size:${pt(13)};font-weight:700;white-space:nowrap">รายการแพ็ค${nPages > 1 ? `<span style="font-size:${pt(9)}"> หน้า ${k + 1}/${nPages}</span>` : ""}</span>` +
         `<span style="font-size:${pt(13)};font-weight:700;${one}">${_escPD(ref)}</span></div>` +
       // Marketplace orders: the platform's own order no. — what the packer matches
       // against the platform label / app, which never shows our SO id.
       // Platform mark + name on every order; marketplace orders add their order no.
-      ((pf) => pf ? `<div style="display:flex;align-items:center;gap:1.6mm;margin-top:1mm;font-size:${pt(11)};font-weight:700;min-width:0">` +
+      ((pf) => pf ? `<div style="display:flex;align-items:center;gap:1.6mm;margin-top:1mm;font-size:${pt(11)};font-weight:700;min-width:0;${fixed(small ? 4.8 : 6)}">` +
         _platformMarkSvg(pf, small ? 4.5 : 5.5) + `<span style="${one}">${_escPD(pf)}${order.platformOrderNo ? " · คำสั่งซื้อ " + _escPD(order.platformOrderNo) : ""}</span></div>` : "")(
         (typeof packPlatformOf === "function") ? packPlatformOf(order) : (order.channel || "")) +
-      (r.name ? `<div style="font-size:${pt(10)};margin-top:0.6mm;${one}">ผู้รับ: ${_escPD(r.name)}</div>` : "") +
+      (r.name ? `<div style="font-size:${pt(10)};margin-top:0.6mm;line-height:${small ? 4 : 4.8}mm;${one};${fixed(small ? 4 : 4.8)}">ผู้รับ: ${_escPD(r.name)}</div>` : "") +
       `<div style="${rule}"></div>` +
-      `<div style="display:flex;justify-content:space-between;font-size:${pt(9)};font-weight:700;margin-bottom:0.8mm"><span>ช่อง · สินค้า</span><span>${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
+      `<div style="display:flex;justify-content:space-between;align-items:center;font-size:${pt(9)};font-weight:700;margin-bottom:0.8mm;${fixed(small ? 4 : 4.6)}"><span>ช่อง · สินค้า</span><span>${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
       (all.length ? shown.map((l, i) =>
-        `<div style="display:flex;gap:1.6mm;align-items:center;font-size:${fit(10.5)};padding:${((small ? 0.7 : 1) * d).toFixed(2)}mm 0;${i ? "border-top:0.2mm dashed #000;" : ""}">` +
+        `<div style="display:flex;gap:1.6mm;align-items:center;font-size:${fit(10.5)};padding:${rpad.toFixed(2)}mm 0;${fixed(rowH)};${i ? "border-top:0.2mm dashed #000;" : ""}">` +
           `<span style="${box}"></span>` +
           (thumbs[l.sku]
             ? `<img src="${thumbs[l.sku]}" alt="" style="width:${ph}mm;height:${ph}mm;flex:none;object-fit:cover;border:0.2mm solid #000;border-radius:1mm;display:block">`
@@ -1707,16 +1715,32 @@ async function collectOrderLabelPages(orders, size, onProgress, opts) {
    iOS-safe rasteriser. */
 async function _addrLabelPng(html, size) {
   if (typeof rasterizeLabel !== "function") throw new Error("ไม่มีตัวแปลงฉลาก");
+  // The rasteriser lays the label out in the Sarabun files it embeds (labels.jsx
+  // ensureSarabunFaceCss). Photos are painted at positions measured HERE, so this
+  // layout must use those exact font files: Google's Sarabun (the page's) has
+  // different line metrics, and on iPhone it may not even be loaded yet — either
+  // way every painted photo drifted off its row. Same files under a private name.
+  const faceCss = (typeof ensureSarabunFaceCss === "function") ? await ensureSarabunFaceCss() : "";
+  if (faceCss && !document.getElementById("__lpMeasureFont")) {
+    const st = document.createElement("style");
+    st.id = "__lpMeasureFont";
+    st.textContent = faceCss.replace(/font-family:"Sarabun"/g, 'font-family:"__LPSarabun"');
+    document.head.appendChild(st);
+  }
+  const fam = faceCss ? "'__LPSarabun'," : "";
+  if (faceCss) { try { await Promise.all(["400 16px __LPSarabun", "700 16px __LPSarabun"].map(f => document.fonts.load(f))); } catch (e) {} }
   const host = document.createElement("div");
-  host.setAttribute("style", "position:fixed;left:-10000px;top:0;background:#fff;color:#000;letter-spacing:normal;font-family:'Sarabun','Leelawadee UI',Tahoma,sans-serif");
+  host.setAttribute("style", `position:fixed;left:-10000px;top:0;background:#fff;color:#000;letter-spacing:normal;font-family:${fam}'Sarabun','Leelawadee UI',Tahoma,sans-serif`);
   host.innerHTML = html;
   document.body.appendChild(host);
   try {
     try { await document.fonts.ready; } catch (e) {}
-    fitPackLabel(host);
     const lbl = host.firstElementChild;
     const mm = (typeof MM_TO_PX !== "undefined") ? MM_TO_PX : 96 / 25.4;
     const wPx = Math.round(size.w * mm), hPx = Math.round(size.h * mm), scale = 4;
+    // Lay out at the rasteriser's exact pixel box, then fit.
+    lbl.style.width = wPx + "px"; lbl.style.height = hPx + "px";
+    fitPackLabel(host);
     // iOS Safari leaves <img> out when it rasterises an SVG foreignObject (even
     // data: URIs), so the pack list's product photos came out blank on iPhone.
     // Measure each photo where the layout put it, then paint it onto the canvas
@@ -1727,6 +1751,9 @@ async function _addrLabelPng(html, size) {
       const r = im.getBoundingClientRect();
       return { src: im.getAttribute("src"), x: (r.left - base.left) * k, y: (r.top - base.top) * k, w: r.width * k, h: r.height * k };
     }).filter(p => p.src && p.w > 0 && p.h > 0);
+    // Only the painted copy may show — Safari still draws the <img>'s border
+    // (not its picture), which doubled the frame wherever layouts disagreed.
+    if (photos.length) lbl.querySelectorAll("img").forEach(im => { im.style.visibility = "hidden"; });
     const png = await rasterizeLabel(lbl, wPx, hPx, scale);
     if (!photos.length) return png;
     return await _paintPhotos(png, photos, scale, mm);
