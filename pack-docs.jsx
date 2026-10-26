@@ -1123,13 +1123,14 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
 }
 /* The page that follows an order's ใบปะหน้า in a batch when "แนบรายการแพ็ค" is
    on: every pick line (shelf · SKU · name · qty) with a tick box, at the label's
-   own size so it prints on the same roll. A long list continues on more pages
-   (หน้า 1/2 …) instead of shrinking past legibility; notes go on the last page.
+   own size so it prints on the same roll. A longer list shrinks its rows to
+   stay on ONE page (down to a 6.5pt floor a thermal head still prints); only
+   past that cap does it continue on more pages (หน้า 1/2 …). Notes go last.
    Returns an array of page html strings. */
 function buildPackListPages(order, lines, size, thumbs) {
   const small = size.w < 100;
   const all = (lines || []).filter(l => l && (Number(l.qty) || 0) > 0);
-  const per = small ? 4 : 6;
+  const per = small ? 6 : 10;
   const chunks = [];
   for (let i = 0; i < all.length; i += per) chunks.push(all.slice(i, i + per));
   if (!chunks.length) chunks.push([]);
@@ -1195,7 +1196,6 @@ function _packListShelf(loc) {
 function _packListPageHtml(order, all, shown, size, k, nPages, thumbs) {
   const small = size.w < 100;
   const pt = (n) => Math.max(small ? 8 : 9, Math.round(n * (small ? 0.8 : 1) * 2) / 2) + "pt";
-  const fit = (n) => `calc(${pt(n)} * var(--fit,1))`;
   const pad = small ? 4 : 5.5;
   const rule = `border-top:${small ? 0.35 : 0.45}mm solid #000;margin:${small ? 1.6 : 2.2}mm 0`;
   const one = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
@@ -1203,7 +1203,13 @@ function _packListPageHtml(order, all, shown, size, k, nPages, thumbs) {
   const r = packRecipientFor(order) || {};
   const pcs = all.reduce((n, l) => n + (Number(l.qty) || 0), 0);
   const notes = k === nPages - 1 ? packLabelNotes(order, all) : [];
-  const box = `display:inline-block;width:${small ? 3 : 3.6}mm;height:${small ? 3 : 3.6}mm;border:0.35mm solid #000;flex:none`;
+  // Row density: full size up to 4 (75×100) / 6 (100×150) rows, then scaled
+  // down so up to 6 / 10 rows still fit on this one page.
+  const d = Math.max(0.6, Math.min(1, (small ? 4 : 6) / Math.max(1, shown.length)));
+  const fit = (n) => `calc(${Math.max(6.5, Math.round(n * (small ? 0.8 : 1) * d * 2) / 2)}pt * var(--fit,1))`;
+  const ph = ((small ? 9 : 13) * d).toFixed(1);
+  const bx = ((small ? 3 : 3.6) * Math.max(0.8, d)).toFixed(1);
+  const box = `display:inline-block;width:${bx}mm;height:${bx}mm;border:0.35mm solid #000;flex:none`;
   return (
     `<div class="__pdLbl" data-nmin="0.7" style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;overflow:hidden;line-height:1.3;font-weight:500">` +
       `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
@@ -1219,11 +1225,11 @@ function _packListPageHtml(order, all, shown, size, k, nPages, thumbs) {
       `<div style="${rule}"></div>` +
       `<div style="display:flex;justify-content:space-between;font-size:${pt(9)};font-weight:700;margin-bottom:0.8mm"><span>ช่อง · สินค้า</span><span>${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
       (all.length ? shown.map((l, i) =>
-        `<div style="display:flex;gap:1.6mm;align-items:center;font-size:${fit(10.5)};padding:${small ? 0.7 : 1}mm 0;${i ? "border-top:0.2mm dashed #000;" : ""}">` +
+        `<div style="display:flex;gap:1.6mm;align-items:center;font-size:${fit(10.5)};padding:${((small ? 0.7 : 1) * d).toFixed(2)}mm 0;${i ? "border-top:0.2mm dashed #000;" : ""}">` +
           `<span style="${box}"></span>` +
           (thumbs[l.sku]
-            ? `<img src="${thumbs[l.sku]}" alt="" style="width:${small ? 9 : 13}mm;height:${small ? 9 : 13}mm;flex:none;object-fit:cover;border:0.2mm solid #000;border-radius:1mm;display:block">`
-            : `<span style="width:${small ? 9 : 13}mm;height:${small ? 9 : 13}mm;flex:none;box-sizing:border-box;border:0.2mm dashed #000;border-radius:1mm;font-size:${pt(7)};display:flex;align-items:center;justify-content:center">ไม่มีรูป</span>`) +
+            ? `<img src="${thumbs[l.sku]}" alt="" style="width:${ph}mm;height:${ph}mm;flex:none;object-fit:cover;border:0.2mm solid #000;border-radius:1mm;display:block">`
+            : `<span style="width:${ph}mm;height:${ph}mm;flex:none;box-sizing:border-box;border:0.2mm dashed #000;border-radius:1mm;font-size:${fit(7)};display:flex;align-items:center;justify-content:center;text-align:center;line-height:1.1">ไม่มีรูป</span>`) +
           `<div style="flex:1;min-width:0">` +
             `<div style="display:flex;gap:1.4mm;align-items:baseline"><span style="font-weight:700;white-space:nowrap">${_escPD(l.sku || "")}</span>` +
             (l.loc && l.loc !== "-" ? `<span style="font-size:${fit(8.5)};${one}">ช่อง ${_escPD(_packListShelf(l.loc))}</span>` : "") + `</div>` +
