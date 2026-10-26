@@ -1126,14 +1126,48 @@ function buildPackLabelHtml(order, lines, size, cfgOverride, recipOverride) {
    own size so it prints on the same roll. A long list continues on more pages
    (หน้า 1/2 …) instead of shrinking past legibility; notes go on the last page.
    Returns an array of page html strings. */
-function buildPackListPages(order, lines, size) {
+function buildPackListPages(order, lines, size, thumbs) {
   const small = size.w < 100;
   const all = (lines || []).filter(l => l && (Number(l.qty) || 0) > 0);
-  const per = small ? 6 : 11;
+  const per = small ? 5 : 8;
   const chunks = [];
   for (let i = 0; i < all.length; i += per) chunks.push(all.slice(i, i + per));
   if (!chunks.length) chunks.push([]);
-  return chunks.map((rows, k) => _packListPageHtml(order, all, rows, size, k, chunks.length));
+  return chunks.map((rows, k) => _packListPageHtml(order, all, rows, size, k, chunks.length, thumbs || {}));
+}
+/* Product photos for the pack list → small JPEG data URIs keyed by sku. Stored
+   images are a mix of huge data: URIs and remote CDN urls; a 240 px thumbnail
+   keeps the PDF small, and a data: src is the only kind the SVG rasteriser can
+   draw. A photo that won't load (no CORS, gone) is just left out. */
+const _packThumbCache = {};
+async function packListThumbs(lines) {
+  const imgs = (typeof loadProductImages === "function") ? (loadProductImages() || {}) : {};
+  const out = {};
+  await Promise.all((lines || []).map(async (l) => {
+    // Same lookup as the A4 ใบรายการแพ็คสินค้า, so both sheets show the same photo.
+    const sku = l && l.sku;
+    const src = sku && ((typeof resolveProductImage === "function") ? resolveProductImage(sku, imgs) : imgs[sku]);
+    if (!src) return;
+    if (_packThumbCache[sku + "|" + src.length]) { out[sku] = _packThumbCache[sku + "|" + src.length]; return; }
+    try {
+      const im = await new Promise((res, rej) => {
+        const i = new Image();
+        if (!/^data:/.test(src)) i.crossOrigin = "anonymous";
+        i.onload = () => res(i); i.onerror = rej;
+        setTimeout(rej, 8000);
+        i.src = src;
+      });
+      const k = Math.min(1, 240 / Math.max(im.naturalWidth, im.naturalHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(im.naturalWidth * k)); c.height = Math.max(1, Math.round(im.naturalHeight * k));
+      const g = c.getContext("2d");
+      g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(im, 0, 0, c.width, c.height);
+      out[sku] = _packThumbCache[sku + "|" + src.length] = c.toDataURL("image/jpeg", 0.85);
+      c.width = c.height = 0;
+    } catch (e) {}
+  }));
+  return out;
 }
 /* "ตึกพาณิชย์ › ชั้น 1 › A" → "ชั้น 1 › A": the floor matters (A exists on more
    than one), the building rarely does and costs the row its width. */
@@ -1141,7 +1175,7 @@ function _packListShelf(loc) {
   const segs = String(loc || "").split("›").map(x => x.trim()).filter(Boolean);
   return segs.length > 2 ? segs.slice(1).join(" › ") : segs.join(" › ");
 }
-function _packListPageHtml(order, all, shown, size, k, nPages) {
+function _packListPageHtml(order, all, shown, size, k, nPages, thumbs) {
   const small = size.w < 100;
   const pt = (n) => Math.max(small ? 8 : 9, Math.round(n * (small ? 0.8 : 1) * 2) / 2) + "pt";
   const fit = (n) => `calc(${pt(n)} * var(--fit,1))`;
@@ -1164,6 +1198,9 @@ function _packListPageHtml(order, all, shown, size, k, nPages) {
       (all.length ? shown.map((l, i) =>
         `<div style="display:flex;gap:1.6mm;align-items:center;font-size:${fit(10.5)};padding:${small ? 0.7 : 1}mm 0;${i ? "border-top:0.2mm dashed #000;" : ""}">` +
           `<span style="${box}"></span>` +
+          (thumbs[l.sku]
+            ? `<img src="${thumbs[l.sku]}" alt="" style="width:${small ? 9 : 13}mm;height:${small ? 9 : 13}mm;flex:none;object-fit:cover;border:0.2mm solid #000;border-radius:1mm;display:block">`
+            : `<span style="width:${small ? 9 : 13}mm;height:${small ? 9 : 13}mm;flex:none;box-sizing:border-box;border:0.2mm dashed #000;border-radius:1mm;font-size:${pt(7)};display:flex;align-items:center;justify-content:center">ไม่มีรูป</span>`) +
           `<div style="flex:1;min-width:0">` +
             `<div style="display:flex;gap:1.4mm;align-items:baseline"><span style="font-weight:700;white-space:nowrap">${_escPD(l.sku || "")}</span>` +
             (l.loc && l.loc !== "-" ? `<span style="font-size:${fit(8.5)};${one}">ช่อง ${_escPD(_packListShelf(l.loc))}</span>` : "") + `</div>` +
@@ -1598,7 +1635,8 @@ async function collectOrderLabelPages(orders, size, onProgress, opts) {
       // "แนบรายการแพ็ค": the order's pick list right behind its own label page(s).
       if (packList && res[i].pages.length) {
         const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
-        buildPackListPages(o, lines, size).forEach(html => res[i].pages.push({ html }));
+        const thumbs = await packListThumbs(lines);
+        buildPackListPages(o, lines, size, thumbs).forEach(html => res[i].pages.push({ html }));
       }
       done++;
       if (onProgress) onProgress(done, orders.length);
