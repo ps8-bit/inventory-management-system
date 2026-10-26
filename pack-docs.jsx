@@ -1192,6 +1192,9 @@ function _packListPageHtml(order, all, shown, size, k, nPages, thumbs) {
       `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
         `<span style="font-size:${pt(13)};font-weight:700;white-space:nowrap">รายการแพ็ค${nPages > 1 ? `<span style="font-size:${pt(9)}"> หน้า ${k + 1}/${nPages}</span>` : ""}</span>` +
         `<span style="font-size:${pt(13)};font-weight:700;${one}">${_escPD(ref)}</span></div>` +
+      // Marketplace orders: the platform's own order no. — what the packer matches
+      // against the platform label / app, which never shows our SO id.
+      (order.platformOrderNo ? `<div style="font-size:${pt(11)};font-weight:700;margin-top:0.8mm;${one}">${_escPD((typeof packPlatformOf === "function") ? packPlatformOf(order) : "")} คำสั่งซื้อ ${_escPD(order.platformOrderNo)}</div>` : "") +
       (r.name ? `<div style="font-size:${pt(10)};margin-top:0.6mm;${one}">ผู้รับ: ${_escPD(r.name)}</div>` : "") +
       `<div style="${rule}"></div>` +
       `<div style="display:flex;justify-content:space-between;font-size:${pt(9)};font-weight:700;margin-bottom:0.8mm"><span>ช่อง · สินค้า</span><span>${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
