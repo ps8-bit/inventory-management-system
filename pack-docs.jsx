@@ -1946,20 +1946,34 @@ const PACK_LABEL_SAMPLE = {
 function PackLabelSettings({ pushToast, mobile, onClose }) {
   const [cfg, setCfg] = useStatePD(() => packLabelConfig());
   const [paper, setPaper] = useStatePD(() => packLabelSize().id);
-  const [saving, setSaving] = useStatePD(false);
   const canEdit = canEditPackLabel();
+  // Taps used to be DROPPED while a save was in flight (`if (saving) return`),
+  // so ticking two boxes quickly kept only the first. Now every tap applies at
+  // once and the saves run one after another, each writing the latest config;
+  // a rejected save reverts to the last config the server accepted.
+  const cfgRef = useRefPD(cfg), savedRef = useRefPD(cfg);
+  const chainRef = useRefPD(Promise.resolve()), pendingRef = useRefPD(0);
   useEffectPD(() => {
-    const h = () => setCfg(packLabelConfig());
+    // Another device's change — but never over taps still waiting to save.
+    const h = () => { if (pendingRef.current) return; const c = packLabelConfig(); cfgRef.current = savedRef.current = c; setCfg(c); };
     window.addEventListener("ims-store-change", h);
     return () => window.removeEventListener("ims-store-change", h);
   }, []);
-  const toggle = async (k) => {
-    if (!canEdit || saving) return;
-    const prev = cfg, next = { ...cfg, [k]: !cfg[k] };
-    setCfg(next); setSaving(true);
-    const res = await savePackLabelConfig(next);
-    setSaving(false);
-    if (res.error) { setCfg(prev); if (pushToast) pushToast({ msg: "บันทึกการตั้งค่าใบปะหน้าไม่สำเร็จ — ตรวจสอบสิทธิ์", type: "error" }); }
+  const toggle = (k) => {
+    if (!canEdit) return;
+    const next = { ...cfgRef.current, [k]: !cfgRef.current[k] };
+    cfgRef.current = next; setCfg(next);
+    pendingRef.current++;
+    chainRef.current = chainRef.current.then(async () => {
+      try {
+        if (cfgRef.current !== next) return;   // a later tap saves the combined config
+        const res = await savePackLabelConfig(next);
+        if (res.error) {
+          cfgRef.current = savedRef.current; setCfg(savedRef.current);
+          if (pushToast) pushToast({ msg: "บันทึกการตั้งค่าใบปะหน้าไม่สำเร็จ — ตรวจสอบสิทธิ์", type: "error" });
+        } else savedRef.current = next;
+      } finally { pendingRef.current--; }
+    });
   };
   const size = PACK_LABEL_SIZES.find(z => z.id === paper) || PACK_LABEL_SIZES[0];
   const html = buildPackLabelHtml(PACK_LABEL_SAMPLE.order, PACK_LABEL_SAMPLE.lines, size, cfg, PACK_LABEL_SAMPLE.recip);
