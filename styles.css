@@ -2998,3 +2998,13 @@ button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft
 @media (prefers-reduced-motion: reduce) {
   .ps-bell-icon, .m-tab .m-tab-icon, .m-tab-art, .m-tab { animation: none !important; transition: none !important; }
 }
+
+/* Packer-home summary tiles: they open something, so they must look and feel
+   pressable — a chevron on the label, a press dip, an accent edge on hover. */
+.ph-tile { transition: transform .12s ease, border-color .15s ease, background-color .15s ease, box-shadow .15s ease; -webkit-tap-highlight-color: transparent; }
+.ph-tile:not(:disabled):active { transform: scale(.97); background: color-mix(in oklab, var(--accent-soft) 55%, var(--surface)); border-color: color-mix(in oklab, var(--accent) 45%, var(--border)); }
+.ph-tile:not(:disabled):hover { border-color: color-mix(in oklab, var(--accent) 45%, var(--border)); box-shadow: var(--elev-2, var(--elev-1)); }
+.ph-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ph-tile-label { display: inline-flex; align-items: center; gap: 2px; }
+.ph-tile-chev { color: var(--accent); flex-shrink: 0; display: inline-flex; }
+@media (prefers-reduced-motion: reduce) { .ph-tile { transition: none; } .ph-tile:not(:disabled):active { transform: none; } }
