@@ -173,4 +173,37 @@ const QR = ({ value = "X", size = 72 }) => {
   );
 };
 
-Object.assign(window, { Icons, Barcode, QR, qrModules, qrSvgMarkup });
+/* 3D clay illustrations — ONE set in img/ui (ps-tactical-ui-assets-20261025,
+   240px transparent WebP; the header 480px; more-menu is SVG). Used for empty
+   states, headers, shortcut tiles, the bottom tab bar, bell and scan chips —
+   never baked text/numbers. Bump ILLUS_V when an image file changes. */
+const ILLUS_V = "20261025a";
+const ILLUS_NAMES = ["channel-sales","finder","history","home-tab","import","labels","notifications","packing",
+  "pending-orders","quick-sale","receive","reorder-alert","scan-button","sell-ship","settings","staff-tactical",
+  "stock-adjust","stock-out","stock-summary","users","warehouse-header"];
+const ILLUS = {};
+ILLUS_NAMES.forEach(n => { ILLUS[n] = "img/ui/" + n + ".webp"; });
+ILLUS["more-menu"] = "img/ui/more-menu.svg";
+// Older keys still used by call sites, mapped onto the one set (no duplicate files).
+Object.assign(ILLUS, {
+  "warehouse": ILLUS["warehouse-header"],
+  "pk-team": ILLUS["users"], "pk-box": ILLUS["packing"], "pk-pending": ILLUS["pending-orders"],
+  "pk-items": ILLUS["stock-out"], "pk-overdue": ILLUS["history"]
+});
+function illusSrc(name) { return ILLUS[name] ? ILLUS[name] + "?v=" + ILLUS_V : ""; }
+
+/* Empty state with an illustration: picture, one-line title, optional detail.
+   `size` is the picture box (object-fit: contain, so source ratios don't matter);
+   `bare` drops the dashed frame when the parent already draws one. */
+function IllusEmpty({ art, title, children, size, bare, style }) {
+  const s = size || 88;
+  return (
+    <div className={"illus-empty" + (bare ? " is-bare" : "")} style={style}>
+      {illusSrc(art) && <img className="illus-empty-img" src={illusSrc(art)} alt="" width={s} height={s} loading="lazy" decoding="async" style={{ width: s, height: s }}/>}
+      {title && <div className="illus-empty-title">{title}</div>}
+      {children && <div className="illus-empty-sub">{children}</div>}
+    </div>
+  );
+}
+
+Object.assign(window, { Icons, Barcode, QR, qrModules, qrSvgMarkup, ILLUS, illusSrc, IllusEmpty });
