@@ -1662,8 +1662,11 @@ async function collectOrderLabelPages(orders, size, onProgress, opts) {
         } else res[i] = { o, pages: [] };
       } catch (e) { res[i] = { o, pages: [] }; }
       // "แนบรายการแพ็ค": the order's pick list right behind its own label page(s).
-      if (packList && res[i].pages.length) {
-        const lines = (typeof packLinesForOrder === "function") ? packLinesForOrder(o) : [];
+      // No product lines in the system → no page (nothing to list; a platform
+      // label carries its own item table).
+      const lines = packList && res[i].pages.length && (typeof packLinesForOrder === "function")
+        ? packLinesForOrder(o).filter(l => l && (Number(l.qty) || 0) > 0) : [];
+      if (lines.length) {
         const thumbs = await packListThumbs(lines);
         buildPackListPages(o, lines, size, thumbs).forEach(html => res[i].pages.push({ html }));
       }
