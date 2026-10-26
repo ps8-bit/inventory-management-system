@@ -2638,15 +2638,24 @@ function groupAuditByDay(list) {
    batch column, so this is display-only; a lone row stays a plain entry.
    list is newest-first → [entry | { round: true, id, ts, user, note, entries, pieces }] */
 const ROUND_GAP_MS = 90 * 1000;
+// "ปรับสต็อก <name> (<sku>) -2 ชิ้น (5 → 3)" — anchored on the "(before → after)"
+// tail so digits + ชิ้น inside a product name ("แพ็ค 3 ชิ้น") are never read as the delta.
+const _AUDIT_DELTA_RE = /([+-]\d+) ชิ้น \(\d+ → \d+\)/;
 function _auditRoundKey(e) {
   if (!e || e.action !== "adjust" || e.entity !== "product") return null;
-  const m = /([+-]?\d+)\s*ชิ้น/.exec(String(e.summary || ""));
+  const m = _AUDIT_DELTA_RE.exec(String(e.summary || ""));
   if (!m) return null;
-  const note = String(e.note || "").replace(/\s*·\s*รอซิงค์\s*$/, "");
+  const note = _auditRoundNote(e);
   return [(e.actorId || (e.user && e.user.name) || ""), note, Number(m[1]) < 0 ? "-" : "+"].join("|");
 }
+/* The note a round shares. Once a row is saved, dbInsertAuditEntry folds its own
+   changes[] into the note (" | จำนวน: 5 ชิ้น → 3 ชิ้น"), so every synced row's note
+   differs — strip that per-item tail, and the "รอซิงค์" marker, before comparing. */
+function _auditRoundNote(e) {
+  return String((e && e.note) || "").replace(/\s\|\sจำนวน:.*$/, "").replace(/\s*·\s*รอซิงค์\s*$/, "");
+}
 function _auditDelta(e) {
-  const m = /([+-]?\d+)\s*ชิ้น/.exec(String((e && e.summary) || ""));
+  const m = _AUDIT_DELTA_RE.exec(String((e && e.summary) || ""));
   return m ? Number(m[1]) || 0 : 0;
 }
 function groupAuditRounds(list) {
@@ -2668,8 +2677,9 @@ function groupAuditRounds(list) {
     if (x.length === 1) return x[0];
     const first = x[0];
     return {
-      round: true, id: "round-" + first.id, ts: first.ts, user: first.user, actorId: first.actorId,
-      note: String(first.note || "").replace(/\s*·\s*รอซิงค์\s*$/, ""),
+      round: true, id: "round-" + x[x.length - 1].id,   // oldest row: stays put as later rows of the round arrive on top
+      ts: first.ts, user: first.user, actorId: first.actorId,
+      note: _auditRoundNote(first),
       entries: x, pieces: x.reduce((s, e) => s + _auditDelta(e), 0)
     };
   });

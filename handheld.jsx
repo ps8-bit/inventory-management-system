@@ -8433,13 +8433,13 @@ function MHistory({ ctx }) {
               <span style={{ fontSize: 10, color: "var(--muted)" }}>{entries.length} รายการ</span>
             </div>
             <div className="m-list">
-              {(typeof groupAuditRounds === "function" ? groupAuditRounds(entries) : entries).map((item, i) => {
+              {(typeof groupAuditRounds === "function" ? groupAuditRounds(entries) : entries).map((item, i, items) => {
                 if (item.round) {
                   const isOpen = !!openRounds[item.id];
                   return (
-                    <div key={item.id}>
+                    <div key={item.id} style={{ borderBottom: i < items.length - 1 ? "1px solid var(--border)" : "none" }}>
                       <button className="m-row" onClick={() => setOpenRounds(s => ({ ...s, [item.id]: !s[item.id] }))}
-                        style={{ alignItems: "flex-start", cursor: "pointer", width: "100%", textAlign: "left", font: "inherit", fontFamily: "inherit" }}>
+                        style={{ borderBottom: "none", alignItems: "flex-start", cursor: "pointer", width: "100%", textAlign: "left", font: "inherit", fontFamily: "inherit" }}>
                         <div className="m-row-thumb" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}><Icons.Out size={15}/></div>
                         <div className="m-row-main">
                           <div className="m-row-title" style={{ fontSize: 13, whiteSpace: "normal" }}>{auditRoundTitle(item)}</div>
