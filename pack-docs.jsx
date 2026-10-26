@@ -1135,6 +1135,12 @@ function buildPackListPages(order, lines, size) {
   if (!chunks.length) chunks.push([]);
   return chunks.map((rows, k) => _packListPageHtml(order, all, rows, size, k, chunks.length));
 }
+/* "ตึกพาณิชย์ › ชั้น 1 › A" → "ชั้น 1 › A": the floor matters (A exists on more
+   than one), the building rarely does and costs the row its width. */
+function _packListShelf(loc) {
+  const segs = String(loc || "").split("›").map(x => x.trim()).filter(Boolean);
+  return segs.length > 2 ? segs.slice(1).join(" › ") : segs.join(" › ");
+}
 function _packListPageHtml(order, all, shown, size, k, nPages) {
   const small = size.w < 100;
   const pt = (n) => Math.max(small ? 8 : 9, Math.round(n * (small ? 0.8 : 1) * 2) / 2) + "pt";
@@ -1160,7 +1166,7 @@ function _packListPageHtml(order, all, shown, size, k, nPages) {
           `<span style="${box}"></span>` +
           `<div style="flex:1;min-width:0">` +
             `<div style="display:flex;gap:1.4mm;align-items:baseline"><span style="font-weight:700;white-space:nowrap">${_escPD(l.sku || "")}</span>` +
-            (l.loc && l.loc !== "-" ? `<span style="font-size:${fit(8.5)};${one}">ช่อง ${_escPD((l.parts && l.parts.pos) || l.loc)}</span>` : "") + `</div>` +
+            (l.loc && l.loc !== "-" ? `<span style="font-size:${fit(8.5)};${one}">ช่อง ${_escPD(_packListShelf(l.loc))}</span>` : "") + `</div>` +
             (l.name && l.name !== l.sku ? `<div style="font-size:${fit(9.5)};${one}">${_escPD(l.name)}</div>` : "") +
           `</div>` +
           `<span style="font-size:${fit(13)};font-weight:700;white-space:nowrap">× ${_escPD(l.qty)}</span>` +
