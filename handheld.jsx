@@ -1437,9 +1437,10 @@ function MInventory({ ctx }) {
   // all | ok | low | out — preset when opened from the home "ต้องสั่งซื้อ" tile.
   const [statusFilter, setStatusFilter] = useStateM(() => (ctx.route.params && ctx.route.params.status) || "all");
   const [locFilter, setLocFilter] = useStateM(false); // true = only products not stored in a real position
+  const [pfFilter, setPfFilter] = useStateM("");       // channel id → only products NOT listed on it yet
   // Rendered in pages: all 424 rows (with photos) on every tab switch was slow on phones.
   const [showN, setShowN] = useStateM(50);
-  useEffectM(() => { setShowN(50); }, [q, cat, statusFilter, locFilter]);
+  useEffectM(() => { setShowN(50); }, [q, cat, statusFilter, locFilter, pfFilter]);
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
   const [bulkOpen, setBulkOpen] = useStateM(false);
@@ -1472,6 +1473,7 @@ function MInventory({ ctx }) {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     if (statusFilter !== "all" && stockStatus(p).key !== statusFilter) return false;
     if (locFilter && productIsStored(p, storedCodes)) return false;
+    if (pfFilter && productPlatforms(p).includes(pfFilter)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
@@ -1584,10 +1586,24 @@ function MInventory({ ctx }) {
           )}
         </div>
 
+        {/* ยังไม่ลงขายบน <platform> — tap again to clear */}
+        {hasPlatformsColumn() && (
+          <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
+            {LISTING_PLATFORMS.map(c => {
+              const n = products.filter(p => !productPlatforms(p).includes(c.id)).length;
+              return (
+                <button key={c.id} className={"m-chip" + (pfFilter === c.id ? " on" : "")} onClick={() => setPfFilter(v => v === c.id ? "" : c.id)}>
+                  <ChannelMark channel={c.id} size={14}/> ยังไม่ลง {c.name} {n}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8, padding: "0 4px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span>{filtered.length} จาก {products.length} รายการ{selecting && <span> · แตะเพื่อเลือก</span>}</span>
-          {(cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter || q) && (
-            <button onClick={() => { setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setQ(""); }}
+          {(cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter || pfFilter || q) && (
+            <button onClick={() => { setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setPfFilter(""); setQ(""); }}
               style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 11, cursor: "pointer", padding: 0 }}>ล้างตัวกรอง</button>
           )}
         </div>
@@ -2115,6 +2131,11 @@ function MProductDetail({ ctx }) {
               </>
             );
           })()}
+        </div>
+
+        <div className="m-section-label" style={{ padding: "8px 4px" }}>ลงขายแล้วบน</div>
+        <div style={{ padding: "0 4px 8px" }}>
+          <PlatformListingChips product={p} readOnly={!canDo("editProduct")}/>
         </div>
 
         <div className="m-section-label" style={{ padding: "8px 4px" }}>ข้อมูล</div>
