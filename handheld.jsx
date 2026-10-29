@@ -1431,17 +1431,72 @@ function MOutbound({ ctx }) {
 
 /* =============== INVENTORY =============== */
 
+/* Back from a product (MProductDetail) remounts MInventory, which used to drop
+   the search, filters, loaded pages and scroll — the staff member landed at the
+   top of 424 rows. The list stashes its state here when it opens a product and
+   picks it up again on the next mount (one-shot: a tile preset wins). */
+let _mInvMemo = null;
 function MInventory({ ctx }) {
-  const [q, setQ] = useStateM("");
-  const [cat, setCat] = useStateM("ทั้งหมด");
+  const [memo] = useStateM(() => {
+    const m = _mInvMemo; _mInvMemo = null;
+    return (m && !(ctx.route.params && ctx.route.params.status)) ? m : null;
+  });
+  const [q, setQ] = useStateM(memo ? memo.q : "");
+  const [cat, setCat] = useStateM(memo ? memo.cat : "ทั้งหมด");
   // all | ok | low | out — preset when opened from the home "ต้องสั่งซื้อ" tile.
-  const [statusFilter, setStatusFilter] = useStateM(() => (ctx.route.params && ctx.route.params.status) || "all");
-  const [locFilter, setLocFilter] = useStateM(false); // true = only products not stored in a real position
-  const [pfFilter, setPfFilter] = useStateM("");       // channel id → only products NOT listed on it yet
-  const [pfEdit, setPfEdit] = useStateM(false);        // row platform icons are tappable only in this mode
+  const [statusFilter, setStatusFilter] = useStateM(() => memo ? memo.statusFilter : ((ctx.route.params && ctx.route.params.status) || "all"));
+  const [locFilter, setLocFilter] = useStateM(memo ? memo.locFilter : false); // true = only products not stored in a real position
+  const [pfFilter, setPfFilter] = useStateM(memo ? memo.pfFilter : "");       // channel id → only products NOT listed on it yet
+  const [pfEdit, setPfEdit] = useStateM(memo ? memo.pfEdit : false);        // row platform icons are tappable only in this mode
   // Rendered in pages: all 424 rows (with photos) on every tab switch was slow on phones.
-  const [showN, setShowN] = useStateM(50);
-  useEffectM(() => { setShowN(50); }, [q, cat, statusFilter, locFilter, pfFilter]);
+  const [showN, setShowN] = useStateM(memo ? memo.showN : 50);
+  const firstFilterRun = useRefM(true);
+  useEffectM(() => {
+    if (firstFilterRun.current) { firstFilterRun.current = false; return; } // keep a restored page count
+    setShowN(50);
+  }, [q, cat, statusFilter, locFilter, pfFilter]);
+  const contentRef = useRefM(null);
+  /* Restore by ANCHOR, not raw pixels: rows above grow as photos/positions load,
+     so the same scrollTop landed a few rows lower. Pin the tapped row back to the
+     exact offset it had on screen, and keep re-pinning while the list settles —
+     until the user touches/scrolls it themselves. */
+  useEffectM(() => {
+    if (!memo) return;
+    const el = contentRef.current;
+    if (!el) return;
+    let stop = false;
+    const halt = () => { stop = true; };
+    const pin = () => {
+      if (stop) return;
+      const row = memo.sku ? el.querySelector('[data-sku="' + CSS.escape(memo.sku) + '"]') : null;
+      if (row) el.scrollTop += (row.getBoundingClientRect().top - el.getBoundingClientRect().top) - memo.rowOffset;
+      else el.scrollTop = memo.scroll;
+    };
+    pin(); requestAnimationFrame(pin);
+    const timers = [80, 200, 400, 700, 1100, 1800, 2600].map(ms => setTimeout(pin, ms));
+    // Any re-layout of the list (rows re-sorted by a fresh server load, positions
+    // arriving) re-pins too, until the user takes over.
+    const ro = (typeof ResizeObserver === "function") ? new ResizeObserver(pin) : null;
+    const list = el.querySelector(".m-list");
+    if (ro && list) ro.observe(list);
+    timers.push(setTimeout(() => { if (ro) ro.disconnect(); }, 4000));
+    el.addEventListener("touchstart", halt, { passive: true });
+    el.addEventListener("wheel", halt, { passive: true });
+    el.addEventListener("load", pin, true); // a thumbnail finished → heights moved
+    return () => {
+      stop = true; timers.forEach(clearTimeout); if (ro) ro.disconnect();
+      el.removeEventListener("touchstart", halt); el.removeEventListener("wheel", halt);
+      el.removeEventListener("load", pin, true);
+    };
+  }, []);
+  const openProduct = (p, ev) => {
+    const el = contentRef.current;
+    const row = ev && ev.currentTarget;
+    _mInvMemo = { q, cat, statusFilter, locFilter, pfFilter, pfEdit, showN, sku: p.sku,
+                  scroll: el ? el.scrollTop : 0,
+                  rowOffset: (el && row) ? row.getBoundingClientRect().top - el.getBoundingClientRect().top : 0 };
+    ctx.push("product", p);
+  };
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
   const [bulkOpen, setBulkOpen] = useStateM(false);
@@ -1553,7 +1608,7 @@ function MInventory({ ctx }) {
         </button>
         {!selecting && canDo("addProduct") && <button className="m-action accent" onClick={() => setAddOpen(true)}><Icons.Plus size={18}/></button>}
       </div>
-      <div className="m-content">
+      <div className="m-content" ref={contentRef}>
         <div className="m-search">
           <Icons.Search size={14}/>
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา SKU, ชื่อสินค้า, ผู้จัดส่ง"/>
@@ -1622,7 +1677,8 @@ function MInventory({ ctx }) {
               <button
                 key={p.sku}
                 className={"m-row" + (isSelected ? " selected" : "")}
-                onClick={() => selecting ? toggleSku(p.sku) : ctx.push("product", p)}
+                data-sku={p.sku}
+                onClick={(e) => selecting ? toggleSku(p.sku) : openProduct(p, e)}
               >
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
                 <ProductImageThumb sku={p.sku} size={40} radius={8}/>
