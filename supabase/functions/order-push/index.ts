@@ -16,9 +16,12 @@
 //   VAPID_PUBLIC_KEY   — base64url P-256 public key (same value as the app's ORDER_PUSH_VAPID_PUBLIC)
 //   VAPID_PRIVATE_KEY  — base64url private key (never in the repo)
 //   VAPID_SUBJECT      — "https://psstock.vercel.app" (contact the push services may use)
-//   TELEGRAM_BOT_TOKEN — optional: from @BotFather. With TELEGRAM_CHAT_ID set, every
-//   TELEGRAM_CHAT_ID     alert is ALSO posted to that Telegram group (free, no quota).
-//                        Comma-separate several chat ids. Unset = Telegram off.
+//   TELEGRAM_BOT_TOKEN — optional: from @BotFather. Every alert is ALSO posted to the
+//                        staff Telegram group (free, no quota). Unset = Telegram off.
+//   TELEGRAM_CHAT_ID   — optional, comma-separated. Usually NOT needed: when it is
+//                        unset, an admin's test button asks Telegram which groups the
+//                        bot is in (getUpdates) and remembers them in app_state key
+//                        "telegram_chats". Someone must have posted in the group first.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import webpush from "npm:web-push@3.6.7";
@@ -144,10 +147,48 @@ function telegramText(a: any, by: string): string {
   return out.join("\n").slice(0, 4000);
 }
 
-async function sendTelegram(texts: string[]): Promise<{ sent: number; failed: number } | null> {
+// Chat ids: the secret wins; otherwise the ones remembered in app_state.
+async function telegramChats(admin: any): Promise<string[]> {
+  const env = (Deno.env.get("TELEGRAM_CHAT_ID") || "").split(",").map((c) => c.trim()).filter(Boolean);
+  if (env.length) return env;
+  const { data } = await admin.from("app_state").select("value").eq("key", "telegram_chats").maybeSingle();
+  const ids = data && data.value && Array.isArray(data.value.ids) ? data.value.ids : [];
+  return ids.map((c: unknown) => String(c)).filter(Boolean);
+}
+
+// Ask Telegram which groups the bot has seen and remember them. A group that was
+// upgraded to a supergroup reports migrate_to_chat_id — the new id replaces it.
+async function discoverTelegramChats(admin: any): Promise<string[]> {
   const token = Deno.env.get("TELEGRAM_BOT_TOKEN") || "";
-  const chats = (Deno.env.get("TELEGRAM_CHAT_ID") || "").split(",").map((c) => c.trim()).filter(Boolean);
-  if (!token || !chats.length || !texts.length) return null;
+  if (!token) return [];
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?allowed_updates=[]`);
+    const j: any = await r.json().catch(() => ({}));
+    if (!j.ok) { console.error("telegram getUpdates", r.status, j.description); return []; }
+    const found = new Map<string, string>();
+    for (const u of j.result || []) {
+      const m = u.message || u.edited_message || u.channel_post || u.my_chat_member || {};
+      const c = m.chat;
+      if (!c || (c.type !== "group" && c.type !== "supergroup")) continue;
+      found.set(String(c.id), c.title || "");
+      if (m.migrate_to_chat_id) { found.delete(String(c.id)); found.set(String(m.migrate_to_chat_id), c.title || ""); }
+    }
+    const ids = [...found.keys()];
+    if (ids.length) {
+      await admin.from("app_state").upsert({
+        key: "telegram_chats",
+        value: { ids, titles: [...found.values()], at: new Date().toISOString() },
+        updated_at: new Date().toISOString(),
+      });
+    }
+    return ids;
+  } catch (e) { console.error("telegram getUpdates", e); return []; }
+}
+
+async function sendTelegram(chats: string[], texts: string[]): Promise<{ sent: number; failed: number; error?: string } | null> {
+  const token = Deno.env.get("TELEGRAM_BOT_TOKEN") || "";
+  if (!token || !texts.length) return null;
+  if (!chats.length) return { sent: 0, failed: 0, error: "no group found — post a message in the group, then press test again" };
   let sent = 0, failed = 0;
   for (const chat_id of chats) {
     for (const text of texts) {   // in order, so a "new" never lands after its "edit"
@@ -185,7 +226,7 @@ Deno.serve(async (req) => {
   const PRIV = Deno.env.get("VAPID_PRIVATE_KEY") || "";
   const SUBJECT = Deno.env.get("VAPID_SUBJECT") || "https://psstock.vercel.app";
   const hasPush = !!(PUB && PRIV);
-  const hasTelegram = !!(Deno.env.get("TELEGRAM_BOT_TOKEN") && Deno.env.get("TELEGRAM_CHAT_ID"));
+  const hasTelegram = !!Deno.env.get("TELEGRAM_BOT_TOKEN");
   if (!hasPush && !hasTelegram) return json({ ok: false, error: "VAPID keys not configured" }, 500);
   if (hasPush) webpush.setVapidDetails(SUBJECT, PUB, PRIV);
 
@@ -202,7 +243,12 @@ Deno.serve(async (req) => {
   const by = test ? "" : str((user.user_metadata as any)?.name || (user.user_metadata as any)?.full_name || "", 30);
   // The group is shared, so only an admin's test button posts to it.
   const tgAlerts = test && role !== "admin" ? [] : alerts;
-  const telegramP = sendTelegram(tgAlerts.map((a: any) => telegramText(a, by)));
+  const telegramP = (async () => {
+    if (!hasTelegram || !tgAlerts.length) return null;
+    let chats = await telegramChats(admin);
+    if (!chats.length && test) chats = await discoverTelegramChats(admin);
+    return sendTelegram(chats, tgAlerts.map((a: any) => telegramText(a, by)));
+  })();
   if (!hasPush) return json({ ok: true, devices: 0, sent: 0, telegram: await telegramP });
 
   // Skip only the DEVICE that made the change (its own endpoint), not the whole
