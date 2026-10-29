@@ -2239,6 +2239,10 @@ function toggleProductPlatform(sku, id) {
   const next = on.includes(id) ? on.filter(x => x !== id) : LISTING_PLATFORMS.map(c => c.id).filter(x => x === id || on.includes(x));
   updateProductInStore(sku, { platforms: next });
   window.dispatchEvent(new CustomEvent("ims-products-change"));
+  // Say what changed, so a stray tap is noticed rather than silently saved.
+  const c = LISTING_PLATFORMS.find(x => x.id === id);
+  const added = next.includes(id);
+  window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: `${sku} · ${added ? "ลง" : "ยกเลิก"} ${c ? c.name : id}${added ? " แล้ว" : ""}`, type: added ? "success" : "info" } }));
 }
 /* Row of tap-to-toggle platform chips — shared by the desktop drawer and the
    mobile product detail (both forks render the same control). */
@@ -2268,19 +2272,21 @@ function PlatformListingChips({ product, readOnly }) {
 
 /* One-tap platform marks for a LIST row (desktop table, mobile list) — tick a
    listing without opening the product. Spans, not buttons: the mobile row is
-   itself a <button>, and every tap stops propagation so it never opens the row. */
+   itself a <button>. Read-only by default (the list shows a ✎ edit-mode switch):
+   always-live icons got tapped by accident while scrolling. In edit mode every tap
+   stops propagation so it never opens the row; read-only taps fall through to it. */
 function PlatformRowToggles({ product, readOnly }) {
   if (!hasPlatformsColumn()) return null;
   const on = productPlatforms(product);
   return (
-    <div className="pf-row" onClick={e => e.stopPropagation()}>
+    <div className={"pf-row" + (readOnly ? " ro" : " editing")} onClick={readOnly ? undefined : (e => e.stopPropagation())}>
       {LISTING_PLATFORMS.map(c => {
         const active = on.includes(c.id);
         return (
           <span key={c.id} role="button" tabIndex={readOnly ? -1 : 0} aria-pressed={active}
             className={"pf-row-tog" + (active ? " on" : "") + (readOnly ? " ro" : "")}
             title={(active ? "ลงขายแล้วบน " : "ยังไม่ลง ") + c.name + (readOnly ? "" : " — แตะเพื่อเปลี่ยน")}
-            onClick={e => { e.stopPropagation(); if (!readOnly) toggleProductPlatform(product.sku, c.id); }}
+            onClick={readOnly ? undefined : (e => { e.stopPropagation(); toggleProductPlatform(product.sku, c.id); })}
             onKeyDown={e => { if (!readOnly && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); e.stopPropagation(); toggleProductPlatform(product.sku, c.id); } }}>
             <ChannelMark channel={c.id} size={20}/>
             {active && <span className="pf-row-tick">✓</span>}
