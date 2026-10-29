@@ -1473,12 +1473,18 @@ function MInventory({ ctx }) {
       else el.scrollTop = memo.scroll;
     };
     pin(); requestAnimationFrame(pin);
-    const timers = [80, 200, 400, 700, 1100].map(ms => setTimeout(pin, ms));
+    const timers = [80, 200, 400, 700, 1100, 1800, 2600].map(ms => setTimeout(pin, ms));
+    // Any re-layout of the list (rows re-sorted by a fresh server load, positions
+    // arriving) re-pins too, until the user takes over.
+    const ro = (typeof ResizeObserver === "function") ? new ResizeObserver(pin) : null;
+    const list = el.querySelector(".m-list");
+    if (ro && list) ro.observe(list);
+    timers.push(setTimeout(() => { if (ro) ro.disconnect(); }, 4000));
     el.addEventListener("touchstart", halt, { passive: true });
     el.addEventListener("wheel", halt, { passive: true });
     el.addEventListener("load", pin, true); // a thumbnail finished → heights moved
     return () => {
-      stop = true; timers.forEach(clearTimeout);
+      stop = true; timers.forEach(clearTimeout); if (ro) ro.disconnect();
       el.removeEventListener("touchstart", halt); el.removeEventListener("wheel", halt);
       el.removeEventListener("load", pin, true);
     };
