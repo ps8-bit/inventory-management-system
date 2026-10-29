@@ -1921,6 +1921,13 @@ function CustomerLookup() {
     return null;
   };
   const [dateFilter, setDateFilter] = useStateTrk(() => parseDateFromHash());
+  // #track/<tracking or order no.> — a link the shop can send so the customer lands
+  // straight on their parcel. Only a plain number is accepted (no free text).
+  const hashQuery = () => {
+    const part = window.location.hash.replace("#", "").split("/")[1] || "";
+    let v = ""; try { v = decodeURIComponent(part).trim(); } catch (e) {}
+    return (!/^d{4}-d{2}-d{2}$/.test(v) && /^[A-Za-z0-9-]{6,40}$/.test(v)) ? v : "";
+  };
 
   const [dbOrders, setDbOrders] = useStateTrk(null); // null = not loaded yet
   // Only a signed-in staff device has real local order data. An anonymous
@@ -1932,7 +1939,9 @@ function CustomerLookup() {
   const [, bumpLabelsCL] = useStateTrk(0);
 
   useEffectTrk(() => {
-    inputRef.current?.focus();
+    const hq = hashQuery();
+    if (hq) { setQ(hq); setSearched(true); lastQueryRef.current = hq; runLookup(hq, false); }
+    else inputRef.current?.focus();
     const h = () => setOverrides(loadOrderOverrides());
     window.addEventListener("ims-orders-change", h);
     const lh = () => bumpLabelsCL(v => v + 1);
@@ -2013,6 +2022,7 @@ function CustomerLookup() {
   const [apiResults, setApiResults] = useStateTrk(null);
   const lookupSeqRef = useRefTrk(0);
   const lastQueryRef = useRefTrk("");
+  const autoOpenRef = useRefTrk(""); // last query|id auto-opened
 
   // `refresh` = a background re-check of a search already on screen: a failure
   // keeps what is shown instead of blanking it to "not found".
@@ -2041,6 +2051,7 @@ function CustomerLookup() {
     setApiResults(null);
     const query = q.trim();
     lastQueryRef.current = query;
+    autoOpenRef.current = "";
     runLookup(query, false);
   };
 
@@ -2082,12 +2093,20 @@ function CustomerLookup() {
     // device that hasn't synced, an in-app browser's old cache). Keyed by id, not
     // id|tracking: a tracking number added since would otherwise show the order twice.
     const api = (apiResults || []).filter(o => !(dateFilter && o.dateIso && o.dateIso !== dateFilter));
-    const apiById = new Map(api.map(o => [o.id, o]));
-    const merged = local.map(o => apiById.get(o.id) || o);
-    const seen = new Set(merged.map(o => o.id));
-    api.forEach(o => { if (!seen.has(o.id)) { seen.add(o.id); merged.push(o); } });
-    return merged;
+    // One order can come back as several rows (one per box) — keep them all.
+    const apiIds = new Set(api.map(o => o.id));
+    const merged = [...local.filter(o => !apiIds.has(o.id)), ...api];
+    return groupCustomerOrders(merged);
   }, [q, searched, overrides, dateFilter, apiResults, hasSession, dbOrders, dbLabels]);
+
+  // One order found → open it straight away (once per search, so ค้นหาใหม่ stays on the list).
+  useEffectTrk(() => {
+    if (!searched || apiResults === null || matches.length !== 1) return;
+    const key = lastQueryRef.current + "|" + matches[0].id;
+    if (autoOpenRef.current === key) return;
+    autoOpenRef.current = key;
+    setSelected(matches[0]);
+  }, [matches, searched, apiResults]);
 
   // Show the open order from the latest results, so a refresh updates the detail
   // view too instead of leaving the snapshot taken when it was tapped.
@@ -2102,7 +2121,7 @@ function CustomerLookup() {
   const noResults = searched && matches.length === 0 && !searching;
 
   return (
-    <div className="auth-page" style={{ alignItems: "flex-start", paddingTop: 60, paddingBottom: 40 }}>
+    <div className="auth-page trk-search" style={{ alignItems: "flex-start", paddingTop: 60, paddingBottom: 40 }}>
       <div style={{ width: "100%", maxWidth: 640 }}>
         {/* Branded header */}
         <div style={{ textAlign: "center", marginBottom: 32 }}>
@@ -2238,206 +2257,262 @@ function CustomerLookup() {
   );
 }
 
+/* Rows for one order → the boxes it shipped in. track-lookup returns one row per
+   (id, tracking), and one tracking field may hold several numbers ("TH1, TH2"), so
+   both become separate shipments. `shipmentStatus` is where a future carrier API /
+   webhook result lands; nothing sets it today. */
+function groupCustomerOrders(rows) {
+  const byId = new Map();
+  (rows || []).forEach(o => {
+    if (!o || !o.id) return;
+    let g = byId.get(o.id);
+    if (!g) { g = { ...o, shipments: [] }; byId.set(o.id, g); }
+    if (!g.shippedAt && o.shippedAt) g.shippedAt = o.shippedAt;
+    if (!g.deliveredAt && o.deliveredAt) g.deliveredAt = o.deliveredAt;
+    const nums = typeof splitTrackingNumbers === "function" ? splitTrackingNumbers(o.tracking) : (o.tracking ? [o.tracking] : []);
+    nums.forEach(t => {
+      if (g.shipments.some(s => s.tracking.toUpperCase() === t.toUpperCase())) return;
+      g.shipments.push({ carrier: o.carrier || "", tracking: t, status: o.status, shipmentStatus: o.shipmentStatus || "" });
+    });
+    if (!g.carrier && o.carrier) g.carrier = o.carrier;
+  });
+  return [...byId.values()];
+}
+
+// The order's headline stage = its least-advanced box, so one box still on the
+// truck never makes the whole order read "จัดส่งสำเร็จ".
+function customerOrderStage(order) {
+  const ships = order.shipments || [];
+  if (!ships.length) return shipmentStageIndex(order.status, "");
+  return Math.min(...ships.map(s => shipmentStageIndex(s.status || order.status, s.shipmentStatus)));
+}
+
 function CustomerOrderCard({ order, onOpen }) {
-  const idx = stageIndex(order.status);
-  const stage = TRACK_STAGES[idx] || TRACK_STAGES[0];
-  const Icon = stage.icon;
-  const carrierMeta = carrierMetaFor(order.carrier);
+  const idx = customerOrderStage(order);
+  const stage = SHIPMENT_STAGES[idx];
+  const first = order.shipments[0];
+  const cfg = resolveCarrier(first ? first.carrier : order.carrier);
   return (
-    <button onClick={onOpen} style={{
-      background: "var(--surface)",
-      border: "1px solid var(--border)",
-      borderRadius: 14,
-      padding: 16,
-      width: "100%",
-      cursor: "pointer",
-      textAlign: "left",
-      fontFamily: "inherit",
-      color: "var(--fg)",
-      display: "flex", alignItems: "center", gap: 14,
-      transition: "transform 0.08s, box-shadow 0.12s"
-    }}>
-      <div style={{ width: 44, height: 44, borderRadius: 12, background: carrierMeta.color || "var(--surface-2)", color: carrierMeta.color ? "white" : "var(--fg-2)", display: "grid", placeItems: "center", flexShrink: 0 }}>
-        <Icon size={20}/>
-      </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="row" style={{ gap: 8, justifyContent: "space-between" }}>
-          <span className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{order.id}</span>
-          <span className={"badge " + (idx === 3 ? "badge-success" : idx === 2 ? "badge-info" : "badge-warning")} style={{ fontSize: 11 }}>
-            <span className="dot"/>{stage.label}
-          </span>
-        </div>
-        <div style={{ fontSize: 13, marginTop: 4 }}>{order.customer}</div>
-        <div className="row" style={{ gap: 8, marginTop: 4, fontSize: 11, color: "var(--muted)" }}>
-          <span>{order.carrier}</span>
-          {order.tracking && <><span>·</span><span className="mono">{order.tracking}</span></>}
-          <span>·</span><span>{order.date}</span>
-        </div>
-      </div>
+    <button onClick={onOpen} className="trk-result">
+      {cfg ? <CarrierLogo cfg={cfg} size={40}/> : <span className="trk-result-ph"><Icons.Box size={18}/></span>}
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span className="trk-result-id">{order.id}</span>
+        <span className="trk-result-sub">
+          {order.shipments.length > 1 ? order.shipments.length + " พัสดุ" : (first ? first.tracking : "ยังไม่มีเลขพัสดุ")}
+          {order.date ? " · " + order.date : ""}
+        </span>
+      </span>
+      <span className={"trk-pill" + (idx >= 2 ? " is-ship" : "")}>{stage.label}</span>
       <Icons.Chev size={14} style={{ color: "var(--muted)", flexShrink: 0 }}/>
     </button>
   );
 }
 
+function trkCopyText(text) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(() => true, () => false);
+  // LINE / older in-app WebViews: no async clipboard — fall back to a selection copy.
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy"); document.body.removeChild(ta);
+    return Promise.resolve(ok);
+  } catch (e) { return Promise.resolve(false); }
+}
+
+// ISO timestamp → "12 ต.ค. 2567 10:30 น." (Asia/Bangkok). Empty for anything unparseable.
+function trkDateTime(iso, withTime) {
+  const t = Date.parse(iso || "");
+  if (!Number.isFinite(t)) return "";
+  const d = new Date(t + 7 * 3600 * 1000);
+  const day = isoToThai(d.toISOString().slice(0, 10));
+  return withTime ? day + " " + d.toISOString().slice(11, 16) + " น." : day;
+}
+
+const TrkCopyIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/></svg>
+);
+const TrkOutIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+);
+
+/* The selected box: carrier card (logo, name, number + copy) and the orange button. */
+function CustomerShipment({ shipment, ctaRef }) {
+  const link = carrierTrackLink(shipment.carrier, shipment.tracking);
+  const cfg = link.cfg;
+  const num = link.tracking || shipment.tracking;
+  const [copied, setCopied] = useStateTrk(false);
+  const copy = () => trkCopyText(num).then(ok => { if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1800); } });
+  const name = cfg ? (cfg.ctaName || cfg.name) : "ขนส่ง";
+  return (
+    <>
+      <section className="trk-card trk-carrier-card">
+        <div className="trk-carrier">
+          {cfg && <CarrierLogo cfg={cfg} size={52}/>}
+          <div style={{ minWidth: 0 }}>
+            <div className="trk-carrier-name">{cfg ? cfg.name : "ยังไม่ระบุขนส่ง"}</div>
+            <div className="trk-label">บริษัทขนส่งสินค้า</div>
+          </div>
+        </div>
+        <div className="trk-numbox">
+          <div style={{ minWidth: 0 }}>
+            <div className="trk-label">หมายเลขพัสดุ</div>
+            <div className="trk-num">{num}</div>
+          </div>
+          <button type="button" className={"trk-copy" + (copied ? " is-ok" : "")} onClick={copy} aria-label="คัดลอกเลขพัสดุ" title="คัดลอกเลขพัสดุ">
+            {copied ? <Icons.Check size={18}/> : <TrkCopyIcon/>}
+          </button>
+        </div>
+        {copied && <div className="trk-copied" role="status">คัดลอกเลขพัสดุแล้ว</div>}
+      </section>
+
+      {link.url ? (
+        <>
+          {!link.deepLink && (
+            <div className="trk-hint-box">เว็บไซต์ {name} ไม่รองรับการกรอกเลขอัตโนมัติ — กดปุ่มด้านล่าง ระบบจะคัดลอกเลขให้ แล้ววางในช่องค้นหาของ {name}</div>
+          )}
+          <a ref={ctaRef} className="trk-cta" href={link.url} target="_blank" rel="noopener noreferrer"
+            onClick={() => { if (!link.deepLink) trkCopyText(num); }}>
+            <span aria-hidden="true">🚚</span> ติดตามพัสดุกับ {name} <TrkOutIcon/>
+          </a>
+          <div className="trk-cta-note">กดเพื่อตรวจสอบสถานะล่าสุดจากบริษัทขนส่ง</div>
+        </>
+      ) : (
+        <div className="trk-hint-box">นำเลขพัสดุด้านบนไปตรวจสอบที่เว็บไซต์หรือแอปของ {cfg ? cfg.name : "บริษัทขนส่ง"}</div>
+      )}
+    </>
+  );
+}
+
 function CustomerOrderDetail({ order, store, onBack }) {
-  const idx = stageIndex(order.status);
-  const carrierMeta = carrierMetaFor(order.carrier);
-
-  const baseDate = order.date || "—";
-  // Estimate delivery 2 calendar days after the ship date
-  const estimatedDelivery = (() => {
-    if (!order.dateIso) return "—";
-    const [y, m, d] = order.dateIso.split("-").map(Number);
-    const dt = new Date(y, m - 1, d + 2);
-    return "ประมาณ " + isoToThai([dt.getFullYear(), String(dt.getMonth()+1).padStart(2,"0"), String(dt.getDate()).padStart(2,"0")].join("-"));
-  })();
-  const timeline = [
-    { stage: 0, time: "",             date: baseDate,          note: "ได้รับคำสั่งซื้อจาก " + (order.channel || "ฉลาก") },
-    { stage: 1, time: "",             date: baseDate,          note: "พนักงานหยิบสินค้าเสร็จ" },
-    { stage: 2, time: order.ts || "", date: baseDate,          note: "ส่งมอบให้ " + (order.carrier || "ขนส่ง") },
-    { stage: 3, time: "",             date: estimatedDelivery, note: "อยู่ระหว่างนำส่งโดยผู้จัดส่ง" }
-  ];
-
-  // Carrier tracking deep-link map
-  const CARRIER_URLS = {
-    "KEX":             t => `https://th.kex-express.com/th/track/?track=${t}`,
-    "Flash Express":   t => `https://www.flashexpress.co.th/fle/tracking/?se=${t}`,
-    "J&T Express":     t => `https://www.jtexpress.co.th/index/query/gzquery.html?bills=${t}`,
-    "Thai Post (EMS)": t => `https://track.thailandpost.co.th/?trackNumber=${t}`,
-    "Ninja Van":       t => `https://www.ninjavan.co/th-th/tracking?id=${t}`,
-    "Shopee Express":  t => `https://spx.co.th/`,
-    "Best Express":    t => `https://www.best-inc-th.com/track/defaultSearch?logisticNo=${t}`,
-    "DHL":             t => `https://www.dhl.com/th-th/home/tracking.html?tracking-id=${t}`,
-    "Alpha Fast":      t => `https://www.alphafast.com/`,
-  };
-  const trackUrl = order.tracking && order.carrier && CARRIER_URLS[order.carrier]
-    ? CARRIER_URLS[order.carrier](encodeURIComponent(order.tracking))
-    : null;
+  const idx = customerOrderStage(order);
+  const ships = order.shipments || [];
   const hasHelpPhone = !!storeTelHref(store.sender?.phone);
+  const [pick, setPick] = useStateTrk(0);
+  const cur = ships[Math.min(pick, ships.length - 1)] || null;
+  const delivered = SHIPMENT_STAGES[idx].id === "delivered";
+  const preparing = !ships.length && idx < 2;
+  const shippedOn = trkDateTime(order.shippedAt, false);
+  const deliveredOn = trkDateTime(order.deliveredAt, false);
+
+  // Sticky mobile CTA: only while the in-page button is scrolled out of view.
+  const ctaRef = useRefTrk(null);
+  const [showSticky, setShowSticky] = useStateTrk(false);
+  useEffectTrk(() => {
+    const el = ctaRef.current;
+    if (!el || typeof IntersectionObserver !== "function") return;
+    const io = new IntersectionObserver(([e]) => setShowSticky(!e.isIntersecting));
+    io.observe(el);
+    return () => io.disconnect();
+  }, [order.id, pick]);
+  const curLink = cur ? carrierTrackLink(cur.carrier, cur.tracking) : null;
+
+  const pill = delivered ? { cls: "is-ok", text: "จัดส่งสำเร็จแล้ว", icon: <Icons.Check size={14} stroke={2.6}/> }
+    : preparing ? { cls: "is-wait", text: "กำลังเตรียมจัดส่ง", icon: <Icons.History size={14}/> }
+    : { cls: "is-ship", text: idx >= 2 ? SHIPMENT_STAGES[idx].label + (idx === 2 ? "แล้ว" : "") : SHIPMENT_STAGES[idx].label, icon: <Icons.Truck size={14}/> };
+  const dateLine = delivered && deliveredOn ? "รับสินค้าเมื่อ " + deliveredOn
+    : idx >= 2 && shippedOn ? "จัดส่งเมื่อ " + shippedOn
+    : order.date ? "สั่งซื้อเมื่อ " + order.date : "";
+
+  // Timeline: the shop's three steps collapse into one once handed over (as the
+  // reference design shows), then every carrier stage. Only real stamps get a date.
+  const stepFrom = idx >= 2 ? 2 : 0;
+  const stepTime = (id) => id === "handed_over" ? trkDateTime(order.shippedAt, true) : id === "delivered" ? trkDateTime(order.deliveredAt, true) : "";
 
   return (
-    <div className="auth-page" style={{ alignItems: "flex-start", paddingTop: 40, paddingBottom: 40 }}>
-      <div style={{ width: "100%", maxWidth: 640 }}>
-        <button onClick={onBack} className="btn" style={{ marginBottom: 18, background: "oklch(1 0 0 / 0.7)", backdropFilter: "blur(10px)" }}>
-          <Icons.Chev size={14} style={{ transform: "rotate(180deg)" }}/> กลับไปค้นหา
-        </button>
+    <div className={"trk-page" + (curLink && curLink.url ? " has-sticky" : "")}>
+      <header className="trk-bar">
+        <div className="trk-bar-in">
+          <span className="trk-wordmark"><b>PS</b> <i>TACTICAL</i></span>
+        </div>
+      </header>
+      <div className="trk-wrap">
+        <button onClick={onBack} className="trk-back"><span aria-hidden="true">←</span> กลับไปค้นหาออเดอร์</button>
 
-        <div className="auth-card" style={{ maxWidth: 640, padding: 32 }}>
-          <div className="row" style={{ gap: 14, marginBottom: 20 }}>
-            <StoreLogoMark store={store} size={44}/>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 12, color: "var(--muted)" }}>{store.name}</div>
-              <div className="mono" style={{ fontSize: 18, fontWeight: 600, marginTop: 2 }}>{order.id}</div>
-            </div>
-            <span className={"badge " + (idx === 3 ? "badge-success" : "badge-info")} style={{ fontSize: 12, padding: "4px 10px" }}>
-              <span className="dot"/>{TRACK_STAGES[idx].label}
-            </span>
+        <div className="trk-head">
+          <div style={{ minWidth: 0 }}>
+            <div className="trk-label">คำสั่งซื้อ</div>
+            <div className="trk-order-id">{order.id}</div>
           </div>
-
-          {/* Tracking number prominent */}
-          <div style={{ padding: 20, background: "linear-gradient(135deg, var(--fg), oklch(0.12 0.01 250))", color: "oklch(0.99 0.003 250)", borderRadius: 16, marginBottom: 20 }}>
-            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
-              <span style={{ fontSize: 11, opacity: 0.7, letterSpacing: "0.08em", textTransform: "uppercase" }}>เลขพัสดุ</span>
-              {order.carrier && <span className="row" style={{ gap: 6, fontSize: 12 }}>
-                <span style={{ width: 8, height: 8, borderRadius: 999, background: carrierMeta.color || "white" }}/>
-                {order.carrier}
-              </span>}
-            </div>
-            {order.tracking ? (
-              <div className="mono" style={{ fontSize: 24, fontWeight: 600, letterSpacing: "0.04em" }}>{order.tracking}</div>
-            ) : (
-              <div style={{ fontSize: 14, opacity: 0.7 }}>ยังไม่ได้ระบุเลขพัสดุ — กำลังจัดเตรียม</div>
-            )}
-            {order.tracking && (
-              <div className="row" style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                <button className="btn btn-sm" style={{ background: "oklch(1 0 0 / 0.15)", color: "white", border: "1px solid oklch(1 0 0 / 0.2)" }} onClick={() => navigator.clipboard?.writeText(order.tracking)}>
-                  <Icons.Copy size={12}/> คัดลอกเลขพัสดุ
-                </button>
-                {trackUrl && (
-                  <a href={trackUrl} target="_blank" rel="noopener noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", background: "var(--accent)", color: "white", borderRadius: 8, fontSize: 12, fontWeight: 500, textDecoration: "none", fontFamily: "inherit" }}>
-                    <Icons.Truck size={12}/> ติดตามที่ {order.carrier}
-                  </a>
-                )}
-              </div>
-            )}
+          <div className="trk-head-r">
+            <span className={"trk-pill2 " + pill.cls}>{pill.icon}{pill.text}</span>
+            {dateLine && <div className="trk-head-date">{dateLine}</div>}
           </div>
+        </div>
 
-          {/* Timeline */}
-          <div className="eyebrow" style={{ marginBottom: 14 }}>ไทม์ไลน์การจัดส่ง</div>
-          <div style={{ position: "relative" }}>
-            {timeline.map((step, i) => {
-              const past = step.stage <= idx;
-              const isCurrent = step.stage === idx;
-              const StageIcon = TRACK_STAGES[step.stage].icon;
+        {preparing || !cur ? (
+          <section className="trk-card trk-empty">
+            <div className="trk-empty-ic"><Icons.Box size={40}/></div>
+            {preparing ? <>
+              <div className="trk-empty-t">ร้านค้ากำลังเตรียมจัดส่ง</div>
+              <div className="trk-empty-s">เรากำลังแพ็คสินค้าให้คุณ<br/>เมื่อจัดส่งแล้วจะแสดงเลขพัสดุที่นี่ทันที</div>
+            </> : <>
+              {/* Marked shipped but no number saved yet — never contradict the pill. */}
+              <div className="trk-empty-t">ร้านส่งพัสดุแล้ว</div>
+              <div className="trk-empty-s">เลขพัสดุจะแสดงที่นี่ทันที<br/>เมื่อร้านบันทึกเลขพัสดุเรียบร้อย</div>
+            </>}
+          </section>
+        ) : (
+          <CustomerShipment key={cur.tracking} shipment={cur} ctaRef={ctaRef}/>
+        )}
+
+        {ships.length > 1 && (
+          <section className="trk-boxes">
+            <h3 className="trk-h">พัสดุทั้งหมด ({ships.length} กล่อง)</h3>
+            {ships.map((s, i) => {
+              const cfg = resolveCarrier(s.carrier);
               return (
-                <div key={i} style={{ display: "flex", gap: 14, marginBottom: i < timeline.length - 1 ? 16 : 0, position: "relative" }}>
-                  {i < timeline.length - 1 && (
-                    <div style={{
-                      position: "absolute",
-                      left: 17, top: 36, bottom: -16,
-                      width: 2,
-                      background: past ? "var(--success)" : "var(--border)"
-                    }}/>
-                  )}
-                  <div style={{
-                    width: 36, height: 36,
-                    borderRadius: 999,
-                    background: past ? (isCurrent ? "var(--accent)" : "var(--success)") : "var(--surface-3)",
-                    color: past ? "white" : "var(--muted)",
-                    display: "grid", placeItems: "center",
-                    flexShrink: 0,
-                    boxShadow: isCurrent ? "0 0 0 4px var(--accent-ring)" : "none",
-                    zIndex: 1
-                  }}>
-                    {past ? <Icons.Check size={14} stroke={2.2}/> : <StageIcon size={14}/>}
-                  </div>
-                  <div style={{ flex: 1, paddingTop: 6 }}>
-                    <div style={{ fontWeight: isCurrent ? 600 : 500, fontSize: 14, color: past ? "var(--fg)" : "var(--muted)" }}>
-                      {TRACK_STAGES[step.stage].label}
-                    </div>
-                    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{step.note}</div>
-                    <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{step.date}{step.time ? " · " + step.time : ""}</div>
-                  </div>
-                </div>
+                <button key={s.tracking} type="button" className={"trk-box" + (i === pick ? " is-sel" : "")} aria-pressed={i === pick}
+                  onClick={() => { setPick(i); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
+                  {cfg && <CarrierLogo cfg={cfg} size={40}/>}
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span className="trk-box-n">พัสดุที่ {i + 1} จาก {ships.length}</span>
+                    <span className="trk-box-c">{cfg ? cfg.name : "ขนส่ง"}</span>
+                    <span className="trk-box-t">{s.tracking}</span>
+                  </span>
+                  <Icons.Chev size={16} style={{ color: "#9a9a9a", flexShrink: 0 }}/>
+                </button>
               );
             })}
-          </div>
+          </section>
+        )}
 
-          {/* Order summary */}
-          <div className="divider" style={{ margin: "24px 0" }}/>
-          <div className="eyebrow" style={{ marginBottom: 10 }}>สรุปคำสั่งซื้อ</div>
-          <div style={{ background: "var(--surface-2)", borderRadius: 12, padding: 14 }}>
-            <div className="row" style={{ justifyContent: "space-between", padding: "4px 0", fontSize: 13 }}>
-              <span style={{ color: "var(--muted)" }}>ชื่อผู้รับ</span>
-              <span style={{ fontWeight: 500 }}>{order.customer}</span>
-            </div>
-            <div className="row" style={{ justifyContent: "space-between", padding: "4px 0", fontSize: 13 }}>
-              <span style={{ color: "var(--muted)" }}>เบอร์ติดต่อ</span>
-              <span className="mono">{order.phone}</span>
-            </div>
-            <div className="row" style={{ justifyContent: "space-between", padding: "4px 0", fontSize: 13 }}>
-              <span style={{ color: "var(--muted)" }}>ช่องทางสั่งซื้อ</span>
-              <span>{order.channel}</span>
-            </div>
-            <div className="row" style={{ justifyContent: "space-between", padding: "4px 0", fontSize: 13 }}>
-              <span style={{ color: "var(--muted)" }}>จำนวนสินค้า</span>
-              <span><strong className="tnum">{order.items}</strong> รายการ</span>
-            </div>
-          </div>
-
-          {/* Help footer — the shop line only when a real phone is set (no fake fallback number). */}
-          {(hasHelpPhone || order.carrier) && (
-            <div style={{ marginTop: 20, padding: 14, background: "var(--info-soft)", color: "var(--fg-2)", borderRadius: 12, fontSize: 12, lineHeight: 1.6 }}>
-              มีคำถามเกี่ยวกับพัสดุนี้?{" "}
-              {hasHelpPhone && <>ติดต่อ {store.name || "ร้านค้า"} ที่ <StoreHelpPhone store={store}/></>}
-              {trackUrl
-                ? <>{hasHelpPhone && <><br/>หรือ </>}<a className="lnk" href={trackUrl} target="_blank" rel="noopener noreferrer">ตรวจสอบสถานะที่เว็บไซต์ {order.carrier}</a></>
-                : order.carrier ? <>{hasHelpPhone && <><br/>หรือ</>}นำเลขพัสดุไปตรวจสอบที่เว็บไซต์ของ {order.carrier}</> : null
-              }
-            </div>
+        <section className="trk-card">
+          <h3 className="trk-h" style={{ marginTop: 0 }}>สถานะการจัดส่ง</h3>
+          <ol className="trk-steps">
+            {SHIPMENT_STAGES.slice(stepFrom).map((s, j) => {
+              const i = j + stepFrom;
+              const done = i <= idx;
+              const time = done ? stepTime(s.id) : "";
+              return (
+                <li key={s.id} className={"trk-step" + (done ? " is-done" : "") + (i === idx ? " is-cur" : "")}>
+                  <span className="trk-step-dot">{done ? <Icons.Check size={14} stroke={2.8}/> : null}</span>
+                  <span>
+                    <span className="trk-step-l">{s.id === "handed_over" && done ? "ส่งให้ขนส่งแล้ว" : s.label}</span>
+                    {time && <span className="trk-step-t">{time}</span>}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+          {idx >= 2 && !delivered && (
+            <div className="trk-note">สถานะระหว่างทางและการนำจ่ายดูได้ล่าสุดจากปุ่ม “ติดตามพัสดุ” ด้านบน</div>
           )}
-        </div>
+        </section>
+
+        {hasHelpPhone && (
+          <div className="trk-help">มีคำถามเพิ่มเติม ติดต่อ {store.name || "ร้านค้า"} <StoreHelpPhone store={store}/></div>
+        )}
       </div>
+
+      {curLink && curLink.url && (
+        <div className={"trk-sticky" + (showSticky ? " is-on" : "")} aria-hidden={!showSticky}>
+          <a className="trk-cta" href={curLink.url} target="_blank" rel="noopener noreferrer" tabIndex={showSticky ? 0 : -1}
+            onClick={() => { if (!curLink.deepLink) trkCopyText(curLink.tracking); }}>
+            <span aria-hidden="true">🚚</span> ติดตามพัสดุกับ {curLink.cfg.ctaName || curLink.cfg.name} <TrkOutIcon/>
+          </a>
+        </div>
+      )}
     </div>
   );
 }

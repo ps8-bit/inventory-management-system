@@ -160,6 +160,8 @@ Deno.serve(async (req) => {
     for (const k of ["status", "carrier", "tracking", "phone", "customer"]) {
       if (typeof ov[k] === "string" && ov[k] !== "" && ov[k] !== "—") s[k] = ov[k];
     }
+    // Real timestamps written by the back office (setOrderField) — never invented here.
+    for (const k of ["shippedAt", "deliveredAt"]) if (typeof ov[k] === "string" && ov[k]) s[k] = ov[k];
   }
 
   // Server-side filter — only rows matching the query ever leave this function.
