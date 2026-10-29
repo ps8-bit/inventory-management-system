@@ -1431,17 +1431,42 @@ function MOutbound({ ctx }) {
 
 /* =============== INVENTORY =============== */
 
+/* Back from a product (MProductDetail) remounts MInventory, which used to drop
+   the search, filters, loaded pages and scroll — the staff member landed at the
+   top of 424 rows. The list stashes its state here when it opens a product and
+   picks it up again on the next mount (one-shot: a tile preset wins). */
+let _mInvMemo = null;
 function MInventory({ ctx }) {
-  const [q, setQ] = useStateM("");
-  const [cat, setCat] = useStateM("ทั้งหมด");
+  const [memo] = useStateM(() => {
+    const m = _mInvMemo; _mInvMemo = null;
+    return (m && !(ctx.route.params && ctx.route.params.status)) ? m : null;
+  });
+  const [q, setQ] = useStateM(memo ? memo.q : "");
+  const [cat, setCat] = useStateM(memo ? memo.cat : "ทั้งหมด");
   // all | ok | low | out — preset when opened from the home "ต้องสั่งซื้อ" tile.
-  const [statusFilter, setStatusFilter] = useStateM(() => (ctx.route.params && ctx.route.params.status) || "all");
-  const [locFilter, setLocFilter] = useStateM(false); // true = only products not stored in a real position
-  const [pfFilter, setPfFilter] = useStateM("");       // channel id → only products NOT listed on it yet
-  const [pfEdit, setPfEdit] = useStateM(false);        // row platform icons are tappable only in this mode
+  const [statusFilter, setStatusFilter] = useStateM(() => memo ? memo.statusFilter : ((ctx.route.params && ctx.route.params.status) || "all"));
+  const [locFilter, setLocFilter] = useStateM(memo ? memo.locFilter : false); // true = only products not stored in a real position
+  const [pfFilter, setPfFilter] = useStateM(memo ? memo.pfFilter : "");       // channel id → only products NOT listed on it yet
+  const [pfEdit, setPfEdit] = useStateM(memo ? memo.pfEdit : false);        // row platform icons are tappable only in this mode
   // Rendered in pages: all 424 rows (with photos) on every tab switch was slow on phones.
-  const [showN, setShowN] = useStateM(50);
-  useEffectM(() => { setShowN(50); }, [q, cat, statusFilter, locFilter, pfFilter]);
+  const [showN, setShowN] = useStateM(memo ? memo.showN : 50);
+  const firstFilterRun = useRefM(true);
+  useEffectM(() => {
+    if (firstFilterRun.current) { firstFilterRun.current = false; return; } // keep a restored page count
+    setShowN(50);
+  }, [q, cat, statusFilter, locFilter, pfFilter]);
+  const contentRef = useRefM(null);
+  useEffectM(() => {
+    if (!memo || !memo.scroll) return;
+    const el = contentRef.current;
+    const go = () => { if (el) el.scrollTop = memo.scroll; };
+    go(); requestAnimationFrame(go); // again after thumbnails lay out
+  }, []);
+  const openProduct = (p) => {
+    _mInvMemo = { q, cat, statusFilter, locFilter, pfFilter, pfEdit, showN,
+                  scroll: contentRef.current ? contentRef.current.scrollTop : 0 };
+    ctx.push("product", p);
+  };
   const [selecting, setSelecting] = useStateM(false);
   const [selected, setSelected] = useStateM({});
   const [bulkOpen, setBulkOpen] = useStateM(false);
@@ -1553,7 +1578,7 @@ function MInventory({ ctx }) {
         </button>
         {!selecting && canDo("addProduct") && <button className="m-action accent" onClick={() => setAddOpen(true)}><Icons.Plus size={18}/></button>}
       </div>
-      <div className="m-content">
+      <div className="m-content" ref={contentRef}>
         <div className="m-search">
           <Icons.Search size={14}/>
           <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา SKU, ชื่อสินค้า, ผู้จัดส่ง"/>
@@ -1622,7 +1647,7 @@ function MInventory({ ctx }) {
               <button
                 key={p.sku}
                 className={"m-row" + (isSelected ? " selected" : "")}
-                onClick={() => selecting ? toggleSku(p.sku) : ctx.push("product", p)}
+                onClick={() => selecting ? toggleSku(p.sku) : openProduct(p)}
               >
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
                 <ProductImageThumb sku={p.sku} size={40} radius={8}/>
