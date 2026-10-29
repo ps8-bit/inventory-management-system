@@ -232,7 +232,13 @@ async function renameProductSku(oldSku, newSku) {
   // The photo is keyed by sku in app_state, not FK-linked — carry it across by hand.
   if (typeof loadProductImages === "function" && typeof setProductImage === "function") {
     const img = loadProductImages()[from];
-    if (img) { setProductImage(finalSku, img); setProductImage(from, null); }
+    // Clear the old key with the raw writer: setProductImage(from, null) treats
+    // the photo as replaced and deletes our storage file — the very file the new
+    // sku now points at (admin/manager can delete, so every rename lost its photo).
+    if (img) {
+      setProductImage(finalSku, img);
+      if (typeof _writeProductImage === "function") _writeProductImage(from, null);
+    }
   }
   _persistProductsLocal();   // also fires ims-products-change
   return { ok: true, sku: finalSku };

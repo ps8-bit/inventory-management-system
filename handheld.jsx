@@ -1751,7 +1751,7 @@ function MInventory({ ctx }) {
 }
 
 /* Mobile Add-SKU bottom sheet (also used for editing when `editing` product is passed) */
-function MAddSku({ categories, products, onClose, onAdd, editing }) {
+function MAddSku({ categories, products, onClose, onAdd, editing, onRename }) {
   const suppliers = useMemoM(() => [...new Set(products.map(p => p.supplier))].filter(Boolean), [products]);
   const brands    = useMemoM(() => [...new Set(products.map(p => p.brand))].filter(Boolean), [products]);
   const [f, setF] = useStateM(() => editing ? {
@@ -1843,7 +1843,16 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
         </div>
         <div className="m-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
-            <div className="m-section-label" style={{ padding: "0 2px 4px" }}>รหัส SKU *</div>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", padding: "0 2px 4px" }}>
+              <div className="m-section-label" style={{ padding: 0 }}>รหัส SKU *</div>
+              {/* The SKU is the primary key, so it isn't a form field here — it goes
+                  through the same cascading rename as the detail page's tag button. */}
+              {editing && onRename && canDo("renameSku") && (
+                <button type="button" className="m-chip" style={{ gap: 6 }} onClick={onRename}>
+                  <Icons.Tag size={13}/> เปลี่ยนรหัส
+                </button>
+              )}
+            </div>
             <input className="m-input mono" value={f.sku} disabled={!!editing} onChange={e => { const v = e.target.value; setF(prev => ({ ...prev, sku: v, brand: prev.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(v) : "") })); }} placeholder="เช่น TH-APP-003" style={{ textTransform: "uppercase", opacity: editing ? 0.6 : 1 }}/>
             {dupe && <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 4 }}>SKU นี้มีอยู่แล้ว</div>}
           </div>
@@ -1938,7 +1947,7 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
               </div>
             )}
           </div>
-          {editing && <div style={{ fontSize: 11, color: "var(--muted)" }}>หมายเหตุ: รหัส SKU และจำนวนคงเหลือแก้ไขที่นี่ไม่ได้ — ใช้ "ปรับสต็อก" สำหรับจำนวน</div>}
+          {editing && <div style={{ fontSize: 11, color: "var(--muted)" }}>หมายเหตุ: จำนวนคงเหลือแก้ไขที่นี่ไม่ได้ — ใช้ "ปรับสต็อก" · เปลี่ยนรหัส SKU ใช้ปุ่ม "เปลี่ยนรหัส"</div>}
         </div>
         <div className="m-sheet-foot">
           <button className="m-btn-big" onClick={save} disabled={!canSave} style={!canSave ? { opacity: 0.5 } : {}}>
@@ -2306,7 +2315,8 @@ function MProductDetail({ ctx }) {
         </div>
       </div>
       {editOpen && (
-        <MAddSku categories={cats} products={PRODUCTS} editing={base} onClose={() => setEditOpen(false)} onAdd={doEdit}/>
+        <MAddSku categories={cats} products={PRODUCTS} editing={base} onClose={() => setEditOpen(false)} onAdd={doEdit}
+          onRename={() => { setEditOpen(false); setRenameOpen(true); }}/>
       )}
       {renameOpen && typeof RenameSkuModal === "function" && (
         <RenameSkuModal

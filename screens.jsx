@@ -853,13 +853,31 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
   const [reorder,  setReorder]  = useState("2");   // was 30 — typical stock is ~4, so 30 flagged most SKUs as low
   const [supplier, setSupplier] = useState(suppliers[0] || "");
   const [qty,      setQty]      = useState("1");
+  // The scanned code is only a starting point — a supplier barcode often isn't
+  // the SKU the shop wants, so it stays editable. Photo is optional and wins over
+  // the Woo catalog image.
+  const [skuVal,   setSkuVal]   = useState(sku || "");
+  const [photo,    setPhoto]    = useState(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const photoRef = useRef(null);
   const nameRef = useRef(null);
   useEffect(() => { setTimeout(() => nameRef.current?.focus(), 60); }, []);
 
-  const canSave = name.trim() && (parseInt(qty) > 0);
+  const skuTrim = skuVal.trim();
+  const skuTaken = !!skuTrim && PRODUCTS.some(p => String(p.sku).toLowerCase() === skuTrim.toLowerCase());
+  const canSave = name.trim() && skuTrim && !skuTaken && !photoBusy && (parseInt(qty) > 0);
+
+  const pickPhoto = async (file) => {
+    if (!file || typeof fileToWebp !== "function") return;
+    setPhotoBusy(true);
+    try { setPhoto((await fileToWebp(file, { maxSize: 1000, quality: 0.85 })).dataUrl); }
+    catch (e) { window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: (e && e.message) || "ใส่รูปไม่สำเร็จ", type: "error" } })); }
+    finally { setPhotoBusy(false); if (photoRef.current) photoRef.current.value = ""; }
+  };
 
   const confirm = () => {
     if (!canSave) { nameRef.current?.focus(); return; }
+    const sku = skuTrim;
     const catVal = (cat || "").trim() || "ทั่วไป";
     // Register a brand-new category typed here so it persists + syncs to the
     // shared list (addCategory no-ops if it already exists).
@@ -882,8 +900,9 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
     };
     // Carry over the WooCommerce product image (a remote URL renders fine in
     // <img> across the app). Set before onConfirm so the new product shows it.
-    if (fromWoo && prefill.image && typeof setProductImage === "function") {
-      try { setProductImage(sku, prefill.image); } catch (e) {}
+    const img = photo || (fromWoo && prefill.image) || "";
+    if (img && typeof setProductImage === "function") {
+      try { setProductImage(sku, img); } catch (e) {}
     }
     onConfirm(product, parseInt(qty) || 1);
   };
@@ -906,14 +925,47 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
     </div>
   ) : null;
 
+  const shownPhoto = photo || (fromWoo && prefill.image) || "";
+  const photoField = (
+    <div className="field" style={{ marginBottom: 0 }}>
+      <label style={mobile ? { fontSize: 11 } : undefined}>รูปสินค้า (ไม่บังคับ)</label>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div onClick={() => !photoBusy && photoRef.current?.click()}
+          style={{ width: mobile ? 64 : 72, height: mobile ? 64 : 72, borderRadius: 12, flexShrink: 0, overflow: "hidden",
+                   border: "1.5px dashed var(--border-strong)", background: shownPhoto ? "#fff" : "var(--surface-2)",
+                   display: "grid", placeItems: "center", cursor: photoBusy ? "wait" : "pointer", color: "var(--muted)" }}>
+          {photoBusy ? <span style={{ fontSize: 11 }}>กำลังแปลง…</span>
+            : shownPhoto ? <img src={shownPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }}/>
+            : <Icons.Plus size={20}/>}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <button type="button" className={mobile ? "m-chip" : "btn btn-sm"}
+            disabled={photoBusy} onClick={() => photoRef.current?.click()}>
+            {shownPhoto ? "เปลี่ยนรูป" : "ถ่าย / เลือกรูป"}
+          </button>
+          {photo && <button type="button" className={mobile ? "m-chip" : "btn btn-sm btn-ghost"}
+            onClick={() => setPhoto(null)}>ลบรูป</button>}
+        </div>
+        <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => pickPhoto(e.target.files?.[0])}/>
+      </div>
+    </div>
+  );
+  const skuField = (
+    <div className="field" style={{ marginBottom: 0 }}>
+      <label style={mobile ? { fontSize: 11 } : undefined}>รหัส SKU <span style={{ color: "var(--danger)" }}>*</span></label>
+      <input className={mobile ? "m-input mono" : "input mono"} value={skuVal}
+        onChange={e => setSkuVal(e.target.value)} placeholder="รหัส SKU"
+        style={{ fontFamily: "IBM Plex Mono, monospace", borderColor: skuTaken ? "var(--danger)" : undefined }}/>
+      {skuTaken && <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>รหัสนี้มีในระบบแล้ว — ใช้รหัสอื่น</div>}
+      {!skuTrim && <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>ต้องใส่รหัส SKU</div>}
+    </div>
+  );
+
   const fields = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {wooBanner}
-      <div className="field">
-        <label>รหัส SKU</label>
-        <input className={mobile ? "m-input mono" : "input mono"} value={sku} readOnly
-          style={{ fontFamily: "IBM Plex Mono, monospace", background: "var(--surface-2)", color: "var(--muted)" }}/>
-      </div>
+      {photoField}
+      {skuField}
       <div className="field">
         <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8 }}>
           <label>ชื่อสินค้า <span style={{ color: "var(--danger)" }}>*</span></label>
@@ -996,6 +1048,8 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
           {/* Compact mobile fields — only essentials up front, rest below */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {wooBanner}
+            {photoField}
+            {skuField}
             <div className="field" style={{ marginBottom: 0 }}>
               <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
                 <label style={{ fontSize: 11 }}>ชื่อสินค้า *</label>
@@ -4306,6 +4360,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
         <ProductEditModal
           product={PRODUCTS.find(p => p.sku === product.sku) || product}
           onClose={() => setEditOpen(false)}
+          onRename={() => { setEditOpen(false); setRenameOpen(true); }}
           onSave={(changes) => {
             updateProductInStore(product.sku, changes);
             pushToast(`บันทึกการแก้ไข ${product.sku} แล้ว`);
@@ -4352,7 +4407,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
 }
 
 /* Edit an existing product's catalog fields */
-function ProductEditModal({ product, onClose, onSave }) {
+function ProductEditModal({ product, onClose, onSave, onRename }) {
   const cats = useMemo(() => typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(p => p.cat))], []);
   const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))], []);
   const brands = useMemo(() => [...new Set(PRODUCTS.map(p => p.brand))].filter(Boolean), []);
@@ -4386,7 +4441,15 @@ function ProductEditModal({ product, onClose, onSave }) {
         <div className="modal-head">
           <div>
             <h3>แก้ไขข้อมูลสินค้า</h3>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}><span className="mono">{product.sku}</span> · ปรับข้อมูลแล้วบันทึก</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <span className="mono">{product.sku}</span>
+              {onRename && canDo("renameSku") && (
+                <button type="button" className="btn btn-sm btn-ghost" style={{ padding: "2px 8px" }} onClick={onRename}>
+                  <Icons.Tag size={12}/> เปลี่ยนรหัส
+                </button>
+              )}
+              · ปรับข้อมูลแล้วบันทึก
+            </div>
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
