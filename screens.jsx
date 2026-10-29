@@ -4329,6 +4329,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
         <ProductEditModal
           product={PRODUCTS.find(p => p.sku === product.sku) || product}
           onClose={() => setEditOpen(false)}
+          onRename={() => { setEditOpen(false); setRenameOpen(true); }}
           onSave={(changes) => {
             updateProductInStore(product.sku, changes);
             pushToast(`บันทึกการแก้ไข ${product.sku} แล้ว`);
@@ -4375,7 +4376,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
 }
 
 /* Edit an existing product's catalog fields */
-function ProductEditModal({ product, onClose, onSave }) {
+function ProductEditModal({ product, onClose, onSave, onRename }) {
   const cats = useMemo(() => typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(p => p.cat))], []);
   const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))], []);
   const brands = useMemo(() => [...new Set(PRODUCTS.map(p => p.brand))].filter(Boolean), []);
@@ -4409,7 +4410,15 @@ function ProductEditModal({ product, onClose, onSave }) {
         <div className="modal-head">
           <div>
             <h3>แก้ไขข้อมูลสินค้า</h3>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}><span className="mono">{product.sku}</span> · ปรับข้อมูลแล้วบันทึก</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <span className="mono">{product.sku}</span>
+              {onRename && canDo("renameSku") && (
+                <button type="button" className="btn btn-sm btn-ghost" style={{ padding: "2px 8px" }} onClick={onRename}>
+                  <Icons.Tag size={12}/> เปลี่ยนรหัส
+                </button>
+              )}
+              · ปรับข้อมูลแล้วบันทึก
+            </div>
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
