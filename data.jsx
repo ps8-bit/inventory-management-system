@@ -2217,6 +2217,55 @@ function setLeadDays(skus, days) {
   return list.length;
 }
 
+/* ── ลงขายแล้วบน: which platforms a product is listed on (products.platforms) ──
+   A text[] of CHANNEL_LIST ids (product-platforms.sql). Lets the shop see which
+   in-stock products are NOT listed on a platform yet, so none get forgotten.
+   Until the SQL is run the column is absent from every row — hasPlatformsColumn()
+   gates the UI so a tick can't be shown as saved when the DB would drop it. */
+const LISTING_PLATFORMS = CHANNEL_LIST.filter(c => c.id !== "other");
+function hasPlatformsColumn() { return PRODUCTS.some(p => p && Object.prototype.hasOwnProperty.call(p, "platforms")); }
+function productPlatforms(p) {
+  const v = p && p.platforms;
+  return Array.isArray(v) ? v.filter(id => LISTING_PLATFORMS.some(c => c.id === id)) : [];
+}
+function productMissingPlatforms(p) {
+  const on = productPlatforms(p);
+  return LISTING_PLATFORMS.filter(c => !on.includes(c.id));
+}
+function toggleProductPlatform(sku, id) {
+  const p = PRODUCTS.find(x => x.sku === sku);
+  if (!p || !LISTING_PLATFORMS.some(c => c.id === id)) return;
+  const on = productPlatforms(p);
+  const next = on.includes(id) ? on.filter(x => x !== id) : LISTING_PLATFORMS.map(c => c.id).filter(x => x === id || on.includes(x));
+  updateProductInStore(sku, { platforms: next });
+  window.dispatchEvent(new CustomEvent("ims-products-change"));
+}
+/* Row of tap-to-toggle platform chips — shared by the desktop drawer and the
+   mobile product detail (both forks render the same control). */
+function PlatformListingChips({ product, readOnly }) {
+  if (!hasPlatformsColumn()) {
+    return <div style={{ fontSize: 12, color: "var(--muted)" }}>ยังไม่ได้ติดตั้งฐานข้อมูลช่องทางขาย (product-platforms.sql)</div>;
+  }
+  const on = productPlatforms(product);
+  return (
+    <div className="platform-chips">
+      {LISTING_PLATFORMS.map(c => {
+        const active = on.includes(c.id);
+        return (
+          <button key={c.id} type="button" disabled={readOnly}
+            className={"platform-chip" + (active ? " on" : "")}
+            aria-pressed={active}
+            onClick={() => toggleProductPlatform(product.sku, c.id)}>
+            <ChannelMark channel={c.id} size={16}/>
+            <span>{c.name}</span>
+            <span className="platform-chip-tick">{active ? "✓" : "+"}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ── ติดตามผล: what was done to push a SKU, and did it work ─────────────────────
    app_state "sales_actions" = { "<id>": { id, sku, kind, note, price, at, by } | null }.
    merge_app_state can only ADD keys, so a removed action is a null tombstone,
@@ -5087,6 +5136,7 @@ function cloudWriteFailed(res, what) {
 Object.assign(window, {
   cloudWriteFailed,
   refreshReceiveDates, buildSkuInsights, SKU_SEGMENTS, hasLeadDaysColumn, setLeadDays,
+  LISTING_PLATFORMS, hasPlatformsColumn, productPlatforms, productMissingPlatforms, toggleProductPlatform, PlatformListingChips,
   SALES_ACTION_KINDS, salesActionKindLabel, loadSalesActions, refreshSalesActions, addSalesAction, removeSalesAction, buildActionResults, ACTION_VERDICTS,
   isIOSDevice, deliverFile, savePdf,
   STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,

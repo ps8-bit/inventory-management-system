@@ -3085,3 +3085,13 @@ button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft
 .trk-search .search { min-width: 0; }
 .trk-search .search input { min-width: 0; width: 100%; }
 @media (max-width: 480px) { .auth-page.trk-search { padding-left: 16px; padding-right: 16px; } .trk-search .auth-card { padding: 20px; } }
+
+/* ลงขายแล้วบน — tap-to-toggle platform chips (desktop drawer + mobile detail) */
+.platform-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.platform-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 10px; border-radius: 10px; border: 1px dashed var(--border-strong, var(--border)); background: var(--surface); color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer; }
+.platform-chip .mark-tile { opacity: .45; }
+.platform-chip.on { border-style: solid; border-color: var(--success); background: var(--success-soft); color: var(--fg); font-weight: 600; }
+.platform-chip.on .mark-tile { opacity: 1; }
+.platform-chip-tick { font-weight: 700; color: var(--muted); }
+.platform-chip.on .platform-chip-tick { color: var(--success); }
+.platform-chip:disabled { cursor: default; }

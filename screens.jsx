@@ -2969,6 +2969,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
   const [cat, setCat] = useState("ทั้งหมด");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locFilter, setLocFilter] = useState(false); // true = only products not stored in a real position
+  const [pfFilter, setPfFilter] = useState("");       // channel id → only products NOT listed on it yet
   const [sort, setSort] = useState({ key: null, dir: 1 });     // column sort
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef(null);
@@ -3058,6 +3059,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
     const s = stockStatus(p).key;
     if (statusFilter !== "all" && s !== statusFilter) return false;
     if (locFilter && productIsStored(p, storedCodes)) return false;
+    if (pfFilter && productPlatforms(p).includes(pfFilter)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
@@ -3225,6 +3227,15 @@ function Inventory({ pushToast, density, goTo, focus }) {
           <select className="input inv-cat-select" value={cat} onChange={e => setCat(e.target.value)} title="หมวดหมู่">
             {cats.map(c => <option key={c} value={c}>{c === "ทั้งหมด" ? "ทุกหมวดหมู่" : c}</option>)}
           </select>
+          {hasPlatformsColumn() && (
+            <select className="input inv-cat-select" value={pfFilter} onChange={e => setPfFilter(e.target.value)} title="ช่องทางที่ยังไม่ได้ลงขาย">
+              <option value="">ทุกช่องทางขาย</option>
+              {LISTING_PLATFORMS.map(c => {
+                const n = liveProducts.filter(p => !productPlatforms(p).includes(c.id)).length;
+                return <option key={c.id} value={c.id}>ยังไม่ลง {c.name} ({n})</option>;
+              })}
+            </select>
+          )}
           <div className="spacer"/>
           {(unstoredCount > 0 || locFilter) && (
             <button
@@ -3248,16 +3259,17 @@ function Inventory({ pushToast, density, goTo, focus }) {
             <button className={statusFilter === "out" ? "on" : ""} onClick={() => setStatusFilter("out")}>หมด</button>
           </div>
         </div>
-        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter) && (
+        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter || pfFilter) && (
           <div className="row" style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", gap: 10, fontSize: 12, color: "var(--muted)" }}>
             <span>กรองอยู่:</span>
             {q && <span className="badge badge-neutral">ค้นหา "{q}" <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setQ("")}/></span>}
             {cat !== "ทั้งหมด" && <span className="badge badge-neutral">หมวด: {cat} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setCat("ทั้งหมด")}/></span>}
             {statusFilter !== "all" && <span className="badge badge-neutral">สถานะ: {STATUS_TH[statusFilter] || statusFilter} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setStatusFilter("all")}/></span>}
             {locFilter && <span className="badge badge-warning">ยังไม่จัดเก็บ <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setLocFilter(false)}/></span>}
+            {pfFilter && <span className="badge badge-warning">ยังไม่ลง {(LISTING_PLATFORMS.find(c => c.id === pfFilter) || {}).name} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setPfFilter("")}/></span>}
             <span className="spacer"/>
             <span><strong className="tnum" style={{ color: "var(--fg)" }}>{filtered.length}</strong> จาก {products.length} รายการ</span>
-            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); }}>ล้างตัวกรอง</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
           </div>
         )}
       </div>
@@ -3380,7 +3392,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
               <tr><td colSpan="10" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
                 <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
                 <div>ไม่พบสินค้าที่ตรงกับตัวกรอง</div>
-                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); }}>ล้างตัวกรอง</button>
+                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
               </td></tr>
             )}
           </tbody>
@@ -4139,6 +4151,15 @@ function ProductDrawer({ product, onClose, pushToast }) {
             <Stat label="ราคาขาย" value={`฿${product.price.toLocaleString()}`}/>
             {canDo("viewCost") && <Stat label="กำไรต่อชิ้น" value={`฿${(product.price - (product.cost ?? Math.round(product.price * 0.6))).toLocaleString()} · ${Math.round((1 - (product.cost ?? product.price * 0.6) / product.price) * 100)}%`}/>}
             <Stat label="จุดสั่งซื้อใหม่" value={product.reorder + " ชิ้น"}/>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>ลงขายแล้วบน</div>
+              {typeof productMissingPlatforms === "function" && hasPlatformsColumn() && productMissingPlatforms(product).length > 0 &&
+                <span className="badge badge-warning" style={{ fontSize: 10 }}>ยังไม่ลง {productMissingPlatforms(product).length} ช่องทาง</span>}
+            </div>
+            {typeof PlatformListingChips === "function" && <PlatformListingChips product={product} readOnly={!canDo("editProduct")}/>}
           </div>
 
           <LocationSplitPanel product={product} pushToast={pushToast}/>
