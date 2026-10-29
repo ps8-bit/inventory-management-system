@@ -1769,8 +1769,8 @@ function MAddSku({ categories, products, onClose, onAdd, editing, onRename }) {
               {/* The SKU is the primary key, so it isn't a form field here — it goes
                   through the same cascading rename as the detail page's tag button. */}
               {editing && onRename && canDo("renameSku") && (
-                <button type="button" className="m-action" style={{ width: "auto", padding: "0 12px", gap: 4 }} onClick={onRename}>
-                  <Icons.Tag size={12}/> เปลี่ยนรหัส
+                <button type="button" className="m-chip" style={{ gap: 6 }} onClick={onRename}>
+                  <Icons.Tag size={13}/> เปลี่ยนรหัส
                 </button>
               )}
             </div>

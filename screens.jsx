@@ -939,11 +939,11 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
             : <Icons.Plus size={20}/>}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <button type="button" className={mobile ? "m-action" : "btn btn-sm"} style={mobile ? { width: "auto", padding: "0 12px" } : undefined}
+          <button type="button" className={mobile ? "m-chip" : "btn btn-sm"}
             disabled={photoBusy} onClick={() => photoRef.current?.click()}>
             {shownPhoto ? "เปลี่ยนรูป" : "ถ่าย / เลือกรูป"}
           </button>
-          {photo && <button type="button" className={mobile ? "m-action" : "btn btn-sm btn-ghost"} style={mobile ? { width: "auto", padding: "0 12px" } : undefined}
+          {photo && <button type="button" className={mobile ? "m-chip" : "btn btn-sm btn-ghost"}
             onClick={() => setPhoto(null)}>ลบรูป</button>}
         </div>
         <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => pickPhoto(e.target.files?.[0])}/>
