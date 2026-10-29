@@ -1446,6 +1446,8 @@ function MInventory({ ctx }) {
   // all | ok | low | out — preset when opened from the home "ต้องสั่งซื้อ" tile.
   const [statusFilter, setStatusFilter] = useStateM(() => memo ? memo.statusFilter : ((ctx.route.params && ctx.route.params.status) || "all"));
   const [locFilter, setLocFilter] = useStateM(memo ? memo.locFilter : false); // true = only products not stored in a real position
+  const [noPhoto, setNoPhoto] = useStateM(false); // true = only products with no photo yet
+  const photoMap = (typeof useProductImages === "function") ? useProductImages() : {};
   const [pfFilter, setPfFilter] = useStateM(memo ? memo.pfFilter : "");       // channel id → only products NOT listed on it yet
   const [pfEdit, setPfEdit] = useStateM(memo ? memo.pfEdit : false);        // row platform icons are tappable only in this mode
   // Rendered in pages: all 424 rows (with photos) on every tab switch was slow on phones.
@@ -1523,12 +1525,15 @@ function MInventory({ ctx }) {
   // Loc codes that are real positions — stale codes (e.g. legacy "A") count as unstored.
   const storedCodes = useMemoM(() => storedLocSet(), [stockKey]);
   const unstoredCount = useMemoM(() => products.reduce((n, p) => n + (productIsStored(p, storedCodes) ? 0 : 1), 0), [products, storedCodes]);
+  const hasPhoto = (p) => typeof resolveProductImage !== "function" || !!resolveProductImage(p.sku, photoMap);
+  const noPhotoCount = useMemoM(() => products.reduce((n, p) => n + (hasPhoto(p) ? 0 : 1), 0), [products, photoMap]);
 
   const cats = useMemoM(() => ["ทั้งหมด", ...(typeof loadCategories === "function" ? loadCategories() : [...new Set(products.map(p => p.cat))])], [products]);
   const filtered = products.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     if (statusFilter !== "all" && stockStatus(p).key !== statusFilter) return false;
     if (locFilter && productIsStored(p, storedCodes)) return false;
+    if (noPhoto && hasPhoto(p)) return false;
     if (pfFilter && productPlatforms(p).includes(pfFilter)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
@@ -1638,6 +1643,14 @@ function MInventory({ ctx }) {
               onClick={() => setLocFilter(v => !v)}
               style={!locFilter ? { background: "var(--warning-soft)", color: "oklch(0.5 0.13 65)", borderColor: "transparent", fontWeight: 600 } : {}}>
               <Icons.Warn size={11} style={{ marginRight: 4, verticalAlign: "-1px" }}/>ยังไม่จัดเก็บ {unstoredCount}
+            </button>
+          )}
+          {(noPhotoCount > 0 || noPhoto) && (
+            <button
+              className={"m-chip" + (noPhoto ? " on" : "")}
+              onClick={() => setNoPhoto(v => !v)}
+              style={!noPhoto ? { background: "var(--accent-soft)", color: "var(--accent)", borderColor: "transparent", fontWeight: 600 } : {}}>
+              <Icons.Plus size={11} style={{ marginRight: 4, verticalAlign: "-1px" }}/>ยังไม่มีรูป {noPhotoCount}
             </button>
           )}
         </div>

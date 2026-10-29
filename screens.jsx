@@ -3023,6 +3023,8 @@ function Inventory({ pushToast, density, goTo, focus }) {
   const [cat, setCat] = useState("ทั้งหมด");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locFilter, setLocFilter] = useState(false); // true = only products not stored in a real position
+  const [noPhoto, setNoPhoto] = useState(false); // true = only products with no photo yet
+  const photoMap = (typeof useProductImages === "function") ? useProductImages() : {};
   const [pfFilter, setPfFilter] = useState("");       // channel id → only products NOT listed on it yet
   const [pfEdit, setPfEdit] = useState(false);        // row platform icons are tappable only in this mode
   const [sort, setSort] = useState({ key: null, dir: 1 });     // column sort
@@ -3108,12 +3110,15 @@ function Inventory({ pushToast, density, goTo, focus }) {
   // legacy "A" from CSV import) count as NOT stored and get a warning badge.
   const storedCodes = useMemo(() => storedLocSet(), [stockKey]);
   const unstoredCount = useMemo(() => liveProducts.reduce((n, p) => n + (productIsStored(p, storedCodes) ? 0 : 1), 0), [liveProducts, storedCodes]);
+  const hasPhoto = (p) => typeof resolveProductImage !== "function" || !!resolveProductImage(p.sku, photoMap);
+  const noPhotoCount = useMemo(() => liveProducts.reduce((n, p) => n + (hasPhoto(p) ? 0 : 1), 0), [liveProducts, photoMap]);
 
   const filteredRaw = liveProducts.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     const s = stockStatus(p).key;
     if (statusFilter !== "all" && s !== statusFilter) return false;
     if (locFilter && productIsStored(p, storedCodes)) return false;
+    if (noPhoto && hasPhoto(p)) return false;
     if (pfFilter && productPlatforms(p).includes(pfFilter)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
@@ -3313,6 +3318,21 @@ function Inventory({ pushToast, density, goTo, focus }) {
               <Icons.Warn size={13}/> ยังไม่จัดเก็บ <span className="tnum">{unstoredCount}</span>
             </button>
           )}
+          {(noPhotoCount > 0 || noPhoto) && (
+            <button
+              onClick={() => setNoPhoto(v => !v)}
+              title={noPhoto ? "แสดงสินค้าทั้งหมด" : "แสดงเฉพาะสินค้าที่ยังไม่มีรูป"}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "7px 12px", borderRadius: 10, fontSize: 12, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit",
+                border: "1px solid " + (noPhoto ? "var(--accent)" : "transparent"),
+                background: noPhoto ? "var(--accent)" : "var(--accent-soft)",
+                color: noPhoto ? "#fff" : "var(--accent)"
+              }}>
+              <Icons.Plus size={13}/> ยังไม่มีรูป <span className="tnum">{noPhotoCount}</span>
+            </button>
+          )}
           <div className="seg">
             <button className={statusFilter === "all" ? "on" : ""} onClick={() => setStatusFilter("all")}>ทุกสถานะ</button>
             <button className={statusFilter === "ok" ? "on" : ""} onClick={() => setStatusFilter("ok")}>พร้อมขาย</button>
@@ -3320,17 +3340,18 @@ function Inventory({ pushToast, density, goTo, focus }) {
             <button className={statusFilter === "out" ? "on" : ""} onClick={() => setStatusFilter("out")}>หมด</button>
           </div>
         </div>
-        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter || pfFilter) && (
+        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter || noPhoto || pfFilter) && (
           <div className="row" style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", gap: 10, fontSize: 12, color: "var(--muted)" }}>
             <span>กรองอยู่:</span>
             {q && <span className="badge badge-neutral">ค้นหา "{q}" <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setQ("")}/></span>}
             {cat !== "ทั้งหมด" && <span className="badge badge-neutral">หมวด: {cat} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setCat("ทั้งหมด")}/></span>}
             {statusFilter !== "all" && <span className="badge badge-neutral">สถานะ: {STATUS_TH[statusFilter] || statusFilter} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setStatusFilter("all")}/></span>}
             {locFilter && <span className="badge badge-warning">ยังไม่จัดเก็บ <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setLocFilter(false)}/></span>}
+            {noPhoto && <span className="badge badge-warning">ยังไม่มีรูป <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setNoPhoto(false)}/></span>}
             {pfFilter && <span className="badge badge-warning">ยังไม่ลง {(LISTING_PLATFORMS.find(c => c.id === pfFilter) || {}).name} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setPfFilter("")}/></span>}
             <span className="spacer"/>
             <span><strong className="tnum" style={{ color: "var(--fg)" }}>{filtered.length}</strong> จาก {products.length} รายการ</span>
-            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setNoPhoto(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
           </div>
         )}
       </div>
@@ -3456,7 +3477,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
               <tr><td colSpan="10" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
                 <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
                 <div>ไม่พบสินค้าที่ตรงกับตัวกรอง</div>
-                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
+                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setNoPhoto(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
               </td></tr>
             )}
           </tbody>
