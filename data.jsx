@@ -2266,6 +2266,31 @@ function PlatformListingChips({ product, readOnly }) {
   );
 }
 
+/* One-tap platform marks for a LIST row (desktop table, mobile list) — tick a
+   listing without opening the product. Spans, not buttons: the mobile row is
+   itself a <button>, and every tap stops propagation so it never opens the row. */
+function PlatformRowToggles({ product, readOnly }) {
+  if (!hasPlatformsColumn()) return null;
+  const on = productPlatforms(product);
+  return (
+    <div className="pf-row" onClick={e => e.stopPropagation()}>
+      {LISTING_PLATFORMS.map(c => {
+        const active = on.includes(c.id);
+        return (
+          <span key={c.id} role="button" tabIndex={readOnly ? -1 : 0} aria-pressed={active}
+            className={"pf-row-tog" + (active ? " on" : "") + (readOnly ? " ro" : "")}
+            title={(active ? "ลงขายแล้วบน " : "ยังไม่ลง ") + c.name + (readOnly ? "" : " — แตะเพื่อเปลี่ยน")}
+            onClick={e => { e.stopPropagation(); if (!readOnly) toggleProductPlatform(product.sku, c.id); }}
+            onKeyDown={e => { if (!readOnly && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); e.stopPropagation(); toggleProductPlatform(product.sku, c.id); } }}>
+            <ChannelMark channel={c.id} size={20}/>
+            {active && <span className="pf-row-tick">✓</span>}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ── ติดตามผล: what was done to push a SKU, and did it work ─────────────────────
    app_state "sales_actions" = { "<id>": { id, sku, kind, note, price, at, by } | null }.
    merge_app_state can only ADD keys, so a removed action is a null tombstone,
@@ -5136,7 +5161,7 @@ function cloudWriteFailed(res, what) {
 Object.assign(window, {
   cloudWriteFailed,
   refreshReceiveDates, buildSkuInsights, SKU_SEGMENTS, hasLeadDaysColumn, setLeadDays,
-  LISTING_PLATFORMS, hasPlatformsColumn, productPlatforms, productMissingPlatforms, toggleProductPlatform, PlatformListingChips,
+  LISTING_PLATFORMS, hasPlatformsColumn, productPlatforms, productMissingPlatforms, toggleProductPlatform, PlatformListingChips, PlatformRowToggles,
   SALES_ACTION_KINDS, salesActionKindLabel, loadSalesActions, refreshSalesActions, addSalesAction, removeSalesAction, buildActionResults, ACTION_VERDICTS,
   isIOSDevice, deliverFile, savePdf,
   STOCK_SNAPSHOT_KEY, stockReportRows, buildStockReportWorkbook, downloadStockReport,

@@ -1645,6 +1645,7 @@ function MInventory({ ctx }) {
                       </div>
                     );
                   })()}
+                  {!selecting && <PlatformRowToggles product={p} readOnly={!canDo("editProduct")}/>}
                 </div>
                 <div style={{ textAlign: "right", flexShrink: 0 }}>
                   <div className="tnum" style={{ fontSize: 15, fontWeight: 600 }}>{p.qty}</div>
