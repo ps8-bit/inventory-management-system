@@ -1456,15 +1456,39 @@ function MInventory({ ctx }) {
     setShowN(50);
   }, [q, cat, statusFilter, locFilter, pfFilter]);
   const contentRef = useRefM(null);
+  /* Restore by ANCHOR, not raw pixels: rows above grow as photos/positions load,
+     so the same scrollTop landed a few rows lower. Pin the tapped row back to the
+     exact offset it had on screen, and keep re-pinning while the list settles —
+     until the user touches/scrolls it themselves. */
   useEffectM(() => {
-    if (!memo || !memo.scroll) return;
+    if (!memo) return;
     const el = contentRef.current;
-    const go = () => { if (el) el.scrollTop = memo.scroll; };
-    go(); requestAnimationFrame(go); // again after thumbnails lay out
+    if (!el) return;
+    let stop = false;
+    const halt = () => { stop = true; };
+    const pin = () => {
+      if (stop) return;
+      const row = memo.sku ? el.querySelector('[data-sku="' + CSS.escape(memo.sku) + '"]') : null;
+      if (row) el.scrollTop += (row.getBoundingClientRect().top - el.getBoundingClientRect().top) - memo.rowOffset;
+      else el.scrollTop = memo.scroll;
+    };
+    pin(); requestAnimationFrame(pin);
+    const timers = [80, 200, 400, 700, 1100].map(ms => setTimeout(pin, ms));
+    el.addEventListener("touchstart", halt, { passive: true });
+    el.addEventListener("wheel", halt, { passive: true });
+    el.addEventListener("load", pin, true); // a thumbnail finished → heights moved
+    return () => {
+      stop = true; timers.forEach(clearTimeout);
+      el.removeEventListener("touchstart", halt); el.removeEventListener("wheel", halt);
+      el.removeEventListener("load", pin, true);
+    };
   }, []);
-  const openProduct = (p) => {
-    _mInvMemo = { q, cat, statusFilter, locFilter, pfFilter, pfEdit, showN,
-                  scroll: contentRef.current ? contentRef.current.scrollTop : 0 };
+  const openProduct = (p, ev) => {
+    const el = contentRef.current;
+    const row = ev && ev.currentTarget;
+    _mInvMemo = { q, cat, statusFilter, locFilter, pfFilter, pfEdit, showN, sku: p.sku,
+                  scroll: el ? el.scrollTop : 0,
+                  rowOffset: (el && row) ? row.getBoundingClientRect().top - el.getBoundingClientRect().top : 0 };
     ctx.push("product", p);
   };
   const [selecting, setSelecting] = useStateM(false);
@@ -1647,7 +1671,8 @@ function MInventory({ ctx }) {
               <button
                 key={p.sku}
                 className={"m-row" + (isSelected ? " selected" : "")}
-                onClick={() => selecting ? toggleSku(p.sku) : openProduct(p)}
+                data-sku={p.sku}
+                onClick={(e) => selecting ? toggleSku(p.sku) : openProduct(p, e)}
               >
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
                 <ProductImageThumb sku={p.sku} size={40} radius={8}/>
