@@ -34,7 +34,7 @@ with (security_invoker = false) as
     lead_days,
     platforms
    from products p
-  where (select public.has_role_claim());   -- require-role-claim.sql
+  where auth.role() = 'authenticated'::text;   -- matches the LIVE view (require-role-claim.sql is not applied)
 
 -- products has COLUMN-level SELECT grants (protect-cost-column.sql).
 grant select (platforms) on public.products to authenticated;
