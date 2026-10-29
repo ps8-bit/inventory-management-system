@@ -3398,7 +3398,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
                   <td className="t-mono" style={{ color: "var(--fg)" }} onClick={() => setOpen(p.sku)}>{p.sku}</td>
                   <td onClick={() => setOpen(p.sku)}>
                     <div className="row" style={{ gap: 10 }}>
-                      <ProductImageThumb sku={p.sku} size={36} radius={8}/>
+                      <ProductImageThumb sku={p.sku} size={36} radius={8} addable/>
                       <div style={{ fontSize: 13, minWidth: 0 }}>
                         {p.name}
                         <PlatformRowToggles product={p} readOnly={!pfEdit || !canDo("editProduct")}/>

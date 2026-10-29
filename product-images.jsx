@@ -358,9 +358,13 @@ function openProductImageViewer(url, caption) {
 }
 
 /* zoom: tap opens the full-size photo (stops the tap reaching the row under it). */
-function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel, zoom, caption }) {
+/* addable: a product with no photo shows a "+ รูป" tile that picks/takes one in
+   place (the tap never reaches the row under it). Only for roles that can write. */
+function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel, zoom, caption, addable }) {
   const images = useProductImages();
   const url = resolveProductImage(sku, images);
+  const fileRef = useRefImg(null);
+  const [busy, setBusy] = useStateImg(false);
   if (url) {
     const open = zoom ? (e) => { e.stopPropagation(); e.preventDefault(); openProductImageViewer(url, caption || sku); } : undefined;
     return (
@@ -376,6 +380,37 @@ function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel, zoom, ca
       }}>
         <img src={url} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
       </div>
+    );
+  }
+  if (addable && sku && _piCanWrite() && (typeof canDo !== "function" || canDo("editProduct"))) {
+    const stop = (e) => { e.stopPropagation(); };
+    const pick = (e) => { e.stopPropagation(); e.preventDefault(); if (!busy) fileRef.current?.click(); };
+    const upload = async (file) => {
+      if (!file) return;
+      setBusy(true);
+      try {
+        const r = await fileToWebp(file, { maxSize: 1000, quality: 0.85 });
+        setProductImage(sku, r.dataUrl);
+        window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: "เพิ่มรูปให้ " + sku + " แล้ว", type: "success" } }));
+      } catch (err) {
+        window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: (err && err.message) || "เพิ่มรูปไม่สำเร็จ", type: "error" } }));
+      } finally {
+        setBusy(false);
+        if (fileRef.current) fileRef.current.value = "";
+      }
+    };
+    return (
+      <span onClick={pick} role="button" title="เพิ่มรูปสินค้า" style={{
+        width: size, height: size, borderRadius: radius, flexShrink: 0,
+        background: "var(--accent-soft)", color: "var(--accent)",
+        border: "1.5px dashed var(--accent)", cursor: busy ? "wait" : "pointer",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        fontSize: Math.max(9, size * 0.24), fontWeight: 600, lineHeight: 1.1, gap: 1
+      }}>
+        {busy ? "…" : <><Icons.Plus size={Math.max(10, Math.round(size * 0.32))}/><span>รูป</span></>}
+        <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+          onClick={stop} onChange={(e) => upload(e.target.files?.[0])}/>
+      </span>
     );
   }
   return (

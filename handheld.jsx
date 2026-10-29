@@ -1681,7 +1681,7 @@ function MInventory({ ctx }) {
                 onClick={(e) => selecting ? toggleSku(p.sku) : openProduct(p, e)}
               >
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
-                <ProductImageThumb sku={p.sku} size={40} radius={8}/>
+                <ProductImageThumb sku={p.sku} size={40} radius={8} addable={!selecting}/>
                 <div className="m-row-main">
                   <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
                   <div className="row" style={{ gap: 6, marginTop: 2, flexWrap: "wrap" }}>
