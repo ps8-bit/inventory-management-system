@@ -1438,6 +1438,7 @@ function MInventory({ ctx }) {
   const [statusFilter, setStatusFilter] = useStateM(() => (ctx.route.params && ctx.route.params.status) || "all");
   const [locFilter, setLocFilter] = useStateM(false); // true = only products not stored in a real position
   const [pfFilter, setPfFilter] = useStateM("");       // channel id → only products NOT listed on it yet
+  const [pfEdit, setPfEdit] = useStateM(false);        // row platform icons are tappable only in this mode
   // Rendered in pages: all 424 rows (with photos) on every tab switch was slow on phones.
   const [showN, setShowN] = useStateM(50);
   useEffectM(() => { setShowN(50); }, [q, cat, statusFilter, locFilter, pfFilter]);
@@ -1589,6 +1590,11 @@ function MInventory({ ctx }) {
         {/* ยังไม่ลงขายบน <platform> — tap again to clear */}
         {hasPlatformsColumn() && (
           <div className="m-chips-scroll" style={{ marginBottom: 12 }}>
+            {canDo("editProduct") && (
+              <button className={"m-chip" + (pfEdit ? " on" : "")} onClick={() => setPfEdit(v => !v)} style={{ fontWeight: 600 }}>
+                {pfEdit ? "✓ เสร็จ" : "✎ ติ๊กช่องทาง"}
+              </button>
+            )}
             {LISTING_PLATFORMS.map(c => {
               const n = products.filter(p => !productPlatforms(p).includes(c.id)).length;
               return (
@@ -1645,7 +1651,7 @@ function MInventory({ ctx }) {
                       </div>
                     );
                   })()}
-                  {!selecting && <PlatformRowToggles product={p} readOnly={!canDo("editProduct")}/>}
+                  {!selecting && <PlatformRowToggles product={p} readOnly={!pfEdit || !canDo("editProduct")}/>}
                 </div>
                 <div style={{ textAlign: "right", flexShrink: 0 }}>
                   <div className="tnum" style={{ fontSize: 15, fontWeight: 600 }}>{p.qty}</div>

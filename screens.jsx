@@ -2970,6 +2970,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [locFilter, setLocFilter] = useState(false); // true = only products not stored in a real position
   const [pfFilter, setPfFilter] = useState("");       // channel id → only products NOT listed on it yet
+  const [pfEdit, setPfEdit] = useState(false);        // row platform icons are tappable only in this mode
   const [sort, setSort] = useState({ key: null, dir: 1 });     // column sort
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef(null);
@@ -3227,6 +3228,12 @@ function Inventory({ pushToast, density, goTo, focus }) {
           <select className="input inv-cat-select" value={cat} onChange={e => setCat(e.target.value)} title="หมวดหมู่">
             {cats.map(c => <option key={c} value={c}>{c === "ทั้งหมด" ? "ทุกหมวดหมู่" : c}</option>)}
           </select>
+          {hasPlatformsColumn() && canDo("editProduct") && (
+            <button className={"btn btn-sm" + (pfEdit ? " btn-primary" : "")} onClick={() => setPfEdit(v => !v)}
+              title="เปิดเพื่อแตะไอคอนช่องทางในแต่ละแถว">
+              {pfEdit ? "✓ เสร็จ" : "✎ ติ๊กช่องทางขาย"}
+            </button>
+          )}
           {hasPlatformsColumn() && (
             <select className="input inv-cat-select" value={pfFilter} onChange={e => setPfFilter(e.target.value)} title="ช่องทางที่ยังไม่ได้ลงขาย">
               <option value="">ทุกช่องทางขาย</option>
@@ -3340,7 +3347,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
                       <ProductImageThumb sku={p.sku} size={36} radius={8}/>
                       <div style={{ fontSize: 13, minWidth: 0 }}>
                         {p.name}
-                        <PlatformRowToggles product={p} readOnly={!canDo("editProduct")}/>
+                        <PlatformRowToggles product={p} readOnly={!pfEdit || !canDo("editProduct")}/>
                       </div>
                     </div>
                   </td>
