@@ -3095,3 +3095,12 @@ button.pq-kpi.is-on { border-color: var(--accent); background: var(--accent-soft
 .platform-chip-tick { font-weight: 700; color: var(--muted); }
 .platform-chip.on .platform-chip-tick { color: var(--success); }
 .platform-chip:disabled { cursor: default; }
+
+/* One-tap platform marks in inventory list rows (desktop + mobile) */
+.pf-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.pf-row-tog { position: relative; display: inline-flex; padding: 3px; border-radius: 8px; cursor: pointer; filter: grayscale(1); opacity: .35; }
+.pf-row-tog.on { filter: none; opacity: 1; box-shadow: 0 0 0 2px var(--success); }
+.pf-row-tog.ro { cursor: default; }
+.pf-row-tick { position: absolute; right: -4px; top: -5px; width: 13px; height: 13px; border-radius: 999px; background: var(--success); color: #fff; font-size: 9px; font-weight: 700; line-height: 13px; text-align: center; }
+html[data-mobile="1"] .pf-row-tog { padding: 4px; }
+html[data-mobile="1"] .pf-row-tog .mark-tile { width: 24px !important; height: 24px !important; }

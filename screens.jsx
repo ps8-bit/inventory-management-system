@@ -3338,7 +3338,10 @@ function Inventory({ pushToast, density, goTo, focus }) {
                   <td onClick={() => setOpen(p.sku)}>
                     <div className="row" style={{ gap: 10 }}>
                       <ProductImageThumb sku={p.sku} size={36} radius={8}/>
-                      <div style={{ fontSize: 13, minWidth: 0 }}>{p.name}</div>
+                      <div style={{ fontSize: 13, minWidth: 0 }}>
+                        {p.name}
+                        <PlatformRowToggles product={p} readOnly={!canDo("editProduct")}/>
+                      </div>
                     </div>
                   </td>
                   <td onClick={() => setOpen(p.sku)}><span className="badge badge-neutral">{p.cat}</span></td>
