@@ -25,6 +25,9 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import webpush from "npm:web-push@3.6.7";
+import satori from "npm:satori@0.12.2";
+import { initWasm, Resvg } from "npm:@resvg/resvg-wasm@2.6.2";
+import { buildCard, type CardInput, type CardLine } from "./card.ts";
 
 const ALLOWED_ORIGINS = [
   "https://psstock.vercel.app",
@@ -203,7 +206,7 @@ async function discoverTelegramChats(admin: any): Promise<string[]> {
 }
 
 type TgPhoto = { url: string; caption: string };
-type TgMessage = { text: string; photos: TgPhoto[] };
+type TgMessage = { text: string; photos: TgPhoto[]; cards?: Uint8Array[] };
 
 // Lines a packer has to go and pick: every line of a new order, and the lines
 // an edit added or raised. Removals and cancels stay text-only.
@@ -236,15 +239,94 @@ async function photoUrls(admin: any, skus: string[]): Promise<Record<string, str
 
 async function buildTelegramMessages(admin: any, alerts: any[], by: string): Promise<TgMessage[]> {
   const lines = alerts.map(photoLines);
-  const urls = await photoUrls(admin, lines.flat().map((l) => l.sku));
-  return alerts.map((a, i) => {
+  const cardSkus = alerts.flatMap((a) => cardLines(a).map((l) => l.sku));
+  const urls = await photoUrls(admin, [...lines.flat().map((l) => l.sku), ...cardSkus]);
+  return Promise.all(alerts.map(async (a, i) => {
     const seen = new Set<string>();
     const photos = lines[i]
       .filter((l) => urls[l.sku] && !seen.has(l.sku) && seen.add(l.sku))
       .slice(0, 10)
       .map((l) => ({ url: urls[l.sku], caption: `${l.sku} · ${l.name} × ${l.qty}`.slice(0, 1000) }));
-    return { text: telegramText(a, by), photos };
-  });
+    let cards: Uint8Array[] | undefined;
+    try { cards = await renderCards(a, by, urls); }
+    catch (e) { _tgLastError = "card render: " + String((e as Error)?.message || e).slice(0, 200); console.error(_tgLastError); }
+    return { text: telegramText(a, by), photos, cards };
+  }));
+}
+
+/* ── Picture card (card.ts, the owner's design) ───────────────────────────────
+   satori lays it out, resvg rasterises it. Fonts (Prompt, Thai + Latin subsets)
+   and the resvg wasm load once per warm instance. Photos come from the small
+   JPEG thumbnails at product-images/t/<photo name>.jpg — resvg can't draw the
+   webp originals; a SKU without a thumbnail shows a blank frame. Any failure
+   falls back to the album/text path, so an alert is never lost to the card. */
+const FONT_BASE = "https://cdn.jsdelivr.net/npm/@fontsource/prompt@5.0.8/files/";
+const RESVG_WASM = "https://cdn.jsdelivr.net/npm/@resvg/resvg-wasm@2.6.2/index_bg.wasm";
+const CARD_ROWS = 20;
+let _cardReady: Promise<any[]> | null = null;
+
+function cardAssets(): Promise<any[]> {
+  if (!_cardReady) {
+    _cardReady = (async () => {
+      const fonts = await Promise.all([400, 600, 700].flatMap((weight) => ["latin", "thai"].map(async (sub) => {
+        const r = await fetch(`${FONT_BASE}prompt-${sub}-${weight}-normal.woff`);
+        if (!r.ok) throw new Error("font " + r.status);
+        return { name: sub === "thai" ? "PromptThai" : "Prompt", weight, style: "normal", data: await r.arrayBuffer() };
+      })));
+      await initWasm(fetch(RESVG_WASM));
+      return fonts;
+    })();
+    _cardReady.catch(() => { _cardReady = null; });   // retry on the next alert
+  }
+  return _cardReady;
+}
+
+function cardLines(a: any): CardLine[] {
+  if (a.kind === "edit") {
+    return (Array.isArray(a.diff) ? a.diff : []).map((d: any) => ({
+      sku: str(d.sku, 30), name: str(d.name, 80), qty: Number(d.to) || 0,
+      from: Number(d.from) || 0, to: Number(d.to) || 0 }));
+  }
+  return (Array.isArray(a.items) ? a.items : [])
+    .map((i: any) => ({ sku: str(i.sku, 30), name: str(i.name, 80), qty: Number(i.qty) || 0 }));
+}
+
+const PHOTO_RE = /\/product-images\/p\/([^/?#]+?)\.[a-z0-9]+(?:[?#].*)?$/i;
+
+async function thumbData(photo: string | undefined): Promise<string | undefined> {
+  if (!photo || !PHOTO_RE.test(photo)) return undefined;
+  try {
+    const r = await fetch(photo.replace(PHOTO_RE, "/product-images/t/$1.jpg"));
+    if (!r.ok || !/jpeg|png/.test(r.headers.get("content-type") || "")) return undefined;
+    const b = new Uint8Array(await r.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < b.length; i += 0x8000) bin += String.fromCharCode(...b.subarray(i, i + 0x8000));
+    return "data:image/jpeg;base64," + btoa(bin);
+  } catch { return undefined; }
+}
+
+async function renderCards(a: any, by: string, urls: Record<string, string>): Promise<Uint8Array[] | undefined> {
+  const kind = a.kind === "removed" || a.kind === "edit" ? a.kind : "new";
+  const lines = cardLines(a);
+  if (!lines.length) return undefined;              // nothing to draw (e.g. the settings test)
+  const [fonts, photos] = await Promise.all([cardAssets(), Promise.all(lines.map((l) => thumbData(urls[l.sku])))]);
+  lines.forEach((l, i) => { l.photo = photos[i]; });
+  const fields = kind === "edit" ? (Array.isArray(a.fields) ? a.fields : []).slice(0, 5)
+    .map((f: any) => ({ label: str(f.label, 20), from: str(f.from, 60), to: str(f.to, 60) })) : [];
+  const pages = Math.min(10, Math.ceil(lines.length / CARD_ROWS));
+  const out: Uint8Array[] = [];
+  for (let p = 0; p < pages; p++) {
+    const input: CardInput = {
+      kind, id: str(a.short || a.id, 40), channel: str(a.channel, 20), customer: str(a.customer, 40), by,
+      lines: lines.slice(p * CARD_ROWS, (p + 1) * CARD_ROWS), fields: p === pages - 1 ? fields : [],
+      page: p + 1, pages, start: p * CARD_ROWS,
+      totalLines: lines.length, totalQty: lines.reduce((n, l) => n + (l.qty || 0), 0),
+    };
+    const { el, width, height } = buildCard(input);
+    const svg = await satori(el, { width, height, fonts });
+    out.push(new Resvg(svg, { fitTo: { mode: "width", value: width } }).render().asPng());
+  }
+  return out;
 }
 
 async function tgCall(token: string, method: string, body: unknown): Promise<boolean> {
@@ -262,7 +344,34 @@ async function tgCall(token: string, method: string, body: unknown): Promise<boo
 // One alert = an album (photo per line, the summary as the first caption) when
 // it has photos and the summary fits a caption; otherwise the album with short
 // captions followed by the text. A failed album still sends the text.
+async function sendCards(token: string, chat_id: string, cards: Uint8Array[], caption: string): Promise<boolean> {
+  const form = new FormData();
+  form.append("chat_id", chat_id);
+  if (cards.length === 1) {
+    form.append("caption", caption);
+    form.append("parse_mode", "HTML");
+    form.append("photo", new Blob([cards[0]], { type: "image/png" }), "card.png");
+  } else {
+    form.append("media", JSON.stringify(cards.map((_, i) => (i === 0
+      ? { type: "photo", media: "attach://c0", caption, parse_mode: "HTML" }
+      : { type: "photo", media: `attach://c${i}` }))));
+    cards.forEach((c, i) => form.append(`c${i}`, new Blob([c], { type: "image/png" }), `card${i}.png`));
+  }
+  const method = cards.length === 1 ? "sendPhoto" : "sendMediaGroup";
+  const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, { method: "POST", body: form });
+  if (r.ok) return true;
+  _tgLastError = `${method} ${r.status}: ` + (await r.text().catch(() => "")).slice(0, 200);
+  console.error(_tgLastError);
+  return false;
+}
+
+// Card first (the whole order in one picture, the summary as its caption); then
+// the album; then plain text. Each step only runs when the one before failed.
 async function sendOne(token: string, chat_id: string, m: TgMessage): Promise<boolean> {
+  if (m.cards && m.cards.length) {
+    const caption = m.text.length <= 1024 ? m.text : m.text.split("\n")[0];
+    if (await sendCards(token, chat_id, m.cards, caption)) return true;
+  }
   if (!m.photos.length) {
     return tgCall(token, "sendMessage", { chat_id, text: m.text, parse_mode: "HTML", disable_web_page_preview: true });
   }

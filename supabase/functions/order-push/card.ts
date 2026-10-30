@@ -79,14 +79,28 @@ function photo(src: string | undefined, faded: boolean): El {
   return box(frame, { type: "img", props: { src, width: 84, height: 84, style: { objectFit: "contain" } } });
 }
 
-function qtyBox(t: typeof THEME.new, label: string, hot: boolean, down = false, wide = false): El {
+// The web-font subsets have no "→" glyph — draw it.
+const arrow = (color: string, size: number): El => ({ type: "svg", props: {
+  width: size, height: size, viewBox: "0 0 24 24", style: { margin: "0 8px", flexShrink: 0 },
+  children: [{ type: "path", props: { d: "M4 12h14M13 6l6 6-6 6", fill: "none", stroke: color, strokeWidth: 3,
+    strokeLinecap: "round", strokeLinejoin: "round" } }] } });
+const fromTo = (a: string | number, b: string | number) => ({ a: String(a), b: String(b) });
+
+function qtyBox(t: typeof THEME.new, label: string | { a: string; b: string }, hot: boolean, down = false, wide = false): El {
   const w = wide ? 152 : 96;
   if (hot) {
-    return box({ width: w, height: 74, borderRadius: 16, background: t.hot, alignItems: "center", justifyContent: "center", flexShrink: 0 }, txt({ fontSize: 38, fontWeight: 700, color: "#fff" }, label));
+    return box({ width: w, height: 74, borderRadius: 16, background: t.hot, alignItems: "center", justifyContent: "center",
+      flexShrink: 0 }, qtyText(label, "#fff"));
   }
   const bg = down ? "#fff1f2" : t.soft, bd = down ? "#fecdd3" : t.softBd, ink = down ? "#be123c" : t.softInk;
   return box({ width: w, height: 74, borderRadius: 16, background: bg, border: `2px solid ${bd}`, alignItems: "center",
-    justifyContent: "center", flexShrink: 0 }, txt({ fontSize: 38, fontWeight: 700, color: ink }, label));
+    justifyContent: "center", flexShrink: 0 }, qtyText(label, ink));
+}
+
+function qtyText(label: string | { a: string; b: string }, color: string): El {
+  const st = { fontSize: 38, fontWeight: 700, color };
+  if (typeof label === "string") return txt(st, label);
+  return box({ alignItems: "center" }, [txt(st, label.a), arrow(color, 30), txt(st, label.b)]);
 }
 
 const TAG = {
@@ -100,8 +114,8 @@ function row(t: typeof THEME.new, kind: CardInput["kind"], l: CardLine, n: numbe
   if (kind === "edit") {
     const from = l.from ?? 0, to = l.to ?? l.qty;
     if (from === 0) { tag = "add"; q = qtyBox(t, `+${to}`, true, false, true); }
-    else if (to === 0) { tag = "del"; faded = true; q = qtyBox(t, `${from} → 0`, false, true, true); }
-    else { tag = "chg"; q = qtyBox(t, `${from} → ${to}`, to > from, to < from, true); }
+    else if (to === 0) { tag = "del"; faded = true; q = qtyBox(t, fromTo(from, 0), false, true, true); }
+    else { tag = "chg"; q = qtyBox(t, fromTo(from, to), to > from, to < from, true); }
   } else {
     q = qtyBox(t, `×${l.qty}`, kind === "new" && l.qty >= 2);
   }
@@ -169,7 +183,7 @@ export function buildCard(c: CardInput): { el: El; width: number; height: number
     padding: "0 36px", gap: 10, fontSize: 24, borderBottom: "1px solid #fef3c7" }, [
     txt({ color: "#92400e", flexShrink: 0 }, `${f.label}:`),
     one({ color: "#94a3b8", textDecoration: "line-through", flexShrink: 1, maxWidth: 360 }, f.from || "-"),
-    txt({ color: "#64748b", flexShrink: 0 }, "→"),
+    arrow("#64748b", 24),
     one({ color: "#1e293b", fontWeight: 600, flexShrink: 1 }, f.to || "-"),
   ])));
   const changed = c.kind === "edit"
