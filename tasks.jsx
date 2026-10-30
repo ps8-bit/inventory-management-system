@@ -629,7 +629,10 @@ function TkRoleWarn({ person }) {
   if (!person || typeof canOpenPage !== "function" || canOpenPage("tasks", person.role)) return null;
   return <div style={{ color: "var(--warning)", fontSize: 12.5, marginTop: 4 }}>บทบาท “{person.role}” ยังไม่เห็นหน้า งานของทีม — เปิดสิทธิ์ที่ ผู้ใช้งานและสิทธิ์ ก่อน ไม่งั้นเขาจะไม่เห็นงานนี้</div>;
 }
-function TaskCreate({ m, onDone, onCancel, edit, preset }) {
+function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
+  // Snapshot at mount: the save is guarded on THIS updated_at, so a change made
+  // meanwhile (staff submitted a round) comes back as a conflict, not an overwrite.
+  const [edit] = useStateTk(() => editLive);
   const ed = edit ? (edit.data || {}) : null;
   const [type, setType] = useStateTk(() => edit ? edit.type : ((preset && preset.type) || "receive"));
   const [title, setTitle] = useStateTk(edit ? edit.title : "");
@@ -696,6 +699,10 @@ function TaskCreate({ m, onDone, onCancel, edit, preset }) {
       : { items: list, checked: edit ? list.map(() => false) : [] };
 
     if (edit) {
+      const cur = loadTasks().find(t => t.id === edit.id) || edit;
+      const cd = cur.data || {};
+      if (cur.updatedAt !== edit.updatedAt || (cur.type === "receive" && !(["todo", "doing"].includes(cur.status) && !(cd.rounds || []).length && !cd.round)))
+        return setErr("งานนี้เปลี่ยนไปแล้ว (พนักงานส่งรายงาน/แก้จากอีกเครื่อง) — ปิดแล้วเปิดแก้ใหม่");
       const patch = { title: finalTitle, due, data };
       setBusy(true);
       const r = await saveTask(edit, patch, "แก้ไขรายละเอียดงาน: " + _tkEditSummary(edit, patch));
@@ -846,7 +853,7 @@ function ReceiveCount({ m, task, onSubmit, selfApprove }) {
   const [note, setNote] = useStateTk(() => (draft0 && draft0.note) || "");
   useEffectTk(() => {
     const any = Object.values(cnt).some(c => c && (c.good !== "" || c.dmg !== "" || (c.ev || []).length || c.pp)) || pkg.length || extras.length || note.trim();
-    if (!any) return;
+    if (!any) { _tkDraftClear(draftKey); return; }
     _tkDraftSave(draftKey, { cnt, pkg, extras, shelf, note });
   }, [cnt, pkg, extras, shelf, note]);
   const cOf = sku => cnt[sku] || EMPTY_CNT;
@@ -1077,7 +1084,7 @@ function GeneralWork({ m, task, editable, onSubmit }) {
   const [note, setNote] = useStateTk(() => (draft0 && draft0.note) || "");
   useEffectTk(() => {
     if (!editable) return;
-    if (!checked.some(Boolean) && !photo && !note.trim()) return;
+    if (!checked.some(Boolean) && !photo && !note.trim()) { _tkDraftClear(draftKey); return; }
     _tkDraftSave(draftKey, { checked, photo, note });
   }, [checked, photo, note, editable]);
   const [busy, setBusy] = useStateTk(false);
@@ -1085,7 +1092,7 @@ function GeneralWork({ m, task, editable, onSubmit }) {
   const sending = useRefTk(false);
   const submit = async () => {
     if (sending.current) return;
-    if (checked.some(c => !c)) return setErr("ติ๊กให้ครบทุกข้อก่อนส่ง");
+    if ((d.items || []).some((_, i) => !checked[i])) return setErr("ติ๊กให้ครบทุกข้อก่อนส่ง");
     if (!photo) return setErr("ถ่ายรูปหลังทำ 1 รูป");
     sending.current = true;
     try { const ok = await onSubmit({ checked, photo, note: note.trim() }); if (ok) _tkDraftClear(draftKey); } finally { sending.current = false; }
@@ -1095,7 +1102,7 @@ function GeneralWork({ m, task, editable, onSubmit }) {
       {task.status === "back" && d.comment && <div style={{ ...tkCard, background: "var(--danger-soft)", borderColor: "var(--danger)", fontSize: 13, marginBottom: 10 }}>ส่งกลับแก้ไข: {d.comment}</div>}
       {(d.items || []).map((it, i) => (
         <label key={i} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 0", borderTop: "1px solid var(--border)", fontSize: 14 }}>
-          <input type="checkbox" style={{ width: 20, height: 20 }} checked={checked[i]} disabled={!editable} onChange={e => setChecked(checked.map((c, j) => j === i ? e.target.checked : c))}/> {it}
+          <input type="checkbox" style={{ width: 20, height: 20 }} checked={!!checked[i]} disabled={!editable} onChange={e => setChecked(checked.map((c, j) => j === i ? e.target.checked : c))}/> {it}
         </label>
       ))}
       <TkThumbs urls={[photo]} size={96}/>
@@ -1115,6 +1122,7 @@ function GeneralWork({ m, task, editable, onSubmit }) {
 }
 
 /* ── photo task: one photo per line; closes itself when every line has one ── */
+const _tkResumeStatus = s => ["todo", "doing", "back", "partial"].includes(s) ? s : "doing";
 const _tkPhotoDone = (t, sku) => !!((((t && t.data) || {}).shots || {})[sku] || (typeof resolveProductImage === "function" && resolveProductImage(sku)));
 function PhotoWork({ m, task, editable, onShot, onFinish, busySku, pending }) {
   const d = task.data || {};
@@ -1139,8 +1147,8 @@ function PhotoWork({ m, task, editable, onShot, onFinish, busySku, pending }) {
             </span>
             {ok ? <span style={{ color: "var(--success)", fontWeight: 600, fontSize: 13 }}>✓ ถ่ายแล้ว</span>
               : editable ? (pend
-                ? <button type="button" className={m ? "m-chip" : "btn btn-sm"} disabled={busySku === l.sku} onClick={() => onShot(l.sku, null)}>{busySku === l.sku ? "กำลังบันทึก…" : "บันทึกรูปอีกครั้ง"}</button>
-                : <TkPhotoBtn m={m} label="ถ่ายรูป" busy={busySku === l.sku} onPick={f => onShot(l.sku, f)}/>)
+                ? <button type="button" className={m ? "m-chip" : "btn btn-sm"} disabled={!!busySku} onClick={() => onShot(l.sku, null)}>{busySku === l.sku ? "กำลังบันทึก…" : "บันทึกรูปอีกครั้ง"}</button>
+                : <TkPhotoBtn m={m} label="ถ่ายรูป" busy={!!busySku} onPick={f => onShot(l.sku, f)}/>)
               : <span style={tkMuted}>ยังไม่มีรูป</span>}
             {!editable && shots[l.sku] && <div style={{ width: "100%" }}><TkThumbs urls={[shots[l.sku]]} size={56}/></div>}
           </div>
@@ -1174,6 +1182,10 @@ function TaskDetail({ m, id, onBack }) {
   useEffectTk(() => {
     if (task && task.assignee === me.id && task.status === "todo") saveTask(task, { status: "doing" }, "เริ่มทำงาน");
   }, [task && task.id, task && task.status]);
+  const canEditNow = !!task && mgr && (task.type === "receive"
+    ? ["todo", "doing"].includes(task.status) && !((task.data || {}).rounds || []).length && !(task.data || {}).round
+    : ["todo", "doing", "back"].includes(task.status));
+  useEffectTk(() => { if (editing && !canEditNow) setEditing(false); }, [canEditNow]);
   if (!task) return <div style={tkCard}><div style={tkMuted}>ไม่พบงานนี้ (อาจถูกลบหรือไม่ได้มอบหมายให้คุณ)</div><div style={{ marginTop: 10 }}><TkBtn m={m} onClick={onBack}>กลับ</TkBtn></div></div>;
   const d = task.data || {};
   const ty = TASK_TYPES[task.type] || TASK_TYPES.general;
@@ -1266,7 +1278,7 @@ function TaskDetail({ m, id, onBack }) {
     return true;
   };
   const shoot = async (sku, file) => {
-    if (shooting.current) return;
+    if (shooting.current) { _tkToast("รอให้รูปก่อนหน้าบันทึกเสร็จก่อน", "warn"); return; }
     shooting.current = true;
     setShotBusy(sku); setErr("");
     try {
@@ -1332,7 +1344,7 @@ function TaskDetail({ m, id, onBack }) {
           {task.type === "receive" && !canWork && workOpen && mgr && <div style={tkMuted}>รอ {task.assigneeName} นับ{task.status === "partial" ? "กล่องถัดไป" : ""}</div>}
           {task.type === "receive" && ["done", "cancel"].includes(task.status) && <div style={tkMuted}>{task.status === "done" ? "ปิดงานแล้ว" : "ยกเลิกแล้ว"}</div>}
           {task.type === "general" && (
-            <GeneralWork key={task.id} m={m} task={task} editable={canWork} onSubmit={submitGeneral}/>
+            <GeneralWork key={task.id + ":" + (d.items || []).join("\u0001")} m={m} task={task} editable={canWork} onSubmit={submitGeneral}/>
           )}
           {task.type === "general" && task.status === "review" && mgr && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
@@ -1354,7 +1366,7 @@ function TaskDetail({ m, id, onBack }) {
             {canWork && task.status !== "blocked" && (
               <TkBtn m={m} danger onClick={() => reason.trim() ? save({ status: "blocked", data: { reason: reason.trim(), prevStatus: task.status } }, "แจ้งติดปัญหา: " + reason.trim(), "แจ้งเจ้าของแล้ว").then(s => { if (s) { notifyTask(s, "blocked"); setReason(""); } }) : setErr("ใส่เหตุผลที่ติดปัญหา")}>ติดปัญหา</TkBtn>
             )}
-            {mgr && task.status === "blocked" && <TkBtn m={m} primary onClick={() => save({ status: d.prevStatus || "doing", data: { reason: "" } }, "แก้ปัญหาแล้ว ให้ทำต่อ", "ส่งกลับให้ทำต่อแล้ว").then(s => { if (s) notifyTask(s, "resume"); })}>แก้แล้ว ให้ทำต่อ</TkBtn>}
+            {mgr && task.status === "blocked" && <TkBtn m={m} primary onClick={() => save({ status: _tkResumeStatus(d.prevStatus), data: { reason: "" } }, "แก้ปัญหาแล้ว ให้ทำต่อ", "ส่งกลับให้ทำต่อแล้ว").then(s => { if (s) notifyTask(s, "resume"); })}>แก้แล้ว ให้ทำต่อ</TkBtn>}
             {mgr && workOpen && !selfMode && <TkBtn m={m} onClick={() => save({ status: task.status === "todo" ? "doing" : task.status, data: { selfBy: me.id } }, "เจ้าของรับไปทำเอง")}>ทำเอง</TkBtn>}
             {mgr && TASK_OPEN.includes(task.status) && <TkBtn m={m} danger onClick={cancelTask}>ยกเลิกงาน</TkBtn>}
           </div>
@@ -1368,7 +1380,7 @@ function TaskDetail({ m, id, onBack }) {
                 <TkBtn m={false} onClick={() => {
                   const p = people.find(x => x.id === reassignTo);
                   if (!p) return setErr("เลือกคนที่จะมอบหมายให้");
-                  save({ assignee: p.id, assigneeName: p.name, status: task.status === "blocked" ? (d.prevStatus || "todo") : task.status, data: { selfBy: null } }, `เปลี่ยนผู้รับผิดชอบเป็น ${p.name}`, `มอบหมายให้ ${p.name} แล้ว`)
+                  save({ assignee: p.id, assigneeName: p.name, status: task.status === "blocked" ? _tkResumeStatus(d.prevStatus || "todo") : task.status, data: { selfBy: null } }, `เปลี่ยนผู้รับผิดชอบเป็น ${p.name}`, `มอบหมายให้ ${p.name} แล้ว`)
                     .then(s => { if (s) { setReassignTo(""); if (s.assignee !== me.id) notifyTask(s, "assigned"); } });
                 }}>เปลี่ยน</TkBtn>
               </div>

@@ -30,10 +30,27 @@ begin
   new.assignee_name := old.assignee_name;
   new.created_by := old.created_by; new.created_by_name := old.created_by_name;
   new.created_at := old.created_at;
+  new.id := old.id;
   foreach k in array locked loop
     if old.data ? k then new.data := jsonb_set(new.data, array[k], old.data -> k, true);
     else new.data := new.data - k; end if;
   end loop;
+  -- prevStatus is set by the server, never trusted from the client (resume would
+  -- otherwise jump to whatever the client wrote, e.g. 'done').
+  if new.status = 'blocked' and old.status is distinct from 'blocked' then
+    new.data := jsonb_set(new.data, '{prevStatus}', to_jsonb(old.status), true);
+  elsif old.data ? 'prevStatus' then
+    new.data := jsonb_set(new.data, '{prevStatus}', old.data -> 'prevStatus', true);
+  else
+    new.data := new.data - 'prevStatus';
+  end if;
+  -- The timeline is append-only for non-managers.
+  if coalesce(jsonb_array_length(new.data -> 'log'), 0) < coalesce(jsonb_array_length(old.data -> 'log'), 0)
+     or (old.data ? 'log' and (select coalesce(jsonb_agg(e order by i), '[]'::jsonb)
+           from jsonb_array_elements(new.data -> 'log') with ordinality x(e, i)
+           where i <= jsonb_array_length(old.data -> 'log')) is distinct from old.data -> 'log') then
+    new.data := jsonb_set(new.data, '{log}', coalesce(old.data -> 'log', '[]'::jsonb), true);
+  end if;
   if new.status is distinct from old.status then
     if not (
          (old.status in ('todo', 'doing', 'back', 'partial') and new.status in ('doing', 'review', 'blocked'))
@@ -81,6 +98,8 @@ begin
   for t in select * from public.team_task_templates where active loop
     d := date_trunc('week', today)::date + ((t.weekday + 6) % 7);
     if d > today or d < (t.created_at at time zone 'Asia/Bangkok')::date then continue; end if;
+    -- re-enabled (or edited) mid-week: don't spawn this week's already-past day
+    if d < (t.updated_at at time zone 'Asia/Bangkok')::date and d < today then continue; end if;
     insert into public.team_tasks (id, type, status, title, assignee, assignee_name, created_by, created_by_name, due, data)
     values ('R' || t.id || '-' || to_char(d, 'YYYYMMDD'), 'general', 'todo', t.title, t.assignee, t.assignee_name,
             t.created_by, coalesce(t.created_by_name, 'ระบบ'), d,

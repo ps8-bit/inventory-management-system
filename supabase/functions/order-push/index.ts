@@ -461,22 +461,26 @@ if (tgToken()) cardAssets().catch(() => {});
 // notifications. No customer data, and no `alert` key, so sw.js keeps these out
 // of the order inbox.
 const TASK_KINDS = ["assigned", "back", "resume", "review", "blocked", "done"];
+const TASK_OPEN_WORK = ["todo", "doing", "back", "partial"];
 async function sendTaskPush(admin: any, user: any, role: string, body: any, hasPush: boolean) {
   if (!hasPush) return { ok: true, sent: 0 };
   const taskId = str(body.taskId, 80);
   const kind = String(body.kind || "");
   if (!taskId || !TASK_KINDS.includes(kind)) return { ok: false, error: "bad kind" };
   const { data: row, error } = await admin.from("team_tasks")
-    .select("id, title, type, status, assignee, assignee_name, due, data").eq("id", taskId).maybeSingle();
+    .select("id, title, type, status, assignee, assignee_name, due, data, updated_at").eq("id", taskId).maybeSingle();
   if (error) return { ok: false, error: error.message };
   if (!row) return { ok: false, error: "not found" };
   const mgr = ["admin", "manager"].includes(role);
-  if (!mgr && row.assignee !== user.id) return { ok: false, error: "Forbidden" };
+  if (!mgr && row.assignee !== user.id) return { ok: false, error: "not found" };   // same answer: don't leak which ids exist
+  // Every legitimate notifyTask fires right after the save that changed the status;
+  // an old state can't be replayed to spam phones.
+  if (Date.now() - Date.parse(row.updated_at) > 120000) return { ok: true, sent: 0, stale: true };
   const st = row.status;
   const valid =
     kind === "assigned" ? mgr && ["todo", "doing", "partial", "back"].includes(st)
     : kind === "back" ? mgr && st === "back"
-    : kind === "resume" ? mgr && st !== "blocked"
+    : kind === "resume" ? mgr && TASK_OPEN_WORK.includes(st)
     : kind === "review" ? st === "review"
     : kind === "blocked" ? st === "blocked"
     : kind === "done" ? row.type === "photo" && st === "done"

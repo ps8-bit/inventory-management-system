@@ -112,7 +112,10 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
   /* A task push / ?tk= link → open that task (tasks.jsx openTaskFromAnywhere). */
   useEffectM(() => {
     const role = user && user.role;
-    const go = (id) => { if (id && typeof canOpenPage === "function" && canOpenPage("tasks", role)) push("task", { id }); };
+    const go = (id) => {
+      if (id && typeof canOpenPage === "function" && canOpenPage("tasks", role)) { push("task", { id }); return; }
+      window.__pendingTaskOpen = null; window.__pendingTaskNew = null;   // not allowed → discard
+    };
     const h = (e) => go((typeof takePendingTaskOpen === "function" && takePendingTaskOpen()) || (e.detail && e.detail.id));
     window.addEventListener("ims-open-task", h);
     if (window.__pendingTaskOpen) go(typeof takePendingTaskOpen === "function" ? takePendingTaskOpen() : window.__pendingTaskOpen);

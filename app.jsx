@@ -981,7 +981,11 @@ function App({ user, onLogout, onSwitchUser }) {
      inventory "มอบหมายถ่ายรูป" button both land on the tasks page; TeamTasks
      reads window.__pendingTaskOpen / __pendingTaskNew when it mounts. */
   useEffectApp(() => {
-    const open = () => { if (typeof canOpenPage === "function" && canOpenPage("tasks")) goTo("tasks"); };
+    const open = () => {
+      if (typeof canOpenPage === "function" && canOpenPage("tasks")) { goTo("tasks"); return; }
+      if (typeof takePendingTaskOpen === "function") takePendingTaskOpen(); else window.__pendingTaskOpen = null;   // not allowed → discard
+      window.__pendingTaskNew = null;
+    };
     const onNew = (e) => { window.__pendingTaskNew = (e && e.detail) || null; open(); };
     window.addEventListener("ims-open-task", open);
     window.addEventListener("ims-open-task-new", onNew);
