@@ -72,6 +72,19 @@ async function _piUpload(sku, blob) {
   }
   return sb.storage.from(PI_BUCKET).getPublicUrl(path).data.publicUrl;
 }
+/* Photo taken inside a team task (parcel, damage, a product's first photo) →
+   task/<random>.<ext> in the same bucket; returns its public URL. Staff can
+   insert there (product_images_insert), and a task photo the owner then picks as
+   the product photo is already "ours", so setProductImage never re-mirrors it. */
+async function uploadTaskPhoto(file) {
+  if (typeof sb === "undefined" || !sb.storage) throw new Error("ไม่ได้เชื่อมต่อฐานข้อมูล");
+  const blob = await _piToBlob(await fileToWebp(file, { maxSize: 1400 }), 1400);
+  const ext = blob.type === "image/webp" ? "webp" : "jpg";
+  const path = `task/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const { error } = await sb.storage.from(PI_BUCKET).upload(path, blob, { contentType: blob.type, cacheControl: "31536000", upsert: false });
+  if (error) throw error;
+  return sb.storage.from(PI_BUCKET).getPublicUrl(path).data.publicUrl;
+}
 /* Small JPEG beside every photo, at t/<same name>.jpg — the Telegram pack card
    (order-push) draws these, because its renderer can't read webp. 168 px square,
    contained on white. Best effort: a missing thumbnail only blanks the card's frame. */
@@ -736,6 +749,7 @@ function LocationImageUpload({ code, pushToast, size = "lg", compact }) {
 
 Object.assign(window, {
   fileToWebp,
+  uploadTaskPhoto,
   setProductImage,
   mirrorProductImage,
   mirrorPendingProductImages,

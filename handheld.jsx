@@ -205,7 +205,7 @@ function TabBar({ tab, onSwitch, role }) {
    that page. The desktop shell redirects a revoked page; mobile shows a notice
    instead, because a deep link (a saved route, an old back-stack entry) can
    still point at a screen an admin has since taken away. */
-const M_GATED_VIEWS = ["locations", "labels", "tracking", "import", "bundles", "analytics", "stocktake", "adjust", "history", "users", "settings", "finder", "pack"];
+const M_GATED_VIEWS = ["tasks", "locations", "labels", "tracking", "import", "bundles", "analytics", "stocktake", "adjust", "history", "users", "settings", "finder", "pack"];
 
 /* Screen dispatcher */
 function Screen({ ctx }) {
@@ -233,6 +233,11 @@ function Screen({ ctx }) {
       && typeof canOpenPage === "function" && !canOpenPage("pack", role)) {
     return <MNoAccess ctx={ctx}/>;
   }
+  if ((route.view === "task" || route.view === "task-new")
+      && typeof canOpenPage === "function" && !canOpenPage("tasks", role)) {
+    return <MNoAccess ctx={ctx}/>;
+  }
+  if (route.view === "task-new" && typeof canManageTasks === "function" && !canManageTasks()) return <MNoAccess ctx={ctx}/>;
   // sub-views
   if (route.view === "product")   return <MProductDetail ctx={ctx}/>;
   if (route.view === "finder")    return <MFinder ctx={ctx}/>;
@@ -255,6 +260,9 @@ function Screen({ ctx }) {
   if (route.view === "bundles")   return <MBundles ctx={ctx}/>;
   if (route.view === "analytics") return <MAnalytics ctx={ctx}/>;
   if (route.view === "stocktake") return <MStockTake ctx={ctx}/>;
+  if (route.view === "tasks" && typeof MTasks === "function") return <MTasks ctx={ctx}/>;
+  if (route.view === "task" && typeof MTaskDetail === "function") return <MTaskDetail ctx={ctx}/>;
+  if (route.view === "task-new" && typeof MTaskNew === "function") return <MTaskNew ctx={ctx}/>;
   if (route.view === "adjust")    return <MAdjust ctx={ctx}/>;
   if (route.view === "history")   return <MHistory ctx={ctx}/>;
   if (route.view === "users")     return <MUsers ctx={ctx}/>;
@@ -545,7 +553,9 @@ function MHome({ ctx }) {
     const h = () => setSalesTick(t => t + 1);
     window.addEventListener("ims-sales-change", h);
     window.addEventListener("ims-products-change", h);
-    return () => { window.removeEventListener("ims-sales-change", h); window.removeEventListener("ims-products-change", h); };
+    window.addEventListener("ims-tasks-change", h);
+    if (typeof startTaskSync === "function") startTaskSync();
+    return () => { window.removeEventListener("ims-sales-change", h); window.removeEventListener("ims-products-change", h); window.removeEventListener("ims-tasks-change", h); };
   }, []);
   const chToday = typeof channelToday === "function" ? channelToday() : [];
   const chShown = chToday.filter(c => c.units > 0).sort((a, b) => b.units - a.units);
@@ -598,6 +608,20 @@ function MHome({ ctx }) {
           <span className="mh-search-text">ค้นหาสินค้า — ดูรูปและตำแหน่งจัดเก็บ</span>
           <span className="mh-search-cam">{typeof illusSrc === "function" ? <img src={illusSrc("scan-button")} alt="" width="36" height="36" decoding="async"/> : <Icons.Scan size={17}/>}</span>
         </button>}
+
+        {canOpenPage("tasks") && typeof taskBadgeCount === "function" && (() => {
+          const n = taskBadgeCount();
+          const mgr = typeof canManageTasks === "function" && canManageTasks();
+          return (
+            <button type="button" className={"mh-strip" + (n > 0 ? " is-alert" : "")} onClick={() => ctx.push("tasks")} style={{ marginBottom: 12 }}>
+              <span style={{ width: 40, height: 40, borderRadius: 12, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}><Icons.Check size={20}/></span>
+              <span><b>{mgr ? "งานของทีม" : "งานของฉัน"}</b></span>
+              <span className="mh-strip-sep"/>
+              <span>{n > 0 ? <><b className="tnum" style={{ color: "var(--accent)" }}>{n}</b> {mgr ? "รอคุณ" : "งานค้าง"}</> : "ไม่มีงานค้าง"}</span>
+              <Icons.Chev size={13} style={{ marginLeft: "auto", color: "var(--muted)", flexShrink: 0 }}/>
+            </button>
+          );
+        })()}
 
         <div className="mh-h2">ภาพรวมวันนี้</div>
         <div className="mh-stats">
@@ -4571,6 +4595,7 @@ function MFinder({ ctx }) {
 
 function MMore({ ctx }) {
   const items = [
+    { id: "tasks",     icon: Icons.Check, label: (typeof canManageTasks === "function" && canManageTasks()) ? "งานของทีม" : "งานของฉัน", sub: "งานที่มอบหมาย รายงานผล และอนุมัติ", art: "pending-orders" },
     { id: "pack",      icon: Icons.Box,   label: "แพ็คสินค้า",      sub: "รายการหยิบของตามชั้นวาง ติ๊กทีละชิ้น แล้วปิดเป็นพร้อมส่ง", art: "packing" },
     { id: "finder",    icon: Icons.Search, label: "ค้นหาสินค้า",    sub: "ค้นหา/สแกน ดูรูปสินค้าและตำแหน่งจัดเก็บ", art: "finder" },
     { id: "analytics", icon: Icons.Dash,  label: "วิเคราะห์ยอดขาย", sub: "รายได้ ต้นทุน กำไร และสินค้าขายดี", art: "channel-sales" },

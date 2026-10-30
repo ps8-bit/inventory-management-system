@@ -4,6 +4,7 @@ const { useState: useStateApp, useEffect: useEffectApp, useRef: useRefApp, useMe
 
 const ALL_NAV = [
   { id: "dashboard", label: "หน้าหลัก",       icon: Icons.Dash,    group: "main" },
+  { id: "tasks",     label: "งานของทีม",       icon: Icons.Check,   group: "main" },
   { id: "inbound",   label: "รับเข้าสินค้า",   icon: Icons.In,      group: "ops"   },
   { id: "outbound",  label: "จัดส่งสินค้า",    icon: Icons.Out,     group: "ops"   },
   { id: "pack",      label: "แพ็คสินค้า",      icon: Icons.Pack,    group: "ops"   },
@@ -30,6 +31,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 const CRUMB_MAP = {
   dashboard: "หน้าหลัก",
+  tasks: "งานของทีม",
   "pack-home": "หน้าหลัก",
   inbound: "รับเข้าสินค้า",
   outbound: "จัดส่งสินค้า",
@@ -89,11 +91,15 @@ function computeBadges() {
   // every label ever made (271, of which 213 were long shipped).
   const labels = labelsArr.filter(l => !(l && (l.tracking || (l.data && l.data.tracking)))).length;
 
+  // --- tasks: reports to approve (manager) / my open tasks (everyone else) ---
+  const tasks = (typeof taskBadgeCount === "function") ? taskBadgeCount() : 0;
+
   return {
     inbound:  inbound  > 0 ? inbound  : null,
     outbound: outbound > 0 ? outbound : null,
     pack:     pack     > 0 ? pack     : null,
     labels:   labels   > 0 ? labels   : null,
+    tasks:    tasks    > 0 ? tasks    : null,
   };
 }
 
@@ -104,10 +110,13 @@ function useBadges() {
     window.addEventListener("ims-products-change", refresh);
     window.addEventListener("ims-orders-change",   refresh);
     window.addEventListener("ims-labels-change",   refresh);
+    window.addEventListener("ims-tasks-change",    refresh);
+    if (typeof startTaskSync === "function") startTaskSync();
     return () => {
       window.removeEventListener("ims-products-change", refresh);
       window.removeEventListener("ims-orders-change",   refresh);
       window.removeEventListener("ims-labels-change",   refresh);
+      window.removeEventListener("ims-tasks-change",    refresh);
     };
   }, []);
   return b;
@@ -1105,6 +1114,7 @@ function App({ user, onLogout, onSwitchUser }) {
           {page === "finder"    && <ProductFinder pushToast={pushToast} goTo={goTo} focus={focusFor("finder")}/>}
           {page === "inventory" && <Inventory pushToast={pushToast} density={t.density} goTo={goTo} focus={focusFor("inventory")}/>}
           {page === "stocktake" && <StockTake pushToast={pushToast}/>}
+          {page === "tasks" && typeof TeamTasks === "function" && <TeamTasks pushToast={pushToast}/>}
           {page === "locations" && <Locations goTo={goTo}/>}
           {page === "import"    && <ImportPage pushToast={pushToast} goTo={goTo}/>}
           {page === "labels"    && <Labels pushToast={pushToast} store={store}/>}
