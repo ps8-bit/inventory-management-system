@@ -165,14 +165,20 @@ async function discoverTelegramChats(admin: any): Promise<string[]> {
     const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?allowed_updates=[]`);
     const j: any = await r.json().catch(() => ({}));
     if (!j.ok) { console.error("telegram getUpdates", r.status, j.description); return []; }
-    const found = new Map<string, string>();
+    // Groups win. With no group yet, fall back to private chats with the bot
+    // (the admin pressed /start on it) — the admin's test is what links them.
+    const groups = new Map<string, string>();
+    const privates = new Map<string, string>();
     for (const u of j.result || []) {
       const m = u.message || u.edited_message || u.channel_post || u.my_chat_member || {};
       const c = m.chat;
-      if (!c || (c.type !== "group" && c.type !== "supergroup")) continue;
-      found.set(String(c.id), c.title || "");
-      if (m.migrate_to_chat_id) { found.delete(String(c.id)); found.set(String(m.migrate_to_chat_id), c.title || ""); }
+      if (!c) continue;
+      if (c.type === "private") { privates.set(String(c.id), [c.first_name, c.last_name, c.username && "@" + c.username].filter(Boolean).join(" ")); continue; }
+      if (c.type !== "group" && c.type !== "supergroup") continue;
+      groups.set(String(c.id), c.title || "");
+      if (m.migrate_to_chat_id) { groups.delete(String(c.id)); groups.set(String(m.migrate_to_chat_id), c.title || ""); }
     }
+    const found = groups.size ? groups : privates;
     const ids = [...found.keys()];
     if (ids.length) {
       await admin.from("app_state").upsert({
