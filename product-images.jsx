@@ -72,10 +72,31 @@ async function _piUpload(sku, blob) {
   }
   return sb.storage.from(PI_BUCKET).getPublicUrl(path).data.publicUrl;
 }
+/* Small JPEG beside every photo, at t/<same name>.jpg — the Telegram pack card
+   (order-push) draws these, because its renderer can't read webp. 168 px square,
+   contained on white. Best effort: a missing thumbnail only blanks the card's frame. */
+const _piThumbPath = (photoPath) => photoPath.replace(/^p\//, "t/").replace(/\.[a-z0-9]+$/i, ".jpg");
+async function _piUploadThumb(src, url) {
+  try {
+    const path = _piThumbPath(decodeURIComponent(url.split(_piOwnMark)[1] || "").split("?")[0]);
+    if (!/^t\//.test(path)) return;
+    const img = await _piLoadImage(src);
+    const S = 168, k = Math.min(S / img.naturalWidth, S / img.naturalHeight);
+    const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+    const c = document.createElement("canvas");
+    c.width = c.height = S;
+    const g = c.getContext("2d");
+    g.fillStyle = "#ffffff"; g.fillRect(0, 0, S, S);
+    g.drawImage(img, (S - w) / 2, (S - h) / 2, w, h);
+    const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.82));
+    c.width = c.height = 0;
+    if (blob) await sb.storage.from(PI_BUCKET).upload(path, blob, { contentType: "image/jpeg", cacheControl: "31536000", upsert: false });
+  } catch (e) { console.warn("[product-images] thumb", e && e.message); }
+}
 function _piRemoveOwn(url) {
   if (!isOwnProductPhoto(url) || typeof sb === "undefined") return;
   const path = decodeURIComponent(url.split(_piOwnMark)[1] || "").split("?")[0];
-  if (path) sb.storage.from(PI_BUCKET).remove([path]).catch(() => {});   // staff can't delete — harmless
+  if (path) sb.storage.from(PI_BUCKET).remove(/^p\//.test(path) ? [path, _piThumbPath(path)] : [path]).catch(() => {});   // staff can't delete — harmless
 }
 /* Copy one SKU's photo into our bucket and point the row at it. Only swaps when
    the row still holds the photo we copied (a newer upload meanwhile wins). */
@@ -86,6 +107,7 @@ async function mirrorProductImage(sku, src) {
   try {
     const url = await _piUpload(sku, await _piToBlob(src));
     if (loadProductImages()[sku] !== src) { _piRemoveOwn(url); return false; }
+    await _piUploadThumb(src, url);
     _writeProductImage(sku, url);
     return true;
   } catch (e) {
