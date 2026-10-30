@@ -149,6 +149,14 @@ function telegramText(a: any, by: string): string {
 
 let _tgLastError = "";
 
+// The secret is pasted by hand from BotFather's message, so accept it with
+// stray spaces, a "bot" prefix, or surrounding text — keep just "<id>:<key>".
+function tgToken(): string {
+  const raw = Deno.env.get("TELEGRAM_BOT_TOKEN") || "";
+  const m = raw.match(/\d{6,}:[A-Za-z0-9_-]{30,}/);
+  return m ? m[0] : raw.trim();
+}
+
 // Chat ids: the secret wins; otherwise the ones remembered in app_state.
 async function telegramChats(admin: any): Promise<string[]> {
   const env = (Deno.env.get("TELEGRAM_CHAT_ID") || "").split(",").map((c) => c.trim()).filter(Boolean);
@@ -161,7 +169,7 @@ async function telegramChats(admin: any): Promise<string[]> {
 // Ask Telegram which groups the bot has seen and remember them. A group that was
 // upgraded to a supergroup reports migrate_to_chat_id — the new id replaces it.
 async function discoverTelegramChats(admin: any): Promise<string[]> {
-  const token = Deno.env.get("TELEGRAM_BOT_TOKEN") || "";
+  const token = tgToken();
   if (!token) return [];
   try {
     const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?allowed_updates=[]`);
@@ -195,7 +203,7 @@ async function discoverTelegramChats(admin: any): Promise<string[]> {
 }
 
 async function sendTelegram(chats: string[], texts: string[]): Promise<{ sent: number; failed: number; error?: string } | null> {
-  const token = Deno.env.get("TELEGRAM_BOT_TOKEN") || "";
+  const token = tgToken();
   if (!token || !texts.length) return null;
   if (!chats.length) return { sent: 0, failed: 0, error: "no group found — post a message in the group, then press test again" };
   let sent = 0, failed = 0;
@@ -235,7 +243,7 @@ Deno.serve(async (req) => {
   const PRIV = Deno.env.get("VAPID_PRIVATE_KEY") || "";
   const SUBJECT = Deno.env.get("VAPID_SUBJECT") || "https://psstock.vercel.app";
   const hasPush = !!(PUB && PRIV);
-  const hasTelegram = !!Deno.env.get("TELEGRAM_BOT_TOKEN");
+  const hasTelegram = !!tgToken();
   if (!hasPush && !hasTelegram) return json({ ok: false, error: "VAPID keys not configured" }, 500);
   if (hasPush) webpush.setVapidDetails(SUBJECT, PUB, PRIV);
 
