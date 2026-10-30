@@ -224,6 +224,8 @@ const _PRODUCT_COL_MAP = {
   brand:    v => v || '',
   // Days from ordering to arrival (sale-price-lead-time.sql); blank = unknown.
   lead_days: v => (v === '' || v == null) ? null : Math.max(0, Math.min(365, Math.round(Number(v) || 0))),
+  // Platforms the product is listed on (product-platforms.sql) — CHANNEL_LIST ids.
+  platforms: v => Array.isArray(v) ? v.filter(Boolean).map(String) : [],
 };
 function _mapProductPatch(changes) {
   const patch = {};

@@ -202,7 +202,8 @@ function ChannelsWidget() {
   return (
     <div style={{ padding: "12px 18px 18px" }}>
       {shown.length === 0 && (
-        <div style={{ padding: "24px 4px", textAlign: "center", color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>
+        <div style={{ padding: "16px 4px", textAlign: "center", color: "var(--muted)", fontSize: 13, lineHeight: 1.6 }}>
+          {typeof IllusEmpty === "function" && <img className="illus-empty-img" src={illusSrc("channel-sales")} alt="" width="72" height="72" style={{ width: 72, height: 72, margin: "0 auto 4px" }}/>}
           ยังไม่มีการขายวันนี้<br/>
           <span style={{ fontSize: 12 }}>นับจากการตัดสต็อก และการปรับสต็อกด้วยเหตุผล “ขายผ่าน …”</span>
         </div>

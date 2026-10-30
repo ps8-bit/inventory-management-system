@@ -1142,7 +1142,23 @@ function buildPackListPages(order, lines, size, thumbs) {
    draw. A photo that won't load (no CORS, gone) is just left out. */
 const _packThumbCache = {};
 async function packListThumbs(lines) {
-  const imgs = (typeof loadProductImages === "function") ? (loadProductImages() || {}) : {};
+  let imgs = (typeof loadProductImages === "function") ? (loadProductImages() || {}) : {};
+  // The full photo set loads in the background and can take ~30 s after the app
+  // opens (hundreds of rows, some multi-hundred-KB) — printing before that gave
+  // a pack list with no photos. Until it lands, read just this order's rows.
+  const loaded = window._DB_PRODUCT_IMAGES && Object.keys(window._DB_PRODUCT_IMAGES).length;
+  if (!loaded && typeof sb !== "undefined" && sb) {
+    const want = [...new Set((lines || []).map(l => l && l.sku).filter(Boolean))].map(s => "img:" + s);
+    if (want.length) {
+      try {
+        const { data } = await sb.from("app_state").select("key, value").in("key", want);
+        if (data && data.length) {
+          imgs = { ...imgs };
+          data.forEach(r => { if (r && typeof r.value === "string" && r.value) imgs[r.key.slice(4)] = r.value; });
+        }
+      } catch (e) {}
+    }
+  }
   const out = {};
   await Promise.all((lines || []).map(async (l) => {
     // Same lookup as the A4 ใบรายการแพ็คสินค้า, so both sheets show the same photo.
@@ -1210,22 +1226,30 @@ function _packListPageHtml(order, all, shown, size, k, nPages, thumbs) {
   const ph = ((small ? 9 : 13) * d).toFixed(1);
   const bx = ((small ? 3 : 3.6) * Math.max(0.8, d)).toFixed(1);
   const box = `display:inline-block;width:${bx}mm;height:${bx}mm;border:0.35mm solid #000;flex:none`;
+  // Every block above and including the rows has a FIXED height in mm, so where
+  // a photo sits never depends on font metrics. On phones the photos are painted
+  // onto the canvas at positions measured in the page (iOS drops <img> from the
+  // rasterised SVG); with content-sized rows, the page's and the rasteriser's
+  // slightly different line heights drifted every photo further off its frame.
+  const rpad = (small ? 0.7 : 1) * d;
+  const rowH = (Number(ph) + 2 * rpad + 0.2).toFixed(2);   // + the dashed separator
+  const fixed = (mm) => `height:${mm}mm;box-sizing:border-box;overflow:hidden;flex:none`;
   return (
     `<div class="__pdLbl" data-nmin="0.7" style="width:${size.w}mm;height:${size.h}mm;box-sizing:border-box;padding:${pad}mm;overflow:hidden;line-height:1.3;font-weight:500">` +
-      `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:2mm">` +
+      `<div style="display:flex;justify-content:space-between;align-items:center;gap:2mm;${fixed(small ? 5 : 6.4)}">` +
         `<span style="font-size:${pt(13)};font-weight:700;white-space:nowrap">รายการแพ็ค${nPages > 1 ? `<span style="font-size:${pt(9)}"> หน้า ${k + 1}/${nPages}</span>` : ""}</span>` +
         `<span style="font-size:${pt(13)};font-weight:700;${one}">${_escPD(ref)}</span></div>` +
       // Marketplace orders: the platform's own order no. — what the packer matches
       // against the platform label / app, which never shows our SO id.
       // Platform mark + name on every order; marketplace orders add their order no.
-      ((pf) => pf ? `<div style="display:flex;align-items:center;gap:1.6mm;margin-top:1mm;font-size:${pt(11)};font-weight:700;min-width:0">` +
+      ((pf) => pf ? `<div style="display:flex;align-items:center;gap:1.6mm;margin-top:1mm;font-size:${pt(11)};font-weight:700;min-width:0;${fixed(small ? 4.8 : 6)}">` +
         _platformMarkSvg(pf, small ? 4.5 : 5.5) + `<span style="${one}">${_escPD(pf)}${order.platformOrderNo ? " · คำสั่งซื้อ " + _escPD(order.platformOrderNo) : ""}</span></div>` : "")(
         (typeof packPlatformOf === "function") ? packPlatformOf(order) : (order.channel || "")) +
-      (r.name ? `<div style="font-size:${pt(10)};margin-top:0.6mm;${one}">ผู้รับ: ${_escPD(r.name)}</div>` : "") +
+      (r.name ? `<div style="font-size:${pt(10)};margin-top:0.6mm;line-height:${small ? 4 : 4.8}mm;${one};${fixed(small ? 4 : 4.8)}">ผู้รับ: ${_escPD(r.name)}</div>` : "") +
       `<div style="${rule}"></div>` +
-      `<div style="display:flex;justify-content:space-between;font-size:${pt(9)};font-weight:700;margin-bottom:0.8mm"><span>ช่อง · สินค้า</span><span>${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
+      `<div style="display:flex;justify-content:space-between;align-items:center;font-size:${pt(9)};font-weight:700;margin-bottom:0.8mm;${fixed(small ? 4 : 4.6)}"><span>ช่อง · สินค้า</span><span>${all.length} รายการ · รวม ${pcs} ชิ้น</span></div>` +
       (all.length ? shown.map((l, i) =>
-        `<div style="display:flex;gap:1.6mm;align-items:center;font-size:${fit(10.5)};padding:${((small ? 0.7 : 1) * d).toFixed(2)}mm 0;${i ? "border-top:0.2mm dashed #000;" : ""}">` +
+        `<div style="display:flex;gap:1.6mm;align-items:center;font-size:${fit(10.5)};padding:${rpad.toFixed(2)}mm 0;${fixed(rowH)};${i ? "border-top:0.2mm dashed #000;" : ""}">` +
           `<span style="${box}"></span>` +
           (thumbs[l.sku]
             ? `<img src="${thumbs[l.sku]}" alt="" style="width:${ph}mm;height:${ph}mm;flex:none;object-fit:cover;border:0.2mm solid #000;border-radius:1mm;display:block">`
@@ -1691,17 +1715,87 @@ async function collectOrderLabelPages(orders, size, onProgress, opts) {
    iOS-safe rasteriser. */
 async function _addrLabelPng(html, size) {
   if (typeof rasterizeLabel !== "function") throw new Error("ไม่มีตัวแปลงฉลาก");
+  // The rasteriser lays the label out in the Sarabun files it embeds (labels.jsx
+  // ensureSarabunFaceCss). Photos are painted at positions measured HERE, so this
+  // layout must use those exact font files: Google's Sarabun (the page's) has
+  // different line metrics, and on iPhone it may not even be loaded yet — either
+  // way every painted photo drifted off its row. Same files under a private name.
+  const faceCss = (typeof ensureSarabunFaceCss === "function") ? await ensureSarabunFaceCss() : "";
+  if (faceCss && !document.getElementById("__lpMeasureFont")) {
+    const st = document.createElement("style");
+    st.id = "__lpMeasureFont";
+    st.textContent = faceCss.replace(/font-family:"Sarabun"/g, 'font-family:"__LPSarabun"');
+    document.head.appendChild(st);
+  }
+  const fam = faceCss ? "'__LPSarabun'," : "";
+  if (faceCss) { try { await Promise.all(["400 16px __LPSarabun", "700 16px __LPSarabun"].map(f => document.fonts.load(f))); } catch (e) {} }
   const host = document.createElement("div");
-  host.setAttribute("style", "position:fixed;left:-10000px;top:0;background:#fff;color:#000;letter-spacing:normal;font-family:'Sarabun','Leelawadee UI',Tahoma,sans-serif");
+  host.setAttribute("style", `position:fixed;left:-10000px;top:0;background:#fff;color:#000;letter-spacing:normal;font-family:${fam}'Sarabun','Leelawadee UI',Tahoma,sans-serif`);
   host.innerHTML = html;
   document.body.appendChild(host);
   try {
     try { await document.fonts.ready; } catch (e) {}
-    fitPackLabel(host);
     const lbl = host.firstElementChild;
     const mm = (typeof MM_TO_PX !== "undefined") ? MM_TO_PX : 96 / 25.4;
-    return await rasterizeLabel(lbl, Math.round(size.w * mm), Math.round(size.h * mm), 4);
+    const wPx = Math.round(size.w * mm), hPx = Math.round(size.h * mm), scale = 4;
+    // Lay out at the rasteriser's exact pixel box, then fit.
+    lbl.style.width = wPx + "px"; lbl.style.height = hPx + "px";
+    fitPackLabel(host);
+    // iOS Safari leaves <img> out when it rasterises an SVG foreignObject (even
+    // data: URIs), so the pack list's product photos came out blank on iPhone.
+    // Measure each photo where the layout put it, then paint it onto the canvas
+    // ourselves after the rasterise — identical on every browser.
+    const base = lbl.getBoundingClientRect();
+    const k = wPx / (base.width || wPx);
+    const photos = Array.from(lbl.querySelectorAll("img")).map(im => {
+      const r = im.getBoundingClientRect();
+      return { src: im.getAttribute("src"), x: (r.left - base.left) * k, y: (r.top - base.top) * k, w: r.width * k, h: r.height * k };
+    }).filter(p => p.src && p.w > 0 && p.h > 0);
+    // Only the painted copy may show. Swap each <img> for an empty box of the
+    // same size: rasterizeLabel DROPS any <img> not yet decoded (on iPhone a
+    // freshly inserted data: image isn't), and a dropped photo collapsed its
+    // slot so the row's text slid left under the painted photo.
+    if (photos.length) lbl.querySelectorAll("img").forEach(im => {
+      const ph = document.createElement("span");
+      ph.style.cssText = im.style.cssText;
+      ph.style.visibility = "hidden";
+      ph.style.boxSizing = "content-box";
+      im.replaceWith(ph);
+    });
+    const png = await rasterizeLabel(lbl, wPx, hPx, scale);
+    if (!photos.length) return png;
+    return await _paintPhotos(png, photos, scale, mm);
   } finally { host.remove(); }
+}
+async function _paintPhotos(png, photos, scale, mm) {
+  const load = (src) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+  const bg = await load(png);
+  const c = document.createElement("canvas");
+  c.width = bg.naturalWidth; c.height = bg.naturalHeight;
+  const g = c.getContext("2d");
+  g.drawImage(bg, 0, 0);
+  for (const p of photos) {
+    let im;
+    try { im = await load(p.src); } catch (e) { continue; }
+    const x = p.x * scale, y = p.y * scale, w = p.w * scale, h = p.h * scale;
+    // object-fit: cover — crop the source to the box's aspect.
+    const s = Math.max(w / im.naturalWidth, h / im.naturalHeight);
+    const sw = w / s, sh = h / s;
+    const rad = Math.min(w, h, 1 * mm * scale);
+    g.save();
+    g.beginPath();
+    if (g.roundRect) g.roundRect(x, y, w, h, rad); else g.rect(x, y, w, h);
+    g.clip();
+    g.fillStyle = "#fff"; g.fillRect(x, y, w, h);
+    g.drawImage(im, (im.naturalWidth - sw) / 2, (im.naturalHeight - sh) / 2, sw, sh, x, y, w, h);
+    g.restore();
+    g.beginPath();
+    if (g.roundRect) g.roundRect(x, y, w, h, rad); else g.rect(x, y, w, h);
+    g.lineWidth = Math.max(1, 0.2 * mm * scale); g.strokeStyle = "#000"; g.stroke();
+  }
+  const out = c.toDataURL("image/png");
+  c.width = c.height = 0;
+  return out;
 }
 /* Returns how many pages went out (phone PDF may drop a page that won't rasterise). */
 async function printLabelPages(pages, size, name) {
@@ -2519,10 +2613,12 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
             {hits.map(h => (
               <button key={h.key} onClick={() => add(h)} disabled={h.stock <= 0}
                 style={{ display: "flex", width: "100%", gap: 10, alignItems: "center", padding: "10px 12px", border: "none", borderBottom: "1px solid var(--border)", background: "var(--surface)", color: "var(--fg)", textAlign: "left", fontFamily: "inherit", cursor: h.stock > 0 ? "pointer" : "not-allowed", opacity: h.stock > 0 ? 1 : 0.5 }}>
-                {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={34}/> : <span style={{ width: 34, textAlign: "center" }}>📦</span>}
+                {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={48}/> : <span style={{ width: 48, textAlign: "center", fontSize: 22 }}>📦</span>}
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span style={{ display: "block", fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.type === "bundle" ? "ชุด: " : ""}{h.name}</span>
-                  <span style={{ fontSize: 11, color: "var(--muted)" }}>{h.sku || "ชุดสินค้า"} · เหลือ {h.stock}</span>
+                  {/* The SKU is how lookalikes (…-RH vs …-LH) are told apart — never cut it off. */}
+                  {h.sku && <span className="mono" style={{ display: "block", fontSize: 13, fontWeight: 700, color: "var(--fg-2)", overflowWrap: "anywhere", lineHeight: 1.3 }}>{h.sku}</span>}
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>{h.sku ? "" : "ชุดสินค้า · "}เหลือ {h.stock}</span>
                 </span>
                 {(() => { const inCart = cart.find(c => c.key === h.key); return inCart
                   ? <span style={{ fontSize: 13, color: "#fff", background: "var(--accent)", borderRadius: 999, padding: "2px 9px", fontWeight: 700 }}>{inCart.qty}</span>
@@ -2535,7 +2631,11 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
             {cart.map(x => (
               <div key={x.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 12, background: "var(--surface-2)" }}>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
+                {x.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={x.sku} size={44} radius={8} zoom caption={x.sku + (x.name ? " · " + x.name : "")}/> : <span style={{ width: 44, textAlign: "center", fontSize: 22 }}>📦</span>}
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
+                  {x.type === "sku" && <span className="mono" style={{ display: "block", fontSize: 13, fontWeight: 700, color: "var(--fg-2)", overflowWrap: "anywhere", lineHeight: 1.3 }}>{x.sku}</span>}
+                </span>
                 <button className="btn btn-sm" style={{ width: 34, height: 34, justifyContent: "center", fontSize: 18 }} onClick={() => setQty(x.key, x.qty - 1)}>−</button>
                 <span className="tnum" style={{ width: 26, textAlign: "center", fontSize: 17, fontWeight: 700 }}>{x.qty}</span>
                 <button className="btn btn-sm" style={{ width: 34, height: 34, justifyContent: "center", fontSize: 18 }} onClick={() => setQty(x.key, x.qty + 1)}>＋</button>
@@ -2645,7 +2745,8 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
                     {h.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={h.sku} size={44}/> : <span className="pn-thumb">📦</span>}
                     <span className="pn-item-main">
                       <span className="pn-item-name">{h.type === "bundle" ? "ชุด: " : ""}{h.name}</span>
-                      <span className="pn-item-sub">{h.sku || "ชุดสินค้า"} · คงเหลือ {h.stock}</span>
+                      {h.sku && <span className="pn-item-sku mono">{h.sku}</span>}
+                      <span className="pn-item-sub">{h.sku ? "" : "ชุดสินค้า · "}คงเหลือ {h.stock}</span>
                     </span>
                     {inCart && <span className="pn-incart tnum">{inCart.qty}</span>}
                     <button type="button" className="pn-add" disabled={h.stock <= 0} onClick={() => add(h)} aria-label={"เพิ่ม " + h.name}><Icons.Plus size={18}/></button>
@@ -2658,7 +2759,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
               <div className="pn-cart-head">สินค้าที่เลือก <span className="pn-badge tnum">{cart.length}</span></div>
               {cart.length === 0 ? (
                 <div className="pn-cart-empty">
-                  <Icons.Cart size={30}/>
+                  {typeof IllusEmpty === "function" ? <img className="illus-empty-img" src={illusSrc("packing")} alt="" width="80" height="80" style={{ width: 80, height: 80 }}/> : <Icons.Cart size={30}/>}
                   <b>ยังไม่ได้เลือกสินค้า</b>
                   <span>กด + เพื่อเพิ่มสินค้าในรายการ</span>
                 </div>
@@ -2669,7 +2770,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
                       {x.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={x.sku} size={40} radius={8} zoom caption={x.sku + (x.name ? " · " + x.name : "")}/> : <span className="pn-thumb">📦</span>}
                       <span className="pn-cart-name">
                         {x.type === "bundle" ? "ชุด: " : ""}{x.name}
-                        {x.type === "sku" && <span className="mono" style={{ display: "block", fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>{x.sku}</span>}
+                        {x.type === "sku" && <span className="pn-item-sku mono">{x.sku}</span>}
                       </span>
                       <button type="button" className="pn-qty" onClick={() => setQty(x.key, x.qty - 1)} aria-label="ลดจำนวน">−</button>
                       <span className="tnum pn-qty-n">{x.qty}</span>

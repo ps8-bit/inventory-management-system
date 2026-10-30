@@ -1,5 +1,6 @@
-/* Product images: upload + automatic WebP conversion.
-   Stores per-SKU image data URLs in localStorage.
+/* Product images: upload + automatic WebP conversion, mirrored into our own
+   Supabase Storage bucket (see "Own storage" below); app_state img:<sku> rows
+   hold the URL, localStorage is the offline seed.
    Subscribers re-render via a custom "ims-images-change" event. */
 
 const { useState: useStateImg, useEffect: useEffectImg, useRef: useRefImg } = React;
@@ -14,7 +15,126 @@ function loadProductImages() {
   catch { return {}; }
 }
 
+/* ============ Own storage (Supabase Storage, bucket "product-images") ============
+   Every photo ends up as an 800 px WebP file in our own bucket and the img:<sku>
+   row keeps only its public URL — no dependence on Shopify/Shopline links that
+   vanish, and no multi-hundred-KB data: URIs making the photo set slow to load.
+   setProductImage / setProductImagesBulk save what they were given at once (so
+   the photo shows immediately), then mirror it in the background and swap the
+   row to our URL. An admin/manager device also moves old photos after load.
+   Until supabase/product-images-storage.sql has been run the upload fails once,
+   the run stops, and every photo simply keeps its current link. */
+const PI_BUCKET = "product-images";
+const _piOwnMark = "/storage/v1/object/public/" + PI_BUCKET + "/";
+function isOwnProductPhoto(u) { return typeof u === "string" && u.indexOf(_piOwnMark) !== -1; }
+function _piCanWrite() {
+  const r = window.__currentUser && window.__currentUser.role;
+  return r === "admin" || r === "manager" || r === "staff";
+}
+let _piStorageDown = false;            // bucket missing / forbidden → stop trying this session
+const _piMirroring = new Set();
+
+function _piLoadImage(src) {
+  return new Promise((res, rej) => {
+    const i = new Image();
+    if (!/^(data|blob):/.test(src)) i.crossOrigin = "anonymous";
+    const t = setTimeout(() => rej(new Error("timeout")), 20000);
+    i.onload = () => { clearTimeout(t); res(i); };
+    i.onerror = () => { clearTimeout(t); rej(new Error("load failed")); };
+    i.src = src;
+  });
+}
+async function _piToBlob(src, maxSize = 800) {
+  const img = await _piLoadImage(src);
+  const k = Math.min(1, maxSize / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(img.naturalWidth * k)); c.height = Math.max(1, Math.round(img.naturalHeight * k));
+  const g = c.getContext("2d");
+  g.fillStyle = "#ffffff"; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(img, 0, 0, c.width, c.height);
+  const enc = (type, q) => new Promise(r => c.toBlob(r, type, q));
+  // iOS Safari can't encode WebP (toBlob silently returns PNG) — use JPEG there.
+  let blob = await enc("image/webp", 0.85);
+  if (!blob || blob.type !== "image/webp") blob = await enc("image/jpeg", 0.85);
+  c.width = c.height = 0;
+  if (!blob) throw new Error("encode failed");
+  return blob;
+}
+async function _piUpload(sku, blob) {
+  const ext = blob.type === "image/webp" ? "webp" : "jpg";
+  const safe = String(sku).replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80) || "sku";
+  const path = `p/${safe}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.${ext}`;
+  const { error } = await sb.storage.from(PI_BUCKET).upload(path, blob, { contentType: blob.type, cacheControl: "31536000", upsert: false });
+  if (error) {
+    // No bucket yet / not allowed: further attempts would fail the same way.
+    if (/not found|bucket|row-level security|unauthorized|403|404/i.test(error.message || "")) _piStorageDown = true;
+    throw error;
+  }
+  return sb.storage.from(PI_BUCKET).getPublicUrl(path).data.publicUrl;
+}
+function _piRemoveOwn(url) {
+  if (!isOwnProductPhoto(url) || typeof sb === "undefined") return;
+  const path = decodeURIComponent(url.split(_piOwnMark)[1] || "").split("?")[0];
+  if (path) sb.storage.from(PI_BUCKET).remove([path]).catch(() => {});   // staff can't delete — harmless
+}
+/* Copy one SKU's photo into our bucket and point the row at it. Only swaps when
+   the row still holds the photo we copied (a newer upload meanwhile wins). */
+async function mirrorProductImage(sku, src) {
+  if (!sku || !src || typeof src !== "string" || isOwnProductPhoto(src)) return false;
+  if (_piStorageDown || typeof sb === "undefined" || !sb.storage || !_piCanWrite() || _piMirroring.has(sku)) return false;
+  _piMirroring.add(sku);
+  try {
+    const url = await _piUpload(sku, await _piToBlob(src));
+    if (loadProductImages()[sku] !== src) { _piRemoveOwn(url); return false; }
+    _writeProductImage(sku, url);
+    return true;
+  } catch (e) {
+    console.warn("[product-images] mirror", sku, e && e.message);
+    return false;
+  } finally { _piMirroring.delete(sku); }
+}
+/* Background move of photos that still live elsewhere — admin/manager only, a
+   few at a time, once per app open; whatever fails is retried next open. */
+let _piSweepStarted = false;
+async function mirrorPendingProductImages(opts) {
+  const force = opts && opts.force;
+  if ((_piSweepStarted && !force) || _piStorageDown || typeof sb === "undefined") return { moved: 0, failed: 0, left: 0 };
+  const role = window.__currentUser && window.__currentUser.role;
+  if (role !== "admin" && role !== "manager") return { moved: 0, failed: 0, left: 0 };
+  const map = loadProductImages();
+  const todo = Object.keys(map).filter(s => map[s] && !isOwnProductPhoto(map[s]));
+  if (!todo.length) return { moved: 0, failed: 0, left: 0 };
+  _piSweepStarted = true;
+  let moved = 0, failed = 0, i = 0;
+  const work = async () => {
+    while (i < todo.length && !_piStorageDown) {
+      const sku = todo[i++];
+      const cur = loadProductImages()[sku];
+      if (!cur || isOwnProductPhoto(cur)) continue;
+      (await mirrorProductImage(sku, cur)) ? moved++ : failed++;
+      if (opts && opts.onProgress) opts.onProgress(moved, failed, todo.length);
+    }
+  };
+  await Promise.all([work(), work(), work()]);
+  if (moved) console.info(`[product-images] moved ${moved} photo(s) into storage` + (failed ? `, ${failed} failed (retried next open)` : ""));
+  return { moved, failed, left: todo.length - moved };
+}
+let _piSweepTimer = null;
+window.addEventListener("ims-images-change", () => {
+  if (_piSweepStarted || _piSweepTimer) return;
+  // Let the app settle (first paint, the rest of dbInit) before moving photos.
+  _piSweepTimer = setTimeout(() => { _piSweepTimer = null; mirrorPendingProductImages(); }, 15000);
+});
+
 function setProductImage(sku, dataUrl) {
+  const prev = (loadProductImages() || {})[sku];
+  _writeProductImage(sku, dataUrl);
+  if (typeof dataUrl === "string" && dataUrl && !isOwnProductPhoto(dataUrl)) mirrorProductImage(sku, dataUrl);
+  // Replaced or removed: drop our old file (admin/manager; staff policy can't delete).
+  if (prev && prev !== dataUrl && isOwnProductPhoto(prev)) _piRemoveOwn(prev);
+}
+
+function _writeProductImage(sku, dataUrl) {
   const prev = loadProductImages();
   // Fresh object ref so useProductImages' setImages() actually re-renders.
   const m = { ...prev };
@@ -53,6 +173,10 @@ function setProductImagesBulk(map) {
   window._DB_PRODUCT_IMAGES = m;
   try { localStorage.setItem(PI_KEY, JSON.stringify(m)); } catch (e) {} // quota — cloud still has it
   window.dispatchEvent(new CustomEvent("ims-images-change"));
+  // Copy the imported links into our own bucket, three at a time.
+  const queue = Object.keys(map).filter(sku => map[sku] && !isOwnProductPhoto(map[sku]));
+  const run = async () => { while (queue.length && !_piStorageDown) { const sku = queue.shift(); await mirrorProductImage(sku, map[sku]); } };
+  run(); run(); run();
   return n;
 }
 
@@ -234,9 +358,13 @@ function openProductImageViewer(url, caption) {
 }
 
 /* zoom: tap opens the full-size photo (stops the tap reaching the row under it). */
-function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel, zoom, caption }) {
+/* addable: a product with no photo shows a "+ รูป" tile that picks/takes one in
+   place (the tap never reaches the row under it). Only for roles that can write. */
+function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel, zoom, caption, addable }) {
   const images = useProductImages();
   const url = resolveProductImage(sku, images);
+  const fileRef = useRefImg(null);
+  const [busy, setBusy] = useStateImg(false);
   if (url) {
     const open = zoom ? (e) => { e.stopPropagation(); e.preventDefault(); openProductImageViewer(url, caption || sku); } : undefined;
     return (
@@ -252,6 +380,37 @@ function ProductImageThumb({ sku, size = 40, radius = 8, fallbackLabel, zoom, ca
       }}>
         <img src={url} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
       </div>
+    );
+  }
+  if (addable && sku && _piCanWrite() && (typeof canDo !== "function" || canDo("editProduct"))) {
+    const stop = (e) => { e.stopPropagation(); };
+    const pick = (e) => { e.stopPropagation(); e.preventDefault(); if (!busy) fileRef.current?.click(); };
+    const upload = async (file) => {
+      if (!file) return;
+      setBusy(true);
+      try {
+        const r = await fileToWebp(file, { maxSize: 1000, quality: 0.85 });
+        setProductImage(sku, r.dataUrl);
+        window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: "เพิ่มรูปให้ " + sku + " แล้ว", type: "success" } }));
+      } catch (err) {
+        window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: (err && err.message) || "เพิ่มรูปไม่สำเร็จ", type: "error" } }));
+      } finally {
+        setBusy(false);
+        if (fileRef.current) fileRef.current.value = "";
+      }
+    };
+    return (
+      <span onClick={pick} role="button" title="เพิ่มรูปสินค้า" style={{
+        width: size, height: size, borderRadius: radius, flexShrink: 0,
+        background: "var(--accent-soft)", color: "var(--accent)",
+        border: "1.5px dashed var(--accent)", cursor: busy ? "wait" : "pointer",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        fontSize: Math.max(9, size * 0.24), fontWeight: 600, lineHeight: 1.1, gap: 1
+      }}>
+        {busy ? "…" : <><Icons.Plus size={Math.max(10, Math.round(size * 0.32))}/><span>รูป</span></>}
+        <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+          onClick={stop} onChange={(e) => upload(e.target.files?.[0])}/>
+      </span>
     );
   }
   return (
@@ -556,6 +715,9 @@ function LocationImageUpload({ code, pushToast, size = "lg", compact }) {
 Object.assign(window, {
   fileToWebp,
   setProductImage,
+  mirrorProductImage,
+  mirrorPendingProductImages,
+  isOwnProductPhoto,
   setProductImagesBulk,
   loadProductImages,
   resolveProductImage,

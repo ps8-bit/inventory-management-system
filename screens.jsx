@@ -853,13 +853,31 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
   const [reorder,  setReorder]  = useState("2");   // was 30 — typical stock is ~4, so 30 flagged most SKUs as low
   const [supplier, setSupplier] = useState(suppliers[0] || "");
   const [qty,      setQty]      = useState("1");
+  // The scanned code is only a starting point — a supplier barcode often isn't
+  // the SKU the shop wants, so it stays editable. Photo is optional and wins over
+  // the Woo catalog image.
+  const [skuVal,   setSkuVal]   = useState(sku || "");
+  const [photo,    setPhoto]    = useState(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const photoRef = useRef(null);
   const nameRef = useRef(null);
   useEffect(() => { setTimeout(() => nameRef.current?.focus(), 60); }, []);
 
-  const canSave = name.trim() && (parseInt(qty) > 0);
+  const skuTrim = skuVal.trim();
+  const skuTaken = !!skuTrim && PRODUCTS.some(p => String(p.sku).toLowerCase() === skuTrim.toLowerCase());
+  const canSave = name.trim() && skuTrim && !skuTaken && !photoBusy && (parseInt(qty) > 0);
+
+  const pickPhoto = async (file) => {
+    if (!file || typeof fileToWebp !== "function") return;
+    setPhotoBusy(true);
+    try { setPhoto((await fileToWebp(file, { maxSize: 1000, quality: 0.85 })).dataUrl); }
+    catch (e) { window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: (e && e.message) || "ใส่รูปไม่สำเร็จ", type: "error" } })); }
+    finally { setPhotoBusy(false); if (photoRef.current) photoRef.current.value = ""; }
+  };
 
   const confirm = () => {
     if (!canSave) { nameRef.current?.focus(); return; }
+    const sku = skuTrim;
     const catVal = (cat || "").trim() || "ทั่วไป";
     // Register a brand-new category typed here so it persists + syncs to the
     // shared list (addCategory no-ops if it already exists).
@@ -882,8 +900,9 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
     };
     // Carry over the WooCommerce product image (a remote URL renders fine in
     // <img> across the app). Set before onConfirm so the new product shows it.
-    if (fromWoo && prefill.image && typeof setProductImage === "function") {
-      try { setProductImage(sku, prefill.image); } catch (e) {}
+    const img = photo || (fromWoo && prefill.image) || "";
+    if (img && typeof setProductImage === "function") {
+      try { setProductImage(sku, img); } catch (e) {}
     }
     onConfirm(product, parseInt(qty) || 1);
   };
@@ -906,14 +925,47 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
     </div>
   ) : null;
 
+  const shownPhoto = photo || (fromWoo && prefill.image) || "";
+  const photoField = (
+    <div className="field" style={{ marginBottom: 0 }}>
+      <label style={mobile ? { fontSize: 11 } : undefined}>รูปสินค้า (ไม่บังคับ)</label>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div onClick={() => !photoBusy && photoRef.current?.click()}
+          style={{ width: mobile ? 64 : 72, height: mobile ? 64 : 72, borderRadius: 12, flexShrink: 0, overflow: "hidden",
+                   border: "1.5px dashed var(--border-strong)", background: shownPhoto ? "#fff" : "var(--surface-2)",
+                   display: "grid", placeItems: "center", cursor: photoBusy ? "wait" : "pointer", color: "var(--muted)" }}>
+          {photoBusy ? <span style={{ fontSize: 11 }}>กำลังแปลง…</span>
+            : shownPhoto ? <img src={shownPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }}/>
+            : <Icons.Plus size={20}/>}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <button type="button" className={mobile ? "m-chip" : "btn btn-sm"}
+            disabled={photoBusy} onClick={() => photoRef.current?.click()}>
+            {shownPhoto ? "เปลี่ยนรูป" : "ถ่าย / เลือกรูป"}
+          </button>
+          {photo && <button type="button" className={mobile ? "m-chip" : "btn btn-sm btn-ghost"}
+            onClick={() => setPhoto(null)}>ลบรูป</button>}
+        </div>
+        <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => pickPhoto(e.target.files?.[0])}/>
+      </div>
+    </div>
+  );
+  const skuField = (
+    <div className="field" style={{ marginBottom: 0 }}>
+      <label style={mobile ? { fontSize: 11 } : undefined}>รหัส SKU <span style={{ color: "var(--danger)" }}>*</span></label>
+      <input className={mobile ? "m-input mono" : "input mono"} value={skuVal}
+        onChange={e => setSkuVal(e.target.value)} placeholder="รหัส SKU"
+        style={{ fontFamily: "IBM Plex Mono, monospace", borderColor: skuTaken ? "var(--danger)" : undefined }}/>
+      {skuTaken && <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>รหัสนี้มีในระบบแล้ว — ใช้รหัสอื่น</div>}
+      {!skuTrim && <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>ต้องใส่รหัส SKU</div>}
+    </div>
+  );
+
   const fields = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {wooBanner}
-      <div className="field">
-        <label>รหัส SKU</label>
-        <input className={mobile ? "m-input mono" : "input mono"} value={sku} readOnly
-          style={{ fontFamily: "IBM Plex Mono, monospace", background: "var(--surface-2)", color: "var(--muted)" }}/>
-      </div>
+      {photoField}
+      {skuField}
       <div className="field">
         <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8 }}>
           <label>ชื่อสินค้า <span style={{ color: "var(--danger)" }}>*</span></label>
@@ -996,6 +1048,8 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
           {/* Compact mobile fields — only essentials up front, rest below */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {wooBanner}
+            {photoField}
+            {skuField}
             <div className="field" style={{ marginBottom: 0 }}>
               <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
                 <label style={{ fontSize: 11 }}>ชื่อสินค้า *</label>
@@ -2286,7 +2340,9 @@ function Outbound({ goTo, pushToast, focus }) {
                 and a filter set from a search hit looks like a broken screen. */}
             {tabOrders.length === 0 && (
               <tr><td colSpan="9" style={{ textAlign: "center", padding: 40, color: "var(--muted)", fontSize: 13 }}>
-                <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
+                {tab === 1 && !filterQ && filterCh === "all" && typeof IllusEmpty === "function"
+                  ? <img className="illus-empty-img" src={illusSrc("pending-orders")} alt="" width="88" height="88" style={{ width: 88, height: 88, margin: "0 auto 6px" }}/>
+                  : <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>}
                 <div>{tab === 1 && !filterQ && filterCh === "all" ? "ไม่มีออร์เดอร์ค้างส่ง" : (filterQ || filterCh !== "all" || TABS[tab].filtered) ? "ไม่พบออร์เดอร์ที่ตรงกับตัวกรอง" : "ยังไม่มีออร์เดอร์"}</div>
                 {tab !== 0 && !filterQ && filterCh === "all" && <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => setTab(0)}>ดูทั้งหมด</button>}
                 {(filterQ || filterCh !== "all") && (
@@ -2750,7 +2806,7 @@ function IssueModal({ onClose, onSubmit, presetSkus, pushToast }) {
           {/* The cart */}
           {cart.length === 0 ? (
             <div style={{ padding: 22, textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)", borderRadius: 12, marginBottom: 14 }}>
-              <Icons.Out size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>
+              {typeof IllusEmpty === "function" ? <img className="illus-empty-img" src={illusSrc("stock-out")} alt="" width="80" height="80" style={{ width: 80, height: 80, margin: "0 auto 4px" }}/> : <Icons.Out size={20} style={{ opacity: 0.4, marginBottom: 6 }}/>}
               <div>ยังไม่ได้เลือกสินค้า — สแกนบาร์โค้ดหรือกดเลือกจากรายการด้านบน</div>
             </div>
           ) : (
@@ -2967,6 +3023,10 @@ function Inventory({ pushToast, density, goTo, focus }) {
   const [cat, setCat] = useState("ทั้งหมด");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locFilter, setLocFilter] = useState(false); // true = only products not stored in a real position
+  const [noPhoto, setNoPhoto] = useState(false); // true = only products with no photo yet
+  const photoMap = (typeof useProductImages === "function") ? useProductImages() : {};
+  const [pfFilter, setPfFilter] = useState("");       // channel id → only products NOT listed on it yet
+  const [pfEdit, setPfEdit] = useState(false);        // row platform icons are tappable only in this mode
   const [sort, setSort] = useState({ key: null, dir: 1 });     // column sort
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef(null);
@@ -3050,12 +3110,16 @@ function Inventory({ pushToast, density, goTo, focus }) {
   // legacy "A" from CSV import) count as NOT stored and get a warning badge.
   const storedCodes = useMemo(() => storedLocSet(), [stockKey]);
   const unstoredCount = useMemo(() => liveProducts.reduce((n, p) => n + (productIsStored(p, storedCodes) ? 0 : 1), 0), [liveProducts, storedCodes]);
+  const hasPhoto = (p) => typeof resolveProductImage !== "function" || !!resolveProductImage(p.sku, photoMap);
+  const noPhotoCount = useMemo(() => liveProducts.reduce((n, p) => n + (hasPhoto(p) ? 0 : 1), 0), [liveProducts, photoMap]);
 
   const filteredRaw = liveProducts.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     const s = stockStatus(p).key;
     if (statusFilter !== "all" && s !== statusFilter) return false;
     if (locFilter && productIsStored(p, storedCodes)) return false;
+    if (noPhoto && hasPhoto(p)) return false;
+    if (pfFilter && productPlatforms(p).includes(pfFilter)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
   });
@@ -3223,6 +3287,21 @@ function Inventory({ pushToast, density, goTo, focus }) {
           <select className="input inv-cat-select" value={cat} onChange={e => setCat(e.target.value)} title="หมวดหมู่">
             {cats.map(c => <option key={c} value={c}>{c === "ทั้งหมด" ? "ทุกหมวดหมู่" : c}</option>)}
           </select>
+          {hasPlatformsColumn() && canDo("editProduct") && (
+            <button className={"btn btn-sm" + (pfEdit ? " btn-primary" : "")} onClick={() => setPfEdit(v => !v)}
+              title="เปิดเพื่อแตะไอคอนช่องทางในแต่ละแถว">
+              {pfEdit ? "✓ เสร็จ" : "✎ ติ๊กช่องทางขาย"}
+            </button>
+          )}
+          {hasPlatformsColumn() && (
+            <select className="input inv-cat-select" value={pfFilter} onChange={e => setPfFilter(e.target.value)} title="ช่องทางที่ยังไม่ได้ลงขาย">
+              <option value="">ทุกช่องทางขาย</option>
+              {LISTING_PLATFORMS.map(c => {
+                const n = liveProducts.filter(p => !productPlatforms(p).includes(c.id)).length;
+                return <option key={c.id} value={c.id}>ยังไม่ลง {c.name} ({n})</option>;
+              })}
+            </select>
+          )}
           <div className="spacer"/>
           {(unstoredCount > 0 || locFilter) && (
             <button
@@ -3239,6 +3318,21 @@ function Inventory({ pushToast, density, goTo, focus }) {
               <Icons.Warn size={13}/> ยังไม่จัดเก็บ <span className="tnum">{unstoredCount}</span>
             </button>
           )}
+          {(noPhotoCount > 0 || noPhoto) && (
+            <button
+              onClick={() => setNoPhoto(v => !v)}
+              title={noPhoto ? "แสดงสินค้าทั้งหมด" : "แสดงเฉพาะสินค้าที่ยังไม่มีรูป"}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "7px 12px", borderRadius: 10, fontSize: 12, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit",
+                border: "1px solid " + (noPhoto ? "var(--accent)" : "transparent"),
+                background: noPhoto ? "var(--accent)" : "var(--accent-soft)",
+                color: noPhoto ? "#fff" : "var(--accent)"
+              }}>
+              <Icons.Plus size={13}/> ยังไม่มีรูป <span className="tnum">{noPhotoCount}</span>
+            </button>
+          )}
           <div className="seg">
             <button className={statusFilter === "all" ? "on" : ""} onClick={() => setStatusFilter("all")}>ทุกสถานะ</button>
             <button className={statusFilter === "ok" ? "on" : ""} onClick={() => setStatusFilter("ok")}>พร้อมขาย</button>
@@ -3246,16 +3340,18 @@ function Inventory({ pushToast, density, goTo, focus }) {
             <button className={statusFilter === "out" ? "on" : ""} onClick={() => setStatusFilter("out")}>หมด</button>
           </div>
         </div>
-        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter) && (
+        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter || noPhoto || pfFilter) && (
           <div className="row" style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", gap: 10, fontSize: 12, color: "var(--muted)" }}>
             <span>กรองอยู่:</span>
             {q && <span className="badge badge-neutral">ค้นหา "{q}" <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setQ("")}/></span>}
             {cat !== "ทั้งหมด" && <span className="badge badge-neutral">หมวด: {cat} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setCat("ทั้งหมด")}/></span>}
             {statusFilter !== "all" && <span className="badge badge-neutral">สถานะ: {STATUS_TH[statusFilter] || statusFilter} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setStatusFilter("all")}/></span>}
             {locFilter && <span className="badge badge-warning">ยังไม่จัดเก็บ <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setLocFilter(false)}/></span>}
+            {noPhoto && <span className="badge badge-warning">ยังไม่มีรูป <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setNoPhoto(false)}/></span>}
+            {pfFilter && <span className="badge badge-warning">ยังไม่ลง {(LISTING_PLATFORMS.find(c => c.id === pfFilter) || {}).name} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setPfFilter("")}/></span>}
             <span className="spacer"/>
             <span><strong className="tnum" style={{ color: "var(--fg)" }}>{filtered.length}</strong> จาก {products.length} รายการ</span>
-            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); }}>ล้างตัวกรอง</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setNoPhoto(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
           </div>
         )}
       </div>
@@ -3323,8 +3419,11 @@ function Inventory({ pushToast, density, goTo, focus }) {
                   <td className="t-mono" style={{ color: "var(--fg)" }} onClick={() => setOpen(p.sku)}>{p.sku}</td>
                   <td onClick={() => setOpen(p.sku)}>
                     <div className="row" style={{ gap: 10 }}>
-                      <ProductImageThumb sku={p.sku} size={36} radius={8}/>
-                      <div style={{ fontSize: 13, minWidth: 0 }}>{p.name}</div>
+                      <ProductImageThumb sku={p.sku} size={36} radius={8} addable/>
+                      <div style={{ fontSize: 13, minWidth: 0 }}>
+                        {p.name}
+                        <PlatformRowToggles product={p} readOnly={!pfEdit || !canDo("editProduct")}/>
+                      </div>
                     </div>
                   </td>
                   <td onClick={() => setOpen(p.sku)}><span className="badge badge-neutral">{p.cat}</span></td>
@@ -3378,7 +3477,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
               <tr><td colSpan="10" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
                 <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
                 <div>ไม่พบสินค้าที่ตรงกับตัวกรอง</div>
-                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); }}>ล้างตัวกรอง</button>
+                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setNoPhoto(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
               </td></tr>
             )}
           </tbody>
@@ -4139,6 +4238,15 @@ function ProductDrawer({ product, onClose, pushToast }) {
             <Stat label="จุดสั่งซื้อใหม่" value={product.reorder + " ชิ้น"}/>
           </div>
 
+          <div style={{ marginTop: 18 }}>
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>ลงขายแล้วบน</div>
+              {typeof productMissingPlatforms === "function" && hasPlatformsColumn() && productMissingPlatforms(product).length > 0 &&
+                <span className="badge badge-warning" style={{ fontSize: 10 }}>ยังไม่ลง {productMissingPlatforms(product).length} ช่องทาง</span>}
+            </div>
+            {typeof PlatformListingChips === "function" && <PlatformListingChips product={product} readOnly={!canDo("editProduct")}/>}
+          </div>
+
           <LocationSplitPanel product={product} pushToast={pushToast}/>
 
           <div style={{ marginTop: 18, padding: 16, background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
@@ -4273,6 +4381,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
         <ProductEditModal
           product={PRODUCTS.find(p => p.sku === product.sku) || product}
           onClose={() => setEditOpen(false)}
+          onRename={() => { setEditOpen(false); setRenameOpen(true); }}
           onSave={(changes) => {
             updateProductInStore(product.sku, changes);
             pushToast(`บันทึกการแก้ไข ${product.sku} แล้ว`);
@@ -4319,7 +4428,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
 }
 
 /* Edit an existing product's catalog fields */
-function ProductEditModal({ product, onClose, onSave }) {
+function ProductEditModal({ product, onClose, onSave, onRename }) {
   const cats = useMemo(() => typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(p => p.cat))], []);
   const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))], []);
   const brands = useMemo(() => [...new Set(PRODUCTS.map(p => p.brand))].filter(Boolean), []);
@@ -4353,7 +4462,15 @@ function ProductEditModal({ product, onClose, onSave }) {
         <div className="modal-head">
           <div>
             <h3>แก้ไขข้อมูลสินค้า</h3>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}><span className="mono">{product.sku}</span> · ปรับข้อมูลแล้วบันทึก</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <span className="mono">{product.sku}</span>
+              {onRename && canDo("renameSku") && (
+                <button type="button" className="btn btn-sm btn-ghost" style={{ padding: "2px 8px" }} onClick={onRename}>
+                  <Icons.Tag size={12}/> เปลี่ยนรหัส
+                </button>
+              )}
+              · ปรับข้อมูลแล้วบันทึก
+            </div>
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
@@ -5804,7 +5921,7 @@ function QuickSellModal({ onClose, pushToast }) {
 
           <div style={{ marginTop: 14 }}>
             {lines.length === 0 && (
-              <div style={{ padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)", borderRadius: 12 }}>
+              typeof IllusEmpty === "function" ? <IllusEmpty art="quick-sale" title="ยังไม่มีสินค้าในรายการขาย" size={80}>สแกนหรือค้นหาด้านบน (สแกนซ้ำ = +1)</IllusEmpty> : <div style={{ padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1px dashed var(--border)", borderRadius: 12 }}>
                 ยังไม่มีสินค้า — สแกนหรือค้นหาด้านบน (สแกนซ้ำ = +1)
               </div>
             )}
@@ -7020,16 +7137,16 @@ function PackHome({ goTo, user }) {
   const custOf = (o) => typeof isLabelPlaceholderName === "function" && !isLabelPlaceholderName(o.customer) ? o.customer : (o.customer || "—");
 
   const tiles = [
-    { label: "รอแพ็ค",            val: orders.length, unit: "ออร์เดอร์", icon: <Icons.Box size={22}/>,     tone: "accent" },
-    { label: "รวมชิ้นที่ต้องหยิบ", val: pieces,        unit: "ชิ้น",      icon: <Icons.Pkg size={22}/>,     tone: "info" },
-    { label: "แพ็คเสร็จวันนี้",     val: packedToday,   unit: "ออร์เดอร์", icon: <Icons.Check size={22}/>,   tone: "success" },
-    { label: "ค้างเกินกำหนด",      val: late,          unit: "ออร์เดอร์", icon: <Icons.History size={22}/>, tone: late ? "danger" : "muted" }
+    { label: "รอแพ็ค",            val: orders.length, unit: "ออร์เดอร์", icon: <Icons.Box size={22}/>,     art: "pk-pending", tone: "accent" },
+    { label: "รวมชิ้นที่ต้องหยิบ", val: pieces,        unit: "ชิ้น",      icon: <Icons.Pkg size={22}/>,     art: "pk-items", tone: "info" },
+    { label: "แพ็คเสร็จวันนี้",     val: packedToday,   unit: "ออร์เดอร์", icon: <Icons.Check size={22}/>,   art: "pk-box", tone: "success" },
+    { label: "ค้างเกินกำหนด",      val: late,          unit: "ออร์เดอร์", icon: <Icons.History size={22}/>, art: "pk-overdue", tone: late ? "danger" : "muted" }
   ];
 
   return (
     <div className="dph">
       <div className="dph-head">
-        <div className="ph-avatar dph-avatar" aria-hidden="true">{typeof packHomeInitials === "function" ? packHomeInitials(name) : "?"}</div>
+        {typeof illusSrc === "function" ? <img className="ph-team-art dph-team-art" src={illusSrc("pk-team")} alt="" width="96" height="96" decoding="async"/> : <div className="ph-avatar dph-avatar" aria-hidden="true">{typeof packHomeInitials === "function" ? packHomeInitials(name) : "?"}</div>}
         <div style={{ minWidth: 0, flex: 1 }}>
           <div className="ph-eyebrow">ภาพรวมวันนี้</div>
           <h1 className="page-title dph-hello">สวัสดี{firstName ? ", " + firstName : ""}</h1>
@@ -7065,17 +7182,10 @@ function PackHome({ goTo, user }) {
       )}
       {known && (
         <div className={"ph-hero dph-hero" + (empty ? " is-done" : " is-work")}>
-          <svg className="ph-hero-art" viewBox="0 0 120 110" aria-hidden="true">
-            <ellipse cx="60" cy="58" rx="56" ry="48" className="ph-blob"/>
-            <path d="M22 18l5 7M33 12l1 9M14 30l8 3" className="ph-spark"/>
-            <path d="M30 44l32-14 32 14v36l-32 16-32-16z" className="ph-box"/>
-            <path d="M30 44l32 15 32-15M62 59v37" className="ph-box-line"/>
-            <path d="M46 37l32 14v10" className="ph-tape"/>
-            <circle cx="88" cy="80" r="16" className="ph-badge"/>
-            {empty
-              ? <path d="M80 80l6 6 10-11" className="ph-badge-mark"/>
-              : <text x="88" y="86" textAnchor="middle" className="ph-badge-num">{orders.length > 99 ? "99+" : orders.length}</text>}
-          </svg>
+          <span className="ph-hero-pic" aria-hidden="true">
+            {typeof illusSrc === "function" ? <img className="ph-hero-img" src={illusSrc("pk-box")} alt="" width="112" height="112" decoding="async"/> : <Icons.Box size={48}/>}
+            <span className={"ph-hero-badge" + (empty ? " is-done" : "")}>{empty ? <Icons.Check size={16}/> : (orders.length > 99 ? "99+" : orders.length)}</span>
+          </span>
           <span className="ph-hero-text">
             <span className="ph-hero-title">{empty ? <span className="ph-nw">ไม่มีออร์เดอร์รอแพ็ค</span> : <>มี {orders.length} <span className="ph-nw">ออร์เดอร์รอแพ็ค</span></>}</span>
             <span className="ph-hero-sub">
@@ -7099,7 +7209,7 @@ function PackHome({ goTo, user }) {
       <div className="ph-grid dph-grid">
         {tiles.map(t => (
           <button key={t.label} type="button" className={"ph-tile tone-" + (known ? t.tone : "muted")} onClick={() => openPack()} disabled={!canPack}>
-            <span className="ph-tile-icon">{t.icon}</span>
+            <span className={"ph-tile-icon" + (t.art && typeof illusSrc === "function" ? " has-art" : "")}>{t.art && typeof illusSrc === "function" ? <img src={illusSrc(t.art)} alt="" width="56" height="56" loading="lazy" decoding="async"/> : t.icon}</span>
             <span className="ph-tile-body">
               <span className="ph-tile-label">{t.label}</span>
               {known
@@ -7640,8 +7750,8 @@ function PackQueue({ pushToast, goTo, user, focus }) {
             )}
             {rows.length === 0 && (
               <tr><td colSpan="8" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
-                <Icons.Check size={22} style={{ opacity: 0.5, marginBottom: 8, color: "var(--success)" }}/>
-                <div>ไม่มีออร์เดอร์รอแพ็ค</div>
+                {typeof IllusEmpty === "function" ? <img className="illus-empty-img" src={illusSrc("packing")} alt="" width="96" height="96" style={{ width: 96, height: 96, margin: "0 auto 6px" }}/> : <Icons.Check size={22} style={{ opacity: 0.5, marginBottom: 8, color: "var(--success)" }}/>}
+                <div style={{ fontWeight: 700, color: "var(--fg)", fontSize: 14 }}>ไม่มีออร์เดอร์รอแพ็ค</div>
                 <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.7 }}>
                   กดปุ่ม <b>สั่งแพ็คใหม่</b> ด้านบน → เลือกสินค้า + แนบใบปะหน้าหรือวางที่อยู่ → ส่งให้คนแพ็ค
                 </div>

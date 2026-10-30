@@ -220,7 +220,7 @@ function NotifPopover({ onClose, goTo, goToProduct, goToOrder }) {
       {typeof OrderPushToggle === "function" && <div style={{ padding:"10px 12px 0" }}><OrderPushToggle/></div>}
 
       {nothing && (
-        <div style={{ padding:"24px 16px", textAlign:"center", color:"var(--muted)", fontSize:13 }}>✅ ไม่มีการแจ้งเตือนใหม่</div>
+        (typeof IllusEmpty === "function" ? <IllusEmpty art="notifications" title="ไม่มีการแจ้งเตือนใหม่" size={72} bare>สต็อกและออร์เดอร์เรียบร้อยดี</IllusEmpty> : <div style={{ padding:"24px 16px", textAlign:"center", color:"var(--muted)", fontSize:13 }}>✅ ไม่มีการแจ้งเตือนใหม่</div>)
       )}
 
       {outOfStock.length > 0 && (
