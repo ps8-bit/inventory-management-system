@@ -454,6 +454,94 @@ async function sendTelegram(chats: string[], messages: TgMessage[]): Promise<{ s
 // overlaps the auth + order checks instead of running after them.
 if (tgToken()) cardAssets().catch(() => {});
 
+// ── งานของทีม task pushes ──────────────────────────────────────────────────
+// Targeted, not broadcast: assigned/back/resume go to the assignee, review/
+// blocked/done to every live admin/manager. The caller's own user id is always
+// dropped. `kind` is checked against the row so a client can't spam arbitrary
+// notifications. No customer data, and no `alert` key, so sw.js keeps these out
+// of the order inbox.
+const TASK_KINDS = ["assigned", "back", "resume", "review", "blocked", "done"];
+async function sendTaskPush(admin: any, user: any, role: string, body: any, hasPush: boolean) {
+  if (!hasPush) return { ok: true, sent: 0 };
+  const taskId = str(body.taskId, 80);
+  const kind = String(body.kind || "");
+  if (!taskId || !TASK_KINDS.includes(kind)) return { ok: false, error: "bad kind" };
+  const { data: row, error } = await admin.from("team_tasks")
+    .select("id, title, type, status, assignee, assignee_name, due, data").eq("id", taskId).maybeSingle();
+  if (error) return { ok: false, error: error.message };
+  if (!row) return { ok: false, error: "not found" };
+  const mgr = ["admin", "manager"].includes(role);
+  if (!mgr && row.assignee !== user.id) return { ok: false, error: "Forbidden" };
+  const st = row.status;
+  const valid =
+    kind === "assigned" ? mgr && ["todo", "doing", "partial", "back"].includes(st)
+    : kind === "back" ? mgr && st === "back"
+    : kind === "resume" ? mgr && st !== "blocked"
+    : kind === "review" ? st === "review"
+    : kind === "blocked" ? st === "blocked"
+    : kind === "done" ? row.type === "photo" && st === "done"
+    : false;
+  if (!valid) return { ok: false, error: "bad kind" };
+
+  const liveRole = async (id: string): Promise<string | null> => {
+    try {
+      const { data, error: e } = await admin.auth.admin.getUserById(id);
+      if (e) return null;
+      const u: any = data && data.user;
+      const banned = u && u.banned_until && new Date(u.banned_until).getTime() > Date.now();
+      return u && !banned ? ((u.app_metadata || {}).role || null) : null;
+    } catch { return null; }
+  };
+  let targetIds: string[] = [];
+  if (["assigned", "back", "resume"].includes(kind)) {
+    targetIds = row.assignee ? [row.assignee] : [];
+  } else {
+    const { data: all } = await admin.from("push_subscriptions").select("user_id");
+    const ids = [...new Set((all || []).map((s: any) => s.user_id).filter(Boolean))] as string[];
+    const roles = await Promise.all(ids.map(liveRole));
+    targetIds = ids.filter((_, i) => ["admin", "manager"].includes(roles[i] || ""));
+  }
+  targetIds = targetIds.filter((id) => id && id !== user.id);
+  if (!targetIds.length) return { ok: true, sent: 0, failed: 0 };
+
+  const d: any = row.data || {};
+  const title = str(row.title, 60);
+  const by = str((user.user_metadata as any)?.name || (user.user_metadata as any)?.full_name || "เจ้าของ", 30);
+  const who = str(row.assignee_name, 30);
+  const text: Record<string, [string, string]> = {
+    assigned: ["📋 งานใหม่ · " + title, by + " มอบหมายงานให้คุณ" + (row.due ? " · กำหนด " + row.due : "")],
+    back:     ["↩️ ส่งกลับแก้ไข · " + title, str(d.comment, 120)],
+    resume:   ["▶️ ทำต่อได้ · " + title, "เจ้าของแก้ปัญหาแล้ว"],
+    review:   ["✅ รออนุมัติ · " + title, who + " ส่งรายงานแล้ว"],
+    blocked:  ["⚠️ ติดปัญหา · " + title, who + ": " + str(d.reason, 120)],
+    done:     ["📷 เสร็จแล้ว · " + title, who + " ถ่ายรูปครบ"],
+  };
+  const [t, b] = text[kind];
+  const payload = { title: str(t, 90), body: str(b, 160), tag: "ims-task-" + row.id,
+    url: "/?tk=" + encodeURIComponent(row.id), task: { id: row.id } };
+
+  const { data: subs, error: se } = await admin.from("push_subscriptions")
+    .select("endpoint, p256dh, auth, user_id").in("user_id", targetIds);
+  if (se) return { ok: false, error: se.message };
+  let sent = 0, failed = 0;
+  const dead: string[] = [];
+  await Promise.all((subs || []).map(async (s: any) => {
+    try {
+      await webpush.sendNotification(
+        { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+        JSON.stringify(payload),
+        { TTL: 60 * 60 * 12, urgency: "high" },
+      );
+      sent++;
+    } catch (e: any) {
+      failed++;
+      if (e && (e.statusCode === 404 || e.statusCode === 410)) dead.push(s.endpoint);
+    }
+  }));
+  if (dead.length) await admin.from("push_subscriptions").delete().in("endpoint", dead);
+  return { ok: true, sent, failed };
+}
+
 Deno.serve(async (req) => {
   const cors = corsFor(req);
   const json = (body: unknown, status = 200) =>
@@ -482,6 +570,9 @@ Deno.serve(async (req) => {
 
   let body: any;
   try { body = await req.json(); } catch { return json({ ok: false, error: "Bad JSON" }, 400); }
+
+  // {mode:"task"} → a targeted งานของทีม push (tasks.jsx notifyTask). Never Telegram.
+  if (body && body.mode === "task") return json(await sendTaskPush(admin, user, role, body, hasPush));
 
   // {mode:"test"} → one test push to the CALLER's own devices (settings button).
   const test = body && body.mode === "test";

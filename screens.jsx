@@ -836,7 +836,7 @@ function LocationSelect({ value, onChange, mobile, noneLabel, allowNone = true, 
   );
 }
 
-function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
+function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill, qtyLabel, hideLoc }) {
   const cats      = useMemo(() => typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(p => p.cat))].filter(Boolean).sort(), []);
   const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))].filter(Boolean).sort(), []);
   const brands    = useMemo(() => [...new Set(PRODUCTS.map(p => p.brand))].filter(Boolean).sort(), []);
@@ -882,7 +882,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
     // Register a brand-new category typed here so it persists + syncs to the
     // shared list (addCategory no-ops if it already exists).
     if (typeof addCategory === "function") { try { addCategory(catVal); } catch (e) {} }
-    if (typeof rememberReceiveLoc === "function") rememberReceiveLoc(loc);
+    if (!hideLoc && typeof rememberReceiveLoc === "function") rememberReceiveLoc(loc);
     const product = {
       sku,
       name:     name.trim(),
@@ -986,10 +986,10 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
             <option value="ทั่วไป"/>
           </datalist>
         </div>
-        <div className="field">
+        {!hideLoc && <div className="field">
           <label>ตำแหน่งจัดเก็บ</label>
           <LocationSelect value={loc} onChange={setLoc} noneLabel="— เลือกตำแหน่ง (ไม่บังคับ) —"/>
-        </div>
+        </div>}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <div className="field">
@@ -1019,7 +1019,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
       <div style={{ padding: "14px 16px", background: "var(--accent-soft,var(--surface-2))", borderRadius: 12,
                     border: "1.5px solid var(--accent)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <div style={{ fontWeight: 600, fontSize: 14 }}>จำนวนรับเข้าครั้งนี้</div>
+          <div style={{ fontWeight: 600, fontSize: 14 }}>{qtyLabel || "จำนวนรับเข้าครั้งนี้"}</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>จะถูกเพิ่มในรายการรับเข้าทันที</div>
         </div>
         <input className={mobile ? "m-input" : "input"} type="number" min="1" value={qty}
@@ -1069,10 +1069,10 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
                   <option value="ทั่วไป">ทั่วไป</option>
                 </select>
               </div>
-              <div className="field" style={{ marginBottom: 0 }}>
+              {!hideLoc && <div className="field" style={{ marginBottom: 0 }}>
                 <label style={{ fontSize: 11 }}>ตำแหน่งจัดเก็บ</label>
                 <LocationSelect mobile value={loc} onChange={setLoc} noneLabel="— เลือก (ไม่บังคับ) —"/>
-              </div>
+              </div>}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <div className="field" style={{ marginBottom: 0 }}>
@@ -1089,7 +1089,7 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
             <div style={{ padding: "10px 14px", background: "var(--accent-soft,var(--surface-2))", borderRadius: 12,
                           border: "1.5px solid var(--accent)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div>
-                <div style={{ fontWeight: 600, fontSize: 13 }}>จำนวนรับเข้าครั้งนี้</div>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{qtyLabel || "จำนวนรับเข้าครั้งนี้"}</div>
                 <div style={{ fontSize: 11, color: "var(--muted)" }}>เพิ่มในรายการทันที</div>
               </div>
               <input className="m-input" type="number" min="1" value={qty}
@@ -3349,6 +3349,17 @@ function Inventory({ pushToast, density, goTo, focus }) {
             {locFilter && <span className="badge badge-warning">ยังไม่จัดเก็บ <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setLocFilter(false)}/></span>}
             {noPhoto && <span className="badge badge-warning">ยังไม่มีรูป <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setNoPhoto(false)}/></span>}
             {pfFilter && <span className="badge badge-warning">ยังไม่ลง {(LISTING_PLATFORMS.find(c => c.id === pfFilter) || {}).name} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setPfFilter("")}/></span>}
+            {noPhoto && typeof canManageTasks === "function" && canManageTasks() && typeof canOpenPage === "function" && canOpenPage("tasks") && (() => {
+              const busy = typeof skusInOpenTasks === "function" ? skusInOpenTasks("photo") : new Set();
+              const list = filtered.filter(p => (Number(p.qty) || 0) > 0 && !busy.has(p.sku)).map(p => p.sku);
+              if (!list.length) return null;
+              return (
+                <button className="btn btn-sm" title="เฉพาะสินค้าที่มีของในคลัง"
+                  onClick={() => window.dispatchEvent(new CustomEvent("ims-open-task-new", { detail: { type: "photo", skus: list.slice(0, 60) } }))}>
+                  📷 มอบหมายถ่ายรูป ({list.length})
+                </button>
+              );
+            })()}
             <span className="spacer"/>
             <span><strong className="tnum" style={{ color: "var(--fg)" }}>{filtered.length}</strong> จาก {products.length} รายการ</span>
             <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setNoPhoto(false); setPfFilter(""); }}>ล้างตัวกรอง</button>

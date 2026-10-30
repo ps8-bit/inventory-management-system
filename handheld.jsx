@@ -109,6 +109,15 @@ function MobileApp({ pushToast, user, onLogout, onSwitchUser, fullscreen }) {
     if (!route.view && !mTabAllowed(route.tab, role)) setRouteRaw(mStartRoute(role));
   }, [permTick, user && user.role]);
 
+  /* A task push / ?tk= link → open that task (tasks.jsx openTaskFromAnywhere). */
+  useEffectM(() => {
+    const role = user && user.role;
+    const go = (id) => { if (id && typeof canOpenPage === "function" && canOpenPage("tasks", role)) push("task", { id }); };
+    const h = (e) => go((typeof takePendingTaskOpen === "function" && takePendingTaskOpen()) || (e.detail && e.detail.id));
+    window.addEventListener("ims-open-task", h);
+    if (window.__pendingTaskOpen) go(typeof takePendingTaskOpen === "function" ? takePendingTaskOpen() : window.__pendingTaskOpen);
+    return () => window.removeEventListener("ims-open-task", h);
+  }, [user && user.role]);
   const ctx = { route, switchTab, push, back, pushToast, user, onLogout, onSwitchUser, fullscreen, pendingSync };
 
   /* Order alert → the screen where the goods get checked: the pick list for an
@@ -310,6 +319,14 @@ function MNoAccess({ ctx }) {
 function MPackHome({ ctx }) {
   const { load, known, now, orders, progress, packedToday, pieces, late, waves, waveOf } = usePackHomeStats();
   const next = orders.slice(0, 5);   // the queue's own order (packSortMode), untouched
+  // Tasks strip (packers can be assigned งานของทีม) — re-render when the list changes.
+  const [, setTaskTickPH] = useStateM(0);
+  useEffectM(() => {
+    const h = () => setTaskTickPH(t => t + 1);
+    window.addEventListener("ims-tasks-change", h);
+    if (typeof startTaskSync === "function") startTaskSync();
+    return () => window.removeEventListener("ims-tasks-change", h);
+  }, []);
 
   const name = (ctx.user && ctx.user.name) || "";
   const firstName = name.split(" ")[0];
@@ -380,6 +397,20 @@ function MPackHome({ ctx }) {
         </div>
       )}
 
+        {typeof canOpenPage === "function" && canOpenPage("tasks") && typeof taskBadgeCount === "function" && (() => {
+          const n = taskBadgeCount();
+          const mgr = typeof canManageTasks === "function" && canManageTasks();
+          const od = typeof taskOverdueCount === "function" ? taskOverdueCount() : 0;
+          return (
+            <button type="button" className={"mh-strip" + (n > 0 ? " is-alert" : "")} onClick={() => ctx.push("tasks")} style={{ marginBottom: 12, width: "100%" }}>
+              <span style={{ width: 40, height: 40, borderRadius: 12, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}><Icons.Check size={20}/></span>
+              <span><b>{mgr ? "งานของทีม" : "งานของฉัน"}</b></span>
+              <span className="mh-strip-sep"/>
+              <span>{n > 0 ? <><b className="tnum" style={{ color: "var(--accent)" }}>{n}</b> {mgr ? "รอคุณ" : "งานค้าง"}</> : "ไม่มีงานค้าง"}{od > 0 ? <span style={{ color: "var(--danger)" }}> · เลยกำหนด <b className="tnum">{od}</b></span> : null}</span>
+              <Icons.Chev size={13} style={{ marginLeft: "auto", color: "var(--muted)", flexShrink: 0 }}/>
+            </button>
+          );
+        })()}
       <div className="ph-section">สรุปงานวันนี้</div>
       <div className="ph-grid">
         {tiles.map(t => (
@@ -612,12 +643,13 @@ function MHome({ ctx }) {
         {canOpenPage("tasks") && typeof taskBadgeCount === "function" && (() => {
           const n = taskBadgeCount();
           const mgr = typeof canManageTasks === "function" && canManageTasks();
+          const od = typeof taskOverdueCount === "function" ? taskOverdueCount() : 0;
           return (
             <button type="button" className={"mh-strip" + (n > 0 ? " is-alert" : "")} onClick={() => ctx.push("tasks")} style={{ marginBottom: 12 }}>
               <span style={{ width: 40, height: 40, borderRadius: 12, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}><Icons.Check size={20}/></span>
               <span><b>{mgr ? "งานของทีม" : "งานของฉัน"}</b></span>
               <span className="mh-strip-sep"/>
-              <span>{n > 0 ? <><b className="tnum" style={{ color: "var(--accent)" }}>{n}</b> {mgr ? "รอคุณ" : "งานค้าง"}</> : "ไม่มีงานค้าง"}</span>
+              <span>{n > 0 ? <><b className="tnum" style={{ color: "var(--accent)" }}>{n}</b> {mgr ? "รอคุณ" : "งานค้าง"}</> : "ไม่มีงานค้าง"}{od > 0 ? <span style={{ color: "var(--danger)" }}> · เลยกำหนด <b className="tnum">{od}</b></span> : null}</span>
               <Icons.Chev size={13} style={{ marginLeft: "auto", color: "var(--muted)", flexShrink: 0 }}/>
             </button>
           );
@@ -1677,6 +1709,17 @@ function MInventory({ ctx }) {
               <Icons.Plus size={11} style={{ marginRight: 4, verticalAlign: "-1px" }}/>ยังไม่มีรูป {noPhotoCount}
             </button>
           )}
+          {noPhoto && typeof canManageTasks === "function" && canManageTasks() && canOpenPage("tasks") && (() => {
+            const busy = typeof skusInOpenTasks === "function" ? skusInOpenTasks("photo") : new Set();
+            const list = filtered.filter(p => (Number(p.qty) || 0) > 0 && !busy.has(p.sku)).map(p => p.sku);
+            if (!list.length) return null;
+            return (
+              <button className="m-chip" title="เฉพาะสินค้าที่มีของในคลัง"
+                onClick={() => ctx.push("task-new", { preset: { type: "photo", skus: list.slice(0, 60) } })}>
+                📷 มอบหมายถ่ายรูป ({list.length})
+              </button>
+            );
+          })()}
         </div>
 
         {/* ยังไม่ลงขายบน <platform> — tap again to clear */}

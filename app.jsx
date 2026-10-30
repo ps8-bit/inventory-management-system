@@ -977,6 +977,17 @@ function App({ user, onLogout, onSwitchUser }) {
     window.scrollTo(0, 0);
   };
   const focusFor = (p) => (pageFocus && pageFocus.page === p ? pageFocus : null);
+  /* งานของทีม: a task push / ?tk= link (tasks.jsx openTaskFromAnywhere) and the
+     inventory "มอบหมายถ่ายรูป" button both land on the tasks page; TeamTasks
+     reads window.__pendingTaskOpen / __pendingTaskNew when it mounts. */
+  useEffectApp(() => {
+    const open = () => { if (typeof canOpenPage === "function" && canOpenPage("tasks")) goTo("tasks"); };
+    const onNew = (e) => { window.__pendingTaskNew = (e && e.detail) || null; open(); };
+    window.addEventListener("ims-open-task", open);
+    window.addEventListener("ims-open-task-new", onNew);
+    if (window.__pendingTaskOpen) open();
+    return () => { window.removeEventListener("ims-open-task", open); window.removeEventListener("ims-open-task-new", onNew); };
+  }, []);
 
   /* Build the visible NAV: filter by role + visibility + order.
      roleNav() honours the admin's per-role override (app_state "role_perms")
