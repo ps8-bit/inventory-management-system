@@ -1446,6 +1446,8 @@ function MInventory({ ctx }) {
   // all | ok | low | out — preset when opened from the home "ต้องสั่งซื้อ" tile.
   const [statusFilter, setStatusFilter] = useStateM(() => memo ? memo.statusFilter : ((ctx.route.params && ctx.route.params.status) || "all"));
   const [locFilter, setLocFilter] = useStateM(memo ? memo.locFilter : false); // true = only products not stored in a real position
+  const [noPhoto, setNoPhoto] = useStateM(false); // true = only products with no photo yet
+  const photoMap = (typeof useProductImages === "function") ? useProductImages() : {};
   const [pfFilter, setPfFilter] = useStateM(memo ? memo.pfFilter : "");       // channel id → only products NOT listed on it yet
   const [pfEdit, setPfEdit] = useStateM(memo ? memo.pfEdit : false);        // row platform icons are tappable only in this mode
   // Rendered in pages: all 424 rows (with photos) on every tab switch was slow on phones.
@@ -1523,12 +1525,15 @@ function MInventory({ ctx }) {
   // Loc codes that are real positions — stale codes (e.g. legacy "A") count as unstored.
   const storedCodes = useMemoM(() => storedLocSet(), [stockKey]);
   const unstoredCount = useMemoM(() => products.reduce((n, p) => n + (productIsStored(p, storedCodes) ? 0 : 1), 0), [products, storedCodes]);
+  const hasPhoto = (p) => typeof resolveProductImage !== "function" || !!resolveProductImage(p.sku, photoMap);
+  const noPhotoCount = useMemoM(() => products.reduce((n, p) => n + (hasPhoto(p) ? 0 : 1), 0), [products, photoMap]);
 
   const cats = useMemoM(() => ["ทั้งหมด", ...(typeof loadCategories === "function" ? loadCategories() : [...new Set(products.map(p => p.cat))])], [products]);
   const filtered = products.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     if (statusFilter !== "all" && stockStatus(p).key !== statusFilter) return false;
     if (locFilter && productIsStored(p, storedCodes)) return false;
+    if (noPhoto && hasPhoto(p)) return false;
     if (pfFilter && productPlatforms(p).includes(pfFilter)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
@@ -1640,6 +1645,14 @@ function MInventory({ ctx }) {
               <Icons.Warn size={11} style={{ marginRight: 4, verticalAlign: "-1px" }}/>ยังไม่จัดเก็บ {unstoredCount}
             </button>
           )}
+          {(noPhotoCount > 0 || noPhoto) && (
+            <button
+              className={"m-chip" + (noPhoto ? " on" : "")}
+              onClick={() => setNoPhoto(v => !v)}
+              style={!noPhoto ? { background: "var(--accent-soft)", color: "var(--accent)", borderColor: "transparent", fontWeight: 600 } : {}}>
+              <Icons.Plus size={11} style={{ marginRight: 4, verticalAlign: "-1px" }}/>ยังไม่มีรูป {noPhotoCount}
+            </button>
+          )}
         </div>
 
         {/* ยังไม่ลงขายบน <platform> — tap again to clear */}
@@ -1681,7 +1694,7 @@ function MInventory({ ctx }) {
                 onClick={(e) => selecting ? toggleSku(p.sku) : openProduct(p, e)}
               >
                 {selecting && <span className={"check" + (isSelected ? " on" : "")} style={{ flexShrink: 0 }}/>}
-                <ProductImageThumb sku={p.sku} size={40} radius={8}/>
+                <ProductImageThumb sku={p.sku} size={40} radius={8} addable={!selecting}/>
                 <div className="m-row-main">
                   <div className="m-row-title" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
                   <div className="row" style={{ gap: 6, marginTop: 2, flexWrap: "wrap" }}>
@@ -1751,7 +1764,7 @@ function MInventory({ ctx }) {
 }
 
 /* Mobile Add-SKU bottom sheet (also used for editing when `editing` product is passed) */
-function MAddSku({ categories, products, onClose, onAdd, editing }) {
+function MAddSku({ categories, products, onClose, onAdd, editing, onRename }) {
   const suppliers = useMemoM(() => [...new Set(products.map(p => p.supplier))].filter(Boolean), [products]);
   const brands    = useMemoM(() => [...new Set(products.map(p => p.brand))].filter(Boolean), [products]);
   const [f, setF] = useStateM(() => editing ? {
@@ -1843,7 +1856,16 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
         </div>
         <div className="m-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div>
-            <div className="m-section-label" style={{ padding: "0 2px 4px" }}>รหัส SKU *</div>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center", padding: "0 2px 4px" }}>
+              <div className="m-section-label" style={{ padding: 0 }}>รหัส SKU *</div>
+              {/* The SKU is the primary key, so it isn't a form field here — it goes
+                  through the same cascading rename as the detail page's tag button. */}
+              {editing && onRename && canDo("renameSku") && (
+                <button type="button" className="m-chip" style={{ gap: 6 }} onClick={onRename}>
+                  <Icons.Tag size={13}/> เปลี่ยนรหัส
+                </button>
+              )}
+            </div>
             <input className="m-input mono" value={f.sku} disabled={!!editing} onChange={e => { const v = e.target.value; setF(prev => ({ ...prev, sku: v, brand: prev.brand || (typeof guessBrandFromSku === "function" ? guessBrandFromSku(v) : "") })); }} placeholder="เช่น TH-APP-003" style={{ textTransform: "uppercase", opacity: editing ? 0.6 : 1 }}/>
             {dupe && <div style={{ color: "var(--danger)", fontSize: 11, marginTop: 4 }}>SKU นี้มีอยู่แล้ว</div>}
           </div>
@@ -1938,7 +1960,7 @@ function MAddSku({ categories, products, onClose, onAdd, editing }) {
               </div>
             )}
           </div>
-          {editing && <div style={{ fontSize: 11, color: "var(--muted)" }}>หมายเหตุ: รหัส SKU และจำนวนคงเหลือแก้ไขที่นี่ไม่ได้ — ใช้ "ปรับสต็อก" สำหรับจำนวน</div>}
+          {editing && <div style={{ fontSize: 11, color: "var(--muted)" }}>หมายเหตุ: จำนวนคงเหลือแก้ไขที่นี่ไม่ได้ — ใช้ "ปรับสต็อก" · เปลี่ยนรหัส SKU ใช้ปุ่ม "เปลี่ยนรหัส"</div>}
         </div>
         <div className="m-sheet-foot">
           <button className="m-btn-big" onClick={save} disabled={!canSave} style={!canSave ? { opacity: 0.5 } : {}}>
@@ -2306,7 +2328,8 @@ function MProductDetail({ ctx }) {
         </div>
       </div>
       {editOpen && (
-        <MAddSku categories={cats} products={PRODUCTS} editing={base} onClose={() => setEditOpen(false)} onAdd={doEdit}/>
+        <MAddSku categories={cats} products={PRODUCTS} editing={base} onClose={() => setEditOpen(false)} onAdd={doEdit}
+          onRename={() => { setEditOpen(false); setRenameOpen(true); }}/>
       )}
       {renameOpen && typeof RenameSkuModal === "function" && (
         <RenameSkuModal

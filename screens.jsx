@@ -853,13 +853,31 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
   const [reorder,  setReorder]  = useState("2");   // was 30 — typical stock is ~4, so 30 flagged most SKUs as low
   const [supplier, setSupplier] = useState(suppliers[0] || "");
   const [qty,      setQty]      = useState("1");
+  // The scanned code is only a starting point — a supplier barcode often isn't
+  // the SKU the shop wants, so it stays editable. Photo is optional and wins over
+  // the Woo catalog image.
+  const [skuVal,   setSkuVal]   = useState(sku || "");
+  const [photo,    setPhoto]    = useState(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const photoRef = useRef(null);
   const nameRef = useRef(null);
   useEffect(() => { setTimeout(() => nameRef.current?.focus(), 60); }, []);
 
-  const canSave = name.trim() && (parseInt(qty) > 0);
+  const skuTrim = skuVal.trim();
+  const skuTaken = !!skuTrim && PRODUCTS.some(p => String(p.sku).toLowerCase() === skuTrim.toLowerCase());
+  const canSave = name.trim() && skuTrim && !skuTaken && !photoBusy && (parseInt(qty) > 0);
+
+  const pickPhoto = async (file) => {
+    if (!file || typeof fileToWebp !== "function") return;
+    setPhotoBusy(true);
+    try { setPhoto((await fileToWebp(file, { maxSize: 1000, quality: 0.85 })).dataUrl); }
+    catch (e) { window.dispatchEvent(new CustomEvent("ims-toast", { detail: { msg: (e && e.message) || "ใส่รูปไม่สำเร็จ", type: "error" } })); }
+    finally { setPhotoBusy(false); if (photoRef.current) photoRef.current.value = ""; }
+  };
 
   const confirm = () => {
     if (!canSave) { nameRef.current?.focus(); return; }
+    const sku = skuTrim;
     const catVal = (cat || "").trim() || "ทั่วไป";
     // Register a brand-new category typed here so it persists + syncs to the
     // shared list (addCategory no-ops if it already exists).
@@ -882,8 +900,9 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
     };
     // Carry over the WooCommerce product image (a remote URL renders fine in
     // <img> across the app). Set before onConfirm so the new product shows it.
-    if (fromWoo && prefill.image && typeof setProductImage === "function") {
-      try { setProductImage(sku, prefill.image); } catch (e) {}
+    const img = photo || (fromWoo && prefill.image) || "";
+    if (img && typeof setProductImage === "function") {
+      try { setProductImage(sku, img); } catch (e) {}
     }
     onConfirm(product, parseInt(qty) || 1);
   };
@@ -906,14 +925,47 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
     </div>
   ) : null;
 
+  const shownPhoto = photo || (fromWoo && prefill.image) || "";
+  const photoField = (
+    <div className="field" style={{ marginBottom: 0 }}>
+      <label style={mobile ? { fontSize: 11 } : undefined}>รูปสินค้า (ไม่บังคับ)</label>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div onClick={() => !photoBusy && photoRef.current?.click()}
+          style={{ width: mobile ? 64 : 72, height: mobile ? 64 : 72, borderRadius: 12, flexShrink: 0, overflow: "hidden",
+                   border: "1.5px dashed var(--border-strong)", background: shownPhoto ? "#fff" : "var(--surface-2)",
+                   display: "grid", placeItems: "center", cursor: photoBusy ? "wait" : "pointer", color: "var(--muted)" }}>
+          {photoBusy ? <span style={{ fontSize: 11 }}>กำลังแปลง…</span>
+            : shownPhoto ? <img src={shownPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }}/>
+            : <Icons.Plus size={20}/>}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <button type="button" className={mobile ? "m-chip" : "btn btn-sm"}
+            disabled={photoBusy} onClick={() => photoRef.current?.click()}>
+            {shownPhoto ? "เปลี่ยนรูป" : "ถ่าย / เลือกรูป"}
+          </button>
+          {photo && <button type="button" className={mobile ? "m-chip" : "btn btn-sm btn-ghost"}
+            onClick={() => setPhoto(null)}>ลบรูป</button>}
+        </div>
+        <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => pickPhoto(e.target.files?.[0])}/>
+      </div>
+    </div>
+  );
+  const skuField = (
+    <div className="field" style={{ marginBottom: 0 }}>
+      <label style={mobile ? { fontSize: 11 } : undefined}>รหัส SKU <span style={{ color: "var(--danger)" }}>*</span></label>
+      <input className={mobile ? "m-input mono" : "input mono"} value={skuVal}
+        onChange={e => setSkuVal(e.target.value)} placeholder="รหัส SKU"
+        style={{ fontFamily: "IBM Plex Mono, monospace", borderColor: skuTaken ? "var(--danger)" : undefined }}/>
+      {skuTaken && <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>รหัสนี้มีในระบบแล้ว — ใช้รหัสอื่น</div>}
+      {!skuTrim && <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>ต้องใส่รหัส SKU</div>}
+    </div>
+  );
+
   const fields = (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {wooBanner}
-      <div className="field">
-        <label>รหัส SKU</label>
-        <input className={mobile ? "m-input mono" : "input mono"} value={sku} readOnly
-          style={{ fontFamily: "IBM Plex Mono, monospace", background: "var(--surface-2)", color: "var(--muted)" }}/>
-      </div>
+      {photoField}
+      {skuField}
       <div className="field">
         <div className="row" style={{ justifyContent: "space-between", alignItems: "center", gap: 8 }}>
           <label>ชื่อสินค้า <span style={{ color: "var(--danger)" }}>*</span></label>
@@ -996,6 +1048,8 @@ function QuickAddInboundModal({ sku, onConfirm, onClose, mobile, prefill }) {
           {/* Compact mobile fields — only essentials up front, rest below */}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {wooBanner}
+            {photoField}
+            {skuField}
             <div className="field" style={{ marginBottom: 0 }}>
               <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
                 <label style={{ fontSize: 11 }}>ชื่อสินค้า *</label>
@@ -2969,6 +3023,8 @@ function Inventory({ pushToast, density, goTo, focus }) {
   const [cat, setCat] = useState("ทั้งหมด");
   const [statusFilter, setStatusFilter] = useState("all");
   const [locFilter, setLocFilter] = useState(false); // true = only products not stored in a real position
+  const [noPhoto, setNoPhoto] = useState(false); // true = only products with no photo yet
+  const photoMap = (typeof useProductImages === "function") ? useProductImages() : {};
   const [pfFilter, setPfFilter] = useState("");       // channel id → only products NOT listed on it yet
   const [pfEdit, setPfEdit] = useState(false);        // row platform icons are tappable only in this mode
   const [sort, setSort] = useState({ key: null, dir: 1 });     // column sort
@@ -3054,12 +3110,15 @@ function Inventory({ pushToast, density, goTo, focus }) {
   // legacy "A" from CSV import) count as NOT stored and get a warning badge.
   const storedCodes = useMemo(() => storedLocSet(), [stockKey]);
   const unstoredCount = useMemo(() => liveProducts.reduce((n, p) => n + (productIsStored(p, storedCodes) ? 0 : 1), 0), [liveProducts, storedCodes]);
+  const hasPhoto = (p) => typeof resolveProductImage !== "function" || !!resolveProductImage(p.sku, photoMap);
+  const noPhotoCount = useMemo(() => liveProducts.reduce((n, p) => n + (hasPhoto(p) ? 0 : 1), 0), [liveProducts, photoMap]);
 
   const filteredRaw = liveProducts.filter(p => {
     if (cat !== "ทั้งหมด" && p.cat !== cat) return false;
     const s = stockStatus(p).key;
     if (statusFilter !== "all" && s !== statusFilter) return false;
     if (locFilter && productIsStored(p, storedCodes)) return false;
+    if (noPhoto && hasPhoto(p)) return false;
     if (pfFilter && productPlatforms(p).includes(pfFilter)) return false;
     if (q && !(p.sku.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()) || p.supplier.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     return true;
@@ -3259,6 +3318,21 @@ function Inventory({ pushToast, density, goTo, focus }) {
               <Icons.Warn size={13}/> ยังไม่จัดเก็บ <span className="tnum">{unstoredCount}</span>
             </button>
           )}
+          {(noPhotoCount > 0 || noPhoto) && (
+            <button
+              onClick={() => setNoPhoto(v => !v)}
+              title={noPhoto ? "แสดงสินค้าทั้งหมด" : "แสดงเฉพาะสินค้าที่ยังไม่มีรูป"}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6,
+                padding: "7px 12px", borderRadius: 10, fontSize: 12, fontWeight: 600,
+                cursor: "pointer", fontFamily: "inherit",
+                border: "1px solid " + (noPhoto ? "var(--accent)" : "transparent"),
+                background: noPhoto ? "var(--accent)" : "var(--accent-soft)",
+                color: noPhoto ? "#fff" : "var(--accent)"
+              }}>
+              <Icons.Plus size={13}/> ยังไม่มีรูป <span className="tnum">{noPhotoCount}</span>
+            </button>
+          )}
           <div className="seg">
             <button className={statusFilter === "all" ? "on" : ""} onClick={() => setStatusFilter("all")}>ทุกสถานะ</button>
             <button className={statusFilter === "ok" ? "on" : ""} onClick={() => setStatusFilter("ok")}>พร้อมขาย</button>
@@ -3266,17 +3340,18 @@ function Inventory({ pushToast, density, goTo, focus }) {
             <button className={statusFilter === "out" ? "on" : ""} onClick={() => setStatusFilter("out")}>หมด</button>
           </div>
         </div>
-        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter || pfFilter) && (
+        {(q || cat !== "ทั้งหมด" || statusFilter !== "all" || locFilter || noPhoto || pfFilter) && (
           <div className="row" style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", gap: 10, fontSize: 12, color: "var(--muted)" }}>
             <span>กรองอยู่:</span>
             {q && <span className="badge badge-neutral">ค้นหา "{q}" <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setQ("")}/></span>}
             {cat !== "ทั้งหมด" && <span className="badge badge-neutral">หมวด: {cat} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setCat("ทั้งหมด")}/></span>}
             {statusFilter !== "all" && <span className="badge badge-neutral">สถานะ: {STATUS_TH[statusFilter] || statusFilter} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setStatusFilter("all")}/></span>}
             {locFilter && <span className="badge badge-warning">ยังไม่จัดเก็บ <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setLocFilter(false)}/></span>}
+            {noPhoto && <span className="badge badge-warning">ยังไม่มีรูป <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setNoPhoto(false)}/></span>}
             {pfFilter && <span className="badge badge-warning">ยังไม่ลง {(LISTING_PLATFORMS.find(c => c.id === pfFilter) || {}).name} <Icons.X size={10} style={{ cursor: "pointer", marginLeft: 4 }} onClick={() => setPfFilter("")}/></span>}
             <span className="spacer"/>
             <span><strong className="tnum" style={{ color: "var(--fg)" }}>{filtered.length}</strong> จาก {products.length} รายการ</span>
-            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setNoPhoto(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
           </div>
         )}
       </div>
@@ -3344,7 +3419,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
                   <td className="t-mono" style={{ color: "var(--fg)" }} onClick={() => setOpen(p.sku)}>{p.sku}</td>
                   <td onClick={() => setOpen(p.sku)}>
                     <div className="row" style={{ gap: 10 }}>
-                      <ProductImageThumb sku={p.sku} size={36} radius={8}/>
+                      <ProductImageThumb sku={p.sku} size={36} radius={8} addable/>
                       <div style={{ fontSize: 13, minWidth: 0 }}>
                         {p.name}
                         <PlatformRowToggles product={p} readOnly={!pfEdit || !canDo("editProduct")}/>
@@ -3402,7 +3477,7 @@ function Inventory({ pushToast, density, goTo, focus }) {
               <tr><td colSpan="10" style={{ textAlign: "center", padding: 48, color: "var(--muted)", fontSize: 13 }}>
                 <Icons.Search size={20} style={{ opacity: 0.4, marginBottom: 8 }}/>
                 <div>ไม่พบสินค้าที่ตรงกับตัวกรอง</div>
-                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
+                <button className="btn btn-sm" style={{ marginTop: 12 }} onClick={() => { setQ(""); setCat("ทั้งหมด"); setStatusFilter("all"); setLocFilter(false); setNoPhoto(false); setPfFilter(""); }}>ล้างตัวกรอง</button>
               </td></tr>
             )}
           </tbody>
@@ -4306,6 +4381,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
         <ProductEditModal
           product={PRODUCTS.find(p => p.sku === product.sku) || product}
           onClose={() => setEditOpen(false)}
+          onRename={() => { setEditOpen(false); setRenameOpen(true); }}
           onSave={(changes) => {
             updateProductInStore(product.sku, changes);
             pushToast(`บันทึกการแก้ไข ${product.sku} แล้ว`);
@@ -4352,7 +4428,7 @@ function ProductDrawer({ product, onClose, pushToast }) {
 }
 
 /* Edit an existing product's catalog fields */
-function ProductEditModal({ product, onClose, onSave }) {
+function ProductEditModal({ product, onClose, onSave, onRename }) {
   const cats = useMemo(() => typeof loadCategories === "function" ? loadCategories() : [...new Set(PRODUCTS.map(p => p.cat))], []);
   const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))], []);
   const brands = useMemo(() => [...new Set(PRODUCTS.map(p => p.brand))].filter(Boolean), []);
@@ -4386,7 +4462,15 @@ function ProductEditModal({ product, onClose, onSave }) {
         <div className="modal-head">
           <div>
             <h3>แก้ไขข้อมูลสินค้า</h3>
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}><span className="mono">{product.sku}</span> · ปรับข้อมูลแล้วบันทึก</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <span className="mono">{product.sku}</span>
+              {onRename && canDo("renameSku") && (
+                <button type="button" className="btn btn-sm btn-ghost" style={{ padding: "2px 8px" }} onClick={onRename}>
+                  <Icons.Tag size={12}/> เปลี่ยนรหัส
+                </button>
+              )}
+              · ปรับข้อมูลแล้วบันทึก
+            </div>
           </div>
           <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
         </div>
