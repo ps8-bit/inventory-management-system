@@ -147,6 +147,8 @@ function telegramText(a: any, by: string): string {
   return out.join("\n").slice(0, 4000);
 }
 
+let _tgLastError = "";
+
 // Chat ids: the secret wins; otherwise the ones remembered in app_state.
 async function telegramChats(admin: any): Promise<string[]> {
   const env = (Deno.env.get("TELEGRAM_CHAT_ID") || "").split(",").map((c) => c.trim()).filter(Boolean);
@@ -164,7 +166,8 @@ async function discoverTelegramChats(admin: any): Promise<string[]> {
   try {
     const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?allowed_updates=[]`);
     const j: any = await r.json().catch(() => ({}));
-    if (!j.ok) { console.error("telegram getUpdates", r.status, j.description); return []; }
+    if (!j.ok) { _tgLastError = `getUpdates ${r.status}: ${j.description || ""}`; console.error(_tgLastError); return []; }
+    if (!(j.result || []).length) _tgLastError = "getUpdates returned no updates";
     // Groups win. With no group yet, fall back to private chats with the bot
     // (the admin pressed /start on it) — the admin's test is what links them.
     const groups = new Map<string, string>();
@@ -188,7 +191,7 @@ async function discoverTelegramChats(admin: any): Promise<string[]> {
       });
     }
     return ids;
-  } catch (e) { console.error("telegram getUpdates", e); return []; }
+  } catch (e) { _tgLastError = "getUpdates threw: " + String(e); console.error(_tgLastError); return []; }
 }
 
 async function sendTelegram(chats: string[], texts: string[]): Promise<{ sent: number; failed: number; error?: string } | null> {
@@ -204,7 +207,7 @@ async function sendTelegram(chats: string[], texts: string[]): Promise<{ sent: n
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id, text, parse_mode: "HTML", disable_web_page_preview: true }),
         });
-        if (r.ok) sent++; else { failed++; console.error("telegram", r.status, await r.text().catch(() => "")); }
+        if (r.ok) sent++; else { failed++; _tgLastError = `sendMessage ${r.status}: ` + (await r.text().catch(() => "")).slice(0, 200); console.error(_tgLastError); }
       } catch (e) { failed++; console.error("telegram", e); }
     }
   }
@@ -253,7 +256,16 @@ Deno.serve(async (req) => {
     if (!hasTelegram || !tgAlerts.length) return null;
     let chats = await telegramChats(admin);
     if (!chats.length && test) chats = await discoverTelegramChats(admin);
-    return sendTelegram(chats, tgAlerts.map((a: any) => telegramText(a, by)));
+    const res = await sendTelegram(chats, tgAlerts.map((a: any) => telegramText(a, by)));
+    // Leave the outcome of an admin test where the owner (and support) can see it.
+    if (test) {
+      await admin.from("app_state").upsert({
+        key: "telegram_status",
+        value: { at: new Date().toISOString(), chats: chats.length, result: res, lastError: _tgLastError },
+        updated_at: new Date().toISOString(),
+      });
+    }
+    return res;
   })();
   if (!hasPush) return json({ ok: true, devices: 0, sent: 0, telegram: await telegramP });
 
