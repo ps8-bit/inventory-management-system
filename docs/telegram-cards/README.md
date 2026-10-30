@@ -14,7 +14,7 @@ Every sample below was sent to the group as a demo (marked "ทดสอบ"); n
 | A | One card per item (sendPhoto per line) | Demo only (DEMO-004) | — |
 | B | Text + small thumbnail on the right (link preview) | Demo only (DEMO-005) — 1 photo max | — |
 | C | Pick-list image, photo beside each line | Demo only (DEMO-006/007/008) | `C-picklist-*.png` |
-| E | Branded card (PS TACTICAL header, platform badge, chips) | Demo only (DEMO-009) — **owner's preferred direction** | `E-branded-card.png`, `E-branded-card.html` |
+| E | Branded card (PS TACTICAL header, platform badge, chips) — new / edit / cancel | Demo only (DEMO-009) — **owner's preferred direction** | `E-branded-card*.png`, `E-branded-card*.html` |
 
 ## 1 — Text message (live)
 
@@ -54,6 +54,18 @@ screenshot) to reproduce `E-branded-card.png`. Thai renders correctly (Noto Sans
 - Chips: status · ลูกค้า · ส่งภายใน · โดย
 - Rows: number · 110 px rounded photo · SKU · name · quantity box (orange when ≥ 2)
 - Footer: "⚠ เช็คสินค้า สี/ไซส์ ให้ตรงก่อนแพ็ค" + "N รายการ · N ชิ้น"
+
+### E — edit version (`E-branded-card-edit.*`)
+Yellow strip + "แก้ไขแล้ว — เช็คใหม่" chip. Each changed line carries a tag —
+**เพิ่มใหม่** (green, box `+N` orange), **แก้จำนวน** (box `from → to`, orange when it
+went up, red when down), **เอาออก** (row faded, SKU struck through, box `N → 0` red).
+Changed fields (e.g. address) get a pale-yellow row: old struck through → new bold.
+Footer: "⚠ เช็คสินค้าใหม่อีกครั้งก่อนแพ็ค" + "เปลี่ยน N รายการ · N ข้อมูล".
+
+### E — cancel version (`E-branded-card-cancel.*`)
+Red strip + "ยกเลิกแล้ว" chip, then a full-width red **ห้ามส่ง** banner
+("ถ้าแพ็คแล้ว ให้แกะ และนำสินค้ากลับที่เดิม"), the order's lines as on the new card,
+dark-red footer "⛔ ไม่ต้องแพ็ค / ไม่ต้องส่ง" + totals.
 
 Next: owner is designing their own look; build the chosen design into `order-push`
 with a Thai-capable server-side renderer.
