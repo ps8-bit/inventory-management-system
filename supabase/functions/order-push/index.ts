@@ -281,6 +281,18 @@ function cardAssets(): Promise<any[]> {
   return _cardReady;
 }
 
+async function sampleItems(admin: any): Promise<any[]> {
+  try {
+    const { data } = await admin.from("app_state").select("key").like("key", "img:%").limit(40);
+    const skus = (data || []).map((r: any) => r.key.slice(4)).slice(0, 3);
+    if (!skus.length) return [];
+    const { data: prods } = await admin.from("products").select("sku, name").in("sku", skus);
+    const name: Record<string, string> = {};
+    (prods || []).forEach((p: any) => { name[p.sku] = p.name; });
+    return skus.map((sku: string, i: number) => ({ sku, name: name[sku] || "", qty: i === 0 ? 2 : 1 }));
+  } catch { return []; }
+}
+
 function cardLines(a: any): CardLine[] {
   if (a.kind === "edit") {
     return (Array.isArray(a.diff) ? a.diff : []).map((d: any) => ({
@@ -437,7 +449,9 @@ Deno.serve(async (req) => {
 
   const by = test ? "" : str((user.user_metadata as any)?.name || (user.user_metadata as any)?.full_name || "", 30);
   // The group is shared, so only an admin's test button posts to it.
-  const tgAlerts = test && role !== "admin" ? [] : alerts;
+  let tgAlerts = test && role !== "admin" ? [] : alerts;
+  // The admin's test shows a real card: three products that have photos.
+  if (test && tgAlerts.length) tgAlerts = [{ ...tgAlerts[0], short: "TEST", channel: "ทดสอบ", items: await sampleItems(admin) }];
   const telegramP = (async () => {
     if (!hasTelegram || !tgAlerts.length) return null;
     let chats = await telegramChats(admin);
