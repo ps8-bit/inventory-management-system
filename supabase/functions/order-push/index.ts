@@ -202,21 +202,90 @@ async function discoverTelegramChats(admin: any): Promise<string[]> {
   } catch (e) { _tgLastError = "getUpdates threw: " + String(e); console.error(_tgLastError); return []; }
 }
 
-async function sendTelegram(chats: string[], texts: string[]): Promise<{ sent: number; failed: number; error?: string } | null> {
+type TgPhoto = { url: string; caption: string };
+type TgMessage = { text: string; photos: TgPhoto[] };
+
+// Lines a packer has to go and pick: every line of a new order, and the lines
+// an edit added or raised. Removals and cancels stay text-only.
+function photoLines(a: any): { sku: string; name: string; qty: number }[] {
+  if (a.kind === "new") {
+    return (Array.isArray(a.items) ? a.items : [])
+      .map((i: any) => ({ sku: str(i.sku, 30), name: str(i.name, 60), qty: Number(i.qty) || 0 }));
+  }
+  if (a.kind === "edit") {
+    return (Array.isArray(a.diff) ? a.diff : [])
+      .filter((d: any) => (Number(d.to) || 0) > (Number(d.from) || 0))
+      .map((d: any) => ({ sku: str(d.sku, 30), name: str(d.name, 60), qty: Number(d.to) || 0 }));
+  }
+  return [];
+}
+
+// Product photos live in app_state "img:<sku>" (product-images.jsx). Only
+// http(s) URLs can be fetched by Telegram — data: URLs and missing ones skip.
+async function photoUrls(admin: any, skus: string[]): Promise<Record<string, string>> {
+  const keys = [...new Set(skus.filter(Boolean))].map((s) => "img:" + s);
+  if (!keys.length) return {};
+  const { data } = await admin.from("app_state").select("key, value").in("key", keys);
+  const out: Record<string, string> = {};
+  (data || []).forEach((r: any) => {
+    const u = typeof r.value === "string" ? r.value : "";
+    if (/^https:\/\//.test(u)) out[r.key.slice(4)] = u;
+  });
+  return out;
+}
+
+async function buildTelegramMessages(admin: any, alerts: any[], by: string): Promise<TgMessage[]> {
+  const lines = alerts.map(photoLines);
+  const urls = await photoUrls(admin, lines.flat().map((l) => l.sku));
+  return alerts.map((a, i) => {
+    const seen = new Set<string>();
+    const photos = lines[i]
+      .filter((l) => urls[l.sku] && !seen.has(l.sku) && seen.add(l.sku))
+      .slice(0, 10)
+      .map((l) => ({ url: urls[l.sku], caption: `${l.sku} · ${l.name} × ${l.qty}`.slice(0, 1000) }));
+    return { text: telegramText(a, by), photos };
+  });
+}
+
+async function tgCall(token: string, method: string, body: unknown): Promise<boolean> {
+  const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (r.ok) return true;
+  _tgLastError = `${method} ${r.status}: ` + (await r.text().catch(() => "")).slice(0, 200);
+  console.error(_tgLastError);
+  return false;
+}
+
+// One alert = an album (photo per line, the summary as the first caption) when
+// it has photos and the summary fits a caption; otherwise the album with short
+// captions followed by the text. A failed album still sends the text.
+async function sendOne(token: string, chat_id: string, m: TgMessage): Promise<boolean> {
+  if (!m.photos.length) {
+    return tgCall(token, "sendMessage", { chat_id, text: m.text, parse_mode: "HTML", disable_web_page_preview: true });
+  }
+  const fits = m.text.length <= 1024;
+  const media = m.photos.map((p, i) => (i === 0 && fits
+    ? { type: "photo", media: p.url, caption: m.text, parse_mode: "HTML" }
+    : { type: "photo", media: p.url, caption: p.caption }));
+  const ok = media.length === 1
+    ? await tgCall(token, "sendPhoto", { chat_id, photo: media[0].media, caption: media[0].caption, parse_mode: (media[0] as any).parse_mode })
+    : await tgCall(token, "sendMediaGroup", { chat_id, media });
+  if (ok && fits) return true;
+  return tgCall(token, "sendMessage", { chat_id, text: m.text, parse_mode: "HTML", disable_web_page_preview: true });
+}
+
+async function sendTelegram(chats: string[], messages: TgMessage[]): Promise<{ sent: number; failed: number; error?: string } | null> {
   const token = tgToken();
-  if (!token || !texts.length) return null;
+  if (!token || !messages.length) return null;
   if (!chats.length) return { sent: 0, failed: 0, error: "no group found — post a message in the group, then press test again" };
   let sent = 0, failed = 0;
   for (const chat_id of chats) {
-    for (const text of texts) {   // in order, so a "new" never lands after its "edit"
-      try {
-        const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id, text, parse_mode: "HTML", disable_web_page_preview: true }),
-        });
-        if (r.ok) sent++; else { failed++; _tgLastError = `sendMessage ${r.status}: ` + (await r.text().catch(() => "")).slice(0, 200); console.error(_tgLastError); }
-      } catch (e) { failed++; console.error("telegram", e); }
+    for (const m of messages) {   // in order, so a "new" never lands after its "edit"
+      try { if (await sendOne(token, chat_id, m)) sent++; else failed++; }
+      catch (e) { failed++; console.error("telegram", e); }
     }
   }
   return { sent, failed };
@@ -264,7 +333,7 @@ Deno.serve(async (req) => {
     if (!hasTelegram || !tgAlerts.length) return null;
     let chats = await telegramChats(admin);
     if (!chats.length && test) chats = await discoverTelegramChats(admin);
-    const res = await sendTelegram(chats, tgAlerts.map((a: any) => telegramText(a, by)));
+    const res = await sendTelegram(chats, await buildTelegramMessages(admin, tgAlerts, by));
     // Leave the outcome of an admin test where the owner (and support) can see it.
     if (test) {
       await admin.from("app_state").upsert({
