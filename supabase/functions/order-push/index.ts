@@ -359,25 +359,60 @@ async function tgCall(token: string, method: string, body: unknown): Promise<boo
 // One alert = an album (photo per line, the summary as the first caption) when
 // it has photos and the summary fits a caption; otherwise the album with short
 // captions followed by the text. A failed album still sends the text.
+// Telegram fetches a URL far faster than it takes a multipart upload from the
+// edge (≈4.6 s measured for one 250 KB card). So: put the PNGs in the public
+// bucket under c/, send the links, delete them once Telegram has them. A failed
+// upload falls back to the multipart path.
+let _cardStore: any = null;   // service client, set per request
+
 async function sendCards(token: string, chat_id: string, cards: Uint8Array[], caption: string): Promise<boolean> {
-  const form = new FormData();
-  form.append("chat_id", chat_id);
-  if (cards.length === 1) {
-    form.append("caption", caption);
-    form.append("parse_mode", "HTML");
-    form.append("photo", new Blob([cards[0]], { type: "image/png" }), "card.png");
-  } else {
-    form.append("media", JSON.stringify(cards.map((_, i) => (i === 0
-      ? { type: "photo", media: "attach://c0", caption, parse_mode: "HTML" }
-      : { type: "photo", media: `attach://c${i}` }))));
-    cards.forEach((c, i) => form.append(`c${i}`, new Blob([c], { type: "image/png" }), `card${i}.png`));
+  const paths: string[] = [];
+  let urls: string[] | null = null;
+  if (_cardStore) {
+    try {
+      const stamp = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      urls = [];
+      for (let i = 0; i < cards.length; i++) {
+        const path = `c/${stamp}-${i}.png`;
+        const { error } = await _cardStore.storage.from("product-images")
+          .upload(path, cards[i], { contentType: "image/png", upsert: true });
+        if (error) throw error;
+        paths.push(path);
+        urls.push(_cardStore.storage.from("product-images").getPublicUrl(path).data.publicUrl);
+      }
+    } catch (e) { console.error("card upload", e); urls = null; }
   }
-  const method = cards.length === 1 ? "sendPhoto" : "sendMediaGroup";
-  const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, { method: "POST", body: form });
-  if (r.ok) return true;
-  _tgLastError = `${method} ${r.status}: ` + (await r.text().catch(() => "")).slice(0, 200);
-  console.error(_tgLastError);
-  return false;
+  try {
+    let r: Response;
+    const method = cards.length === 1 ? "sendPhoto" : "sendMediaGroup";
+    if (urls) {
+      const body = cards.length === 1
+        ? { chat_id, photo: urls[0], caption, parse_mode: "HTML" }
+        : { chat_id, media: urls.map((u, i) => (i === 0 ? { type: "photo", media: u, caption, parse_mode: "HTML" } : { type: "photo", media: u })) };
+      r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } else {
+      const form = new FormData();
+      form.append("chat_id", chat_id);
+      if (cards.length === 1) {
+        form.append("caption", caption);
+        form.append("parse_mode", "HTML");
+        form.append("photo", new Blob([cards[0]], { type: "image/png" }), "card.png");
+      } else {
+        form.append("media", JSON.stringify(cards.map((_, i) => (i === 0
+          ? { type: "photo", media: "attach://c0", caption, parse_mode: "HTML" }
+          : { type: "photo", media: `attach://c${i}` }))));
+        cards.forEach((c, i) => form.append(`c${i}`, new Blob([c], { type: "image/png" }), `card${i}.png`));
+      }
+      r = await fetch(`https://api.telegram.org/bot${token}/${method}`, { method: "POST", body: form });
+    }
+    if (r.ok) return true;
+    _tgLastError = `${method} ${r.status}: ` + (await r.text().catch(() => "")).slice(0, 200);
+    console.error(_tgLastError);
+    return false;
+  } finally {
+    if (paths.length) await _cardStore.storage.from("product-images").remove(paths).catch(() => {});
+  }
 }
 
 // Card first (the whole order in one picture, the summary as its caption); then
@@ -428,6 +463,7 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405, headers: cors });
 
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  _cardStore = admin;
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) return json({ ok: false, error: "Unauthorized" }, 401);
@@ -480,7 +516,14 @@ Deno.serve(async (req) => {
     }
     return res;
   })();
-  if (!hasPush) return json({ ok: true, devices: 0, sent: 0, telegram: await telegramP });
+  // Telegram (card render + upload, seconds) finishes after the response, so the
+  // sender's app — and the test button's toast — never wait on it.
+  const tgLater = () => {
+    const er = (globalThis as any).EdgeRuntime;
+    if (er && typeof er.waitUntil === "function") { er.waitUntil(telegramP); return "queued"; }
+    return telegramP;
+  };
+  if (!hasPush) return json({ ok: true, devices: 0, sent: 0, telegram: await tgLater() });
 
   // Skip only the DEVICE that made the change (its own endpoint), not the whole
   // account: the owner edits on the desktop and must still get the alert on
@@ -490,7 +533,7 @@ Deno.serve(async (req) => {
   if (test) q = q.eq("user_id", user.id);
   else if (self) q = q.neq("endpoint", self);
   const { data: subs, error } = await q;
-  if (error) return json({ ok: false, error: error.message }, 500);
+  if (error) { tgLater(); return json({ ok: false, error: error.message }, 500); }
   // Decide by each owner's CURRENT account, never the role the browser stored
   // when push was turned on: a suspended, deleted or demoted employee's phone
   // must stop showing customer names / phones / addresses. Their rows go too.
@@ -531,5 +574,5 @@ Deno.serve(async (req) => {
   }));
   if (dead.length) await admin.from("push_subscriptions").delete().in("endpoint", dead);
 
-  return json({ ok: true, devices: targets.length, sent, failed, removed: dead.length, telegram: await telegramP });
+  return json({ ok: true, devices: targets.length, sent, failed, removed: dead.length, telegram: await tgLater() });
 });
