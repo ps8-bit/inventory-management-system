@@ -495,7 +495,9 @@ Deno.serve(async (req) => {
   let tgAlerts = test && role !== "admin" ? [] : alerts;
   // The admin's test shows a real card: three products that have photos.
   if (test && tgAlerts.length) tgAlerts = [{ ...tgAlerts[0], short: "TEST", channel: "ทดสอบ", items: await sampleItems(admin) }];
-  const telegramP = (async () => {
+  // A function, not a promise: the card render is CPU-bound and would hold up the
+  // phone pushes if it ran alongside them, so it only starts once they're out.
+  const runTelegram = async () => {
     if (!hasTelegram || !tgAlerts.length) return null;
     let chats = await telegramChats(admin);
     if (!chats.length && test) chats = await discoverTelegramChats(admin);
@@ -515,13 +517,14 @@ Deno.serve(async (req) => {
       });
     }
     return res;
-  })();
+  };
   // Telegram (card render + upload, seconds) finishes after the response, so the
   // sender's app — and the test button's toast — never wait on it.
   const tgLater = () => {
     const er = (globalThis as any).EdgeRuntime;
-    if (er && typeof er.waitUntil === "function") { er.waitUntil(telegramP); return "queued"; }
-    return telegramP;
+    const p = runTelegram();
+    if (er && typeof er.waitUntil === "function") { er.waitUntil(p); return "queued"; }
+    return p;
   };
   if (!hasPush) return json({ ok: true, devices: 0, sent: 0, telegram: await tgLater() });
 
