@@ -264,8 +264,8 @@ const FONT_BASE = "https://cdn.jsdelivr.net/npm/@fontsource/prompt@5.0.8/files/"
 const RESVG_WASM = "https://cdn.jsdelivr.net/npm/@resvg/resvg-wasm@2.6.2/index_bg.wasm";
 const CARD_ROWS = 20;
 let _cardReady: Promise<any[]> | null = null;
-// Admin-test progress marker (app_state telegram_stage) — shows where a run died.
-let _tgStage: ((st: string) => PromiseLike<unknown>) | null = null;
+let _cardLoaded = false;   // fonts + wasm are in memory
+let _cardWarm = false;     // ...already when this request started (timing report)
 
 function cardAssets(): Promise<any[]> {
   if (!_cardReady) {
@@ -275,9 +275,8 @@ function cardAssets(): Promise<any[]> {
         if (!r.ok) throw new Error("font " + r.status);
         return { name: sub === "thai" ? "PromptThai" : "Prompt", weight, style: "normal", data: await r.arrayBuffer() };
       })));
-      await _tgStage?.("fonts loaded");
       await initWasm(fetch(RESVG_WASM));
-      await _tgStage?.("wasm ready");
+      _cardLoaded = true;
       return fonts;
     })();
     _cardReady.catch(() => { _cardReady = null; });   // retry on the next alert
@@ -339,9 +338,7 @@ async function renderCards(a: any, by: string, urls: Record<string, string>): Pr
       totalLines: lines.length, totalQty: lines.reduce((n, l) => n + (l.qty || 0), 0),
     };
     const { el, width, height } = buildCard(input);
-    await _tgStage?.("layout page " + (p + 1));
     const svg = await satori(el, { width, height, fonts });
-    await _tgStage?.("svg page " + (p + 1));
     out.push(new Resvg(svg, { fitTo: { mode: "width", value: width } }).render().asPng());
   }
   return out;
@@ -418,6 +415,10 @@ async function sendTelegram(chats: string[], messages: TgMessage[]): Promise<{ s
   return { sent, failed };
 }
 
+// Start loading the card assets the moment the instance boots, so a cold start
+// overlaps the auth + order checks instead of running after them.
+if (tgToken()) cardAssets().catch(() => {});
+
 Deno.serve(async (req) => {
   const cors = corsFor(req);
   const json = (body: unknown, status = 200) =>
@@ -463,18 +464,17 @@ Deno.serve(async (req) => {
     let chats = await telegramChats(admin);
     if (!chats.length && test) chats = await discoverTelegramChats(admin);
     const t0 = performance.now();
-    _tgStage = test ? (st: string) => admin.from("app_state").upsert({ key: "telegram_stage",
-      value: { stage: st, at: new Date().toISOString(), ms: Math.round(performance.now() - t0) }, updated_at: new Date().toISOString() }) : null;
-    await _tgStage?.("start");
+    _cardWarm = _cardLoaded;
     const msgs = await buildTelegramMessages(admin, tgAlerts, by);
-    await _tgStage?.("built " + msgs.map((m) => (m.cards ? m.cards.length + " card" : "no card")).join(","));
+    const tBuilt = performance.now();
     const res = await sendTelegram(chats, msgs);
-    await _tgStage?.("sent");
+    const timing = { build: Math.round(tBuilt - t0), send: Math.round(performance.now() - tBuilt),
+      cards: msgs.map((m) => (m.cards ? m.cards.length : 0)), warm: _cardWarm };
     // Leave the outcome of an admin test where the owner (and support) can see it.
     if (test) {
       await admin.from("app_state").upsert({
         key: "telegram_status",
-        value: { at: new Date().toISOString(), chats: chats.length, result: res, lastError: _tgLastError },
+        value: { at: new Date().toISOString(), chats: chats.length, result: res, lastError: _tgLastError, timing },
         updated_at: new Date().toISOString(),
       });
     }
