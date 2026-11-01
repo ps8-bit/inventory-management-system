@@ -471,28 +471,30 @@ const TASK_OPEN_WORK = ["todo", "doing", "back", "partial"];
 const APP_URL = "https://psstock.vercel.app";
 const OWN_PHOTO = (Deno.env.get("SUPABASE_URL") || "") + "/storage/v1/object/public/product-images/";
 const bkkToday = () => new Date(Date.now() + 7 * 3600e3).toISOString().slice(0, 10);
+// One line, cut BEFORE escaping (a cut after esc() can split an entity; a newline would break the <b> line).
+const one = (v: unknown, n: number) => str(String(v ?? "").replace(/\s+/g, " ").trim(), n);
 const bkkTime = () => new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
 function staffWhat(row: any): string {        // what to do — NEVER expected receive quantities (blind count)
   const d: any = row.data || {};
-  if (row.type === "receive") return `นับรับสินค้า ${(d.lines || []).length} รายการ` + (d.trk ? ` · เลขพัสดุ ${esc(str(d.trk, 40))}` : "");
+  if (row.type === "receive") return `นับรับสินค้า ${(d.lines || []).length} รายการ` + (d.trk ? ` · เลขพัสดุ ${esc(one(d.trk, 40))}` : "");
   if (row.type === "photo") return `ถ่ายรูปสินค้า ${(d.lines || []).length} รายการ`;
   const ev = d.evidence || "one";
   return `เช็กลิสต์ ${(d.items || []).length} ข้อ` + (ev === "item2" ? " · ต้องถ่ายรูปก่อน+หลังทุกข้อ" : ev === "item" ? " · ต้องถ่ายรูปทุกข้อ" : " · ถ่ายรูปหลังทำ 1 รูป");
 }
 function staffGroupText(row: any, kind: string, by: string): string {
-  const who = esc(str(row.assignee_name, 30)) || "ไม่ระบุ";
-  const title = esc(str(row.title, 80));
+  const who = esc(one(row.assignee_name, 30)) || "ไม่ระบุ";
+  const title = esc(one(row.title, 80));
   const head = kind === "assigned" ? `📦 <b>งานใหม่ถึง ${who}</b>`
     : kind === "back" ? `↩️ <b>ส่งกลับให้ ${who} แก้ไข</b>`
     : `⏰ <b>${who} — งานเลยกำหนด</b>`;
   const out = [head, `📝 ${title}`];
-  if (row.due) out.push(`📅 กำหนด ${esc(row.due)}`);
+  if (row.due) out.push(`📅 กำหนด ${esc(one(row.due, 20))}`);
   out.push(`👉 ${staffWhat(row)}`);
-  if (kind === "back") out.push(`💬 ${esc(str((row.data || {}).comment, 200))}`);
+  if (kind === "back") out.push(`💬 ${esc(one((row.data || {}).comment, 200))}`);
   if (kind === "overdue") out.push("กรุณาทำให้เสร็จ หรือกด “ติดปัญหา” ในแอป");
-  if (kind === "assigned" && by) out.push(`มอบหมายโดย ${esc(by)}`);
-  return out.join("\n").slice(0, 3500);
+  if (kind === "assigned" && by) out.push(`มอบหมายโดย ${esc(one(by, 30))}`);
+  return out.join("\n");
 }
 
 async function taskPct(admin: any, row: any) {   // mirrors tasks.jsx taskProgress (manager view)
@@ -523,7 +525,7 @@ function taskPhotos(row: any): { url: string; caption: string }[] {
   if (row.type === "general") {
     const items = d.items || [];
     if ((d.evidence || "one") === "one") add(d.photo, "รูปหลังทำ");
-    else items.forEach((it: string, i: number) => { const p = (d.itemPhotos || [])[i] || {}; add(p.before?.u, `ข้อ ${i + 1} ${it} · ก่อน`); add(p.after?.u, `ข้อ ${i + 1} ${it} · หลัง`); });
+    else items.forEach((it: string, i: number) => { const p = (d.itemPhotos || [])[i] || {}; add(p.before?.u, `ข้อ ${i + 1} ${one(it, 80)} · ก่อน`); add(p.after?.u, `ข้อ ${i + 1} ${one(it, 80)} · หลัง`); });
   } else if (row.type === "photo") {
     (d.lines || []).forEach((l: any) => add((d.shots || {})[l.sku], l.sku));
   } else {
@@ -559,17 +561,17 @@ const KIND_TH: Record<string, [string, string]> = { review: ["📝", "ส่ง�
   done: ["✅", "เสร็จแล้ว"], progress: ["📈", "ความคืบหน้า"], overdue: ["⏰", "เลยกำหนด"] };
 function reportText(row: any, kind: string, pr: any, nPhotos: number): string {
   const d: any = row.data || {}; const [ic, lab] = KIND_TH[kind];
-  const out = [`${ic} <b>${esc(lab)}: ${esc(str(row.title, 80))}</b>`, `👤 ${esc(str(row.assignee_name, 30))} · 🕒 ${esc(bkkTime())}`];
+  const out = [`${ic} <b>${esc(lab)}: ${esc(one(row.title, 80))}</b>`, `👤 ${esc(one(row.assignee_name, 30))} · 🕒 ${esc(bkkTime())}`];
   out.push(row.type === "receive" ? `📦 รับแล้ว ${pr.done}/${pr.total} ชิ้น (${pr.pct}%)` : `✅ ทำแล้ว ${pr.done}/${pr.total} ${pr.unit} (${pr.pct}%)` + (nPhotos ? ` · รูป ${nPhotos} รูป` : ""));
   if (row.type === "receive" && d.round) {
     const g = Object.values(d.round.lines || {}).reduce((s: number, x: any) => s + (Number(x.good) || 0), 0);
     const b = Object.values(d.round.lines || {}).reduce((s: number, x: any) => s + (Number(x.dmg) || 0), 0);
-    out.push(`รอบนี้ ดี ${g}` + (b ? ` · เสีย ${b}` : "") + (d.round.note ? ` · ${esc(str(d.round.note, 120))}` : ""));
+    out.push(`รอบนี้ ดี ${g}` + (b ? ` · เสีย ${b}` : "") + (d.round.note ? ` · ${esc(one(d.round.note, 120))}` : ""));
   }
-  if (kind === "blocked") out.push(`⚠️ ${esc(str(d.reason, 200))}`);
-  if (kind === "overdue") out.push(`กำหนด ${esc(row.due)}`);
-  if (d.note && row.type === "general" && kind === "review") out.push(`📝 ${esc(str(d.note, 200))}`);
-  return out.join("\n").slice(0, 1000);   // always fits a caption
+  if (kind === "blocked") out.push(`⚠️ ${esc(one(d.reason, 200))}`);
+  if (kind === "overdue") out.push(`กำหนด ${esc(one(row.due, 20))}`);
+  if (d.note && row.type === "general" && kind === "review") out.push(`📝 ${esc(one(d.note, 200))}`);
+  return out.join("\n");   // every part is bounded before escaping → fits a caption
 }
 /* Owner's private chat only. Every message carries the "open in app" button. */
 async function tgTaskSend(chat_id: string, taskId: string, text: string, photos: { url: string; caption: string }[]) {
@@ -608,13 +610,16 @@ async function sendTaskPush(admin: any, user: any, role: string, body: any, hasP
     : kind === "review" ? st === "review"
     : kind === "blocked" ? st === "blocked"
     : kind === "done" ? st === "done"
-    : kind === "progress" ? ["general", "photo"].includes(row.type) && TASK_OPEN_WORK.includes(st) && [50, 100].includes(ms) && pr.pct >= ms
+    : kind === "progress" ? ["general", "photo"].includes(row.type) && TASK_OPEN_WORK.includes(st) && [50, 100].includes(ms) && pr.pct >= ms && !(row.type === "photo" && ms === 100)
     : kind === "overdue" ? ["todo", "doing", "back", "partial", "blocked"].includes(st) && !!row.due && row.due < bkkToday()
     : false;
   if (!valid) return { ok: false, error: "bad kind" };
 
   // Claim (dedupe) before sending anything.
-  const key = kind === "progress" ? "p" + ms : kind === "overdue" ? "od" + row.due : String(row.updated_at);
+  // statusAt is stamped by team_tasks_guard on a real status change only, so bumping
+  // updated_at with a no-op update can't mint a fresh key (replay spam).
+  const key = kind === "progress" ? "p" + ms : kind === "overdue" ? "od" + row.due
+    : kind + ":" + String((row.data || {}).statusAt || row.updated_at);
   const { data: cl, error: ce } = await admin.from("team_task_push_log")
     .upsert({ task_id: row.id, kind, key }, { onConflict: "task_id,kind,key", ignoreDuplicates: true }).select("task_id");
   if (ce) { if (kind === "progress" || kind === "overdue") return { ok: true, sent: 0, skipped: "no log" }; }   // phase-3 SQL not run: those two would be unbounded

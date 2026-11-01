@@ -150,14 +150,25 @@ function _tkNotifyDiff(list) {
   if (msgs.length > 3) _tkToast(`มีงานอัปเดต ${msgs.length} รายการ`, "info");
   else msgs.forEach(msg => _tkToast(msg, "info"));
   // Overdue push: whichever device sees it first asks the server once (server dedupes across devices).
+  // At most 3 per refresh (Telegram group ≈20 msg/min); marked sent only once the server
+  // handled it, so the rest — and anything sent before phase-3 SQL ran — go on later refreshes.
   try {
     const k = "ims_task_od_push:" + me.id;
-    const sent = JSON.parse(localStorage.getItem(k) || "{}") || {};
-    overdueTasks(mgr ? list : list.filter(t => t.assignee === me.id)).forEach(t => {
-      if (sent[t.id] === t.due) return;
-      sent[t.id] = t.due; notifyTask(t, "overdue");
-    });
-    localStorage.setItem(k, JSON.stringify(sent));
+    const loadSent = () => { try { return JSON.parse(localStorage.getItem(k) || "{}") || {}; } catch (e) { return {}; } };
+    const sent0 = loadSent();
+    window.__tkOdBusy = window.__tkOdBusy || {};
+    overdueTasks(mgr ? list : list.filter(t => t.assignee === me.id))
+      .filter(t => sent0[t.id] !== t.due && !window.__tkOdBusy[t.id])
+      .slice(0, 3)
+      .forEach(t => {
+        window.__tkOdBusy[t.id] = true;
+        notifyTask(t, "overdue").then(ok => {
+          delete window.__tkOdBusy[t.id];
+          if (!ok) return;
+          const s = loadSent(); s[t.id] = t.due;
+          try { localStorage.setItem(k, JSON.stringify(s)); } catch (e) {}
+        });
+      });
   } catch (e) {}
   // Overdue: once per day per device.
   try {
@@ -249,9 +260,15 @@ function startTaskSync() {
   }
 }
 /* Targeted Web Push (order-push {mode:"task"}); fire-and-forget, never blocks. */
+/* Returns a promise of "the server gave a final answer" — sent, dup, or a definite refusal
+   such as "bad kind" (never rejects). false = unreachable, or skipped because the phase-3
+   log table is missing → worth asking again later. */
 function notifyTask(task, kind, extra) {
-  if (!task || typeof sendOrderPush !== "function") return;
-  try { sendOrderPush({ mode: "task", taskId: task.id, kind, ...(extra || {}) }); } catch (e) {}
+  if (!task || typeof sendOrderPush !== "function") return Promise.resolve(false);
+  try {
+    return Promise.resolve(sendOrderPush({ mode: "task", taskId: task.id, kind, ...(extra || {}) }))
+      .then(r => !!(r && r.data && !r.data.skipped), () => false);
+  } catch (e) { return Promise.resolve(false); }
 }
 /* 50 % / 100 % milestone of a general/photo task → report recipients (server dedupes). */
 function _tkMilestone(before, t) {
@@ -281,11 +298,13 @@ function _tkWorkState(id, state) {
 function tkQueueWork(taskId, local) {
   const q = _tkWorkQ[taskId] || (_tkWorkQ[taskId] = {});
   q.local = local;
+  q.fails = 0;
   clearTimeout(q.timer);
   q.timer = setTimeout(() => _tkFlushWork(taskId), 700);   // coalesce fast taps
   _tkWorkState(taskId, "pending");
 }
-function tkCancelWork(taskId) { const q = _tkWorkQ[taskId]; if (q) { clearTimeout(q.timer); q.local = null; } }
+function tkCancelWork(taskId) { const q = _tkWorkQ[taskId]; if (q) { clearTimeout(q.timer); q.local = null; q.fails = 0; } _tkWorkState(taskId, "idle"); }
+const _tkNetErr = msg => /fetch|network|timeout|load failed|abort/i.test(String(msg || ""));
 async function _tkFlushWork(taskId) {
   const q = _tkWorkQ[taskId];
   if (!q || !q.local) return;
@@ -300,16 +319,32 @@ async function _tkFlushWork(taskId) {
       // The owner changed the checklist: GeneralWork remounts (key) and re-queues remapped state.
       if (((cur.data || {}).items || []).join("\u0001") !== local.sig) { q.local = null; _tkWorkState(taskId, "idle"); return; }
       const before = taskProgress(cur, false).pct;
+      // Merge per slot with the server row: a stale device (or an old dirty draft) must never
+      // erase photos another device already saved. `one`-mode ticks stay local (they can be unticked).
+      const sd = cur.data || {};
+      const srv = sd.itemPhotos || [];
+      const ip = (sd.items || []).map((_, i) => {
+        const a = srv[i] || {}, b = (local.itemPhotos || [])[i] || {};
+        return (a.before || a.after || b.before || b.after) ? { ...a, ...b } : null;
+      });
+      const ev = sd.evidence || "one";
+      const checked = ev === "one" ? local.checked : (sd.items || []).map((_, i) => _tkItemDone({ evidence: ev, itemPhotos: ip }, i));
       const r = await saveTask(cur, { status: cur.status === "todo" ? "doing" : cur.status,
-        data: { checked: local.checked, itemPhotos: local.itemPhotos, photo: local.photo || "" } }, null);
+        data: { checked, itemPhotos: ip, photo: local.photo || sd.photo || "" } }, null);
       if (r.ok) {
+        q.fails = 0;
         if (q.local === local) q.local = null;   // edits made meanwhile stay queued
         _tkWorkState(taskId, q.local ? "pending" : "saved");
         _tkMilestone(before, r.task);
         return;
       }
       if (r.conflict) continue;                  // saveTask already refreshed the cache
-      _tkWorkState(taskId, "offline");           // network / RLS — keep it, retry later
+      _tkWorkState(taskId, "offline");
+      // A network error keeps retrying; a refusal (RLS / guard / SQL) stops after 3 tries.
+      if (!_tkNetErr(r.error)) {
+        q.fails = (q.fails || 0) + 1;
+        if (q.fails >= 3) { clearTimeout(q.timer); _tkToast("บันทึกความคืบหน้าไม่สำเร็จ: " + r.error, "error"); return; }
+      }
       clearTimeout(q.timer); q.timer = setTimeout(() => _tkFlushWork(taskId), 15000);
       return;
     }
@@ -573,7 +608,7 @@ const TK_SHOP = () => {
   const n = window._DB_STORE && window._DB_STORE.name;
   return (n && n !== "ชื่อร้านค้า / คลังสินค้า") ? n : (window.__storeName || "PS TACTICAL");
 };
-const _tkFmt = ms => new Date(ms).toLocaleString("th-TH", { day: "numeric", month: "short", year: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const _tkFmt = ms => new Date(ms).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short", year: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 function _tkFit(g, text, maxW) {
   if (g.measureText(text).width <= maxW) return text;
   let s = text;
@@ -619,7 +654,9 @@ async function tkWatermark(shot, title, label) {
   const fs = Math.max(14, Math.round(Math.min(W, H) * 0.034));
   const lh = Math.round(fs * 1.35), pad = Math.round(fs * 0.7);
   const bh = pad * 2 + rows.length * lh;
-  try { if (document.fonts && document.fonts.load) await document.fonts.load(`600 ${fs}px "IBM Plex Sans Thai"`); } catch (e) {}
+  try {
+    if (document.fonts && document.fonts.load) await Promise.all([document.fonts.load(`600 ${fs}px "IBM Plex Sans Thai"`), document.fonts.load(`400 ${fs}px "IBM Plex Sans Thai"`)]);
+  } catch (e) {}
   g.fillStyle = "rgba(0,0,0,.58)"; g.fillRect(0, H - bh, W, bh);
   g.fillStyle = "#e8650f"; g.fillRect(0, H - bh, Math.max(4, Math.round(fs * 0.3)), bh);
   g.fillStyle = "#fff"; g.textBaseline = "top";
@@ -781,7 +818,7 @@ function TkShotSlot({ m, label, shot, busy, disabled, error, onPick, onRetry, re
             <input type="file" accept="image/*" capture="environment" disabled={disabled || busy} style={{ display: "none" }}
               onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onPick(f); }}/>
           </label>}
-      {has && shot.at && <div style={{ ...tkMuted, fontSize: 11.5, marginTop: 3 }}>{new Date(shot.at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}{shot.by ? " · " + shot.by : ""}</div>}
+      {has && shot.at && <div style={{ ...tkMuted, fontSize: 11.5, marginTop: 3 }}>{new Date(shot.at).toLocaleTimeString("th-TH", { timeZone: "Asia/Bangkok", hour: "2-digit", minute: "2-digit" })}{shot.by ? " · " + shot.by : ""}</div>}
       {error && (
         <div style={{ color: "var(--danger)", fontSize: 12.5, marginTop: 4 }}>
           {error} {onRetry && <button type="button" className={m ? "m-chip" : "btn btn-sm"} onClick={onRetry} style={{ minHeight: 32 }}>ลองอีกครั้ง</button>}
@@ -1456,15 +1493,21 @@ function GeneralWork({ m, task, editable, onSubmit }) {
   const [init] = useStateTk(() => {
     const draft = editable ? _tkDraftLoad(draftKey) : null;
     const pad = arr => items.map((_, i) => (arr || [])[i] || null);
-    if (draft && draft.dirty) {
-      const same = JSON.stringify(draft.items || []) === JSON.stringify(items);
-      const ch = same ? (draft.checked || []) : _tkRemap(draft.items, draft.checked, items, false);
-      return { dirty: true, checked: items.map((_, i) => !!ch[i]),
-        itemPhotos: pad(same ? draft.itemPhotos : _tkRemap(draft.items, draft.itemPhotos, items, null)),
-        photo: draft.photo || "", note: draft.note || "" };
+    // Item modes: the tick is derived from the photos from the start, so opening never writes.
+    const derive = (st) => ev === "one" ? st : { ...st, checked: items.map((_, i) => _tkItemDone({ evidence: ev, itemPhotos: st.itemPhotos }, i)) };
+    // A phase-2 draft ({checked, photo, note}, no `dirty`/`items`) held unsent ticks + the
+    // after-photo: treat it as dirty and assume its items are the current ones.
+    const legacy = !!(draft && draft.dirty === undefined && (Array.isArray(draft.checked) || draft.photo));
+    if (draft && (draft.dirty || legacy)) {
+      const dItems = draft.items || (legacy && (!Array.isArray(draft.checked) || draft.checked.length === items.length) ? items : null);
+      const same = !!dItems && JSON.stringify(dItems) === JSON.stringify(items);
+      const ch = same ? (draft.checked || []) : _tkRemap(dItems, draft.checked, items, false);
+      return derive({ dirty: true, checked: items.map((_, i) => !!ch[i]),
+        itemPhotos: pad(same ? draft.itemPhotos : _tkRemap(dItems, draft.itemPhotos, items, null)),
+        photo: draft.photo || "", note: draft.note || "" });
     }
-    return { dirty: false, checked: items.map((_, i) => !!(d.checked || [])[i]), itemPhotos: pad(d.itemPhotos),
-      photo: d.photo || "", note: (draft && draft.note) || "" };
+    return derive({ dirty: false, checked: items.map((_, i) => !!(d.checked || [])[i]), itemPhotos: pad(d.itemPhotos),
+      photo: d.photo || "", note: (draft && draft.note) || "" });
   });
   const [checked, setChecked] = useStateTk(init.checked);
   const [itemPhotos, setItemPhotos] = useStateTk(init.itemPhotos);
@@ -1553,7 +1596,11 @@ function GeneralWork({ m, task, editable, onSubmit }) {
     sending.current = true;
     tkCancelWork(task.id);
     const ch = ev === "one" ? checked : items.map((_, i) => _tkItemDone(local, i));
-    try { const ok = await onSubmit({ checked: ch, photo, itemPhotos, note: note.trim() }); if (ok) _tkDraftClear(draftKey); } finally { sending.current = false; }
+    try {
+      const ok = await onSubmit({ checked: ch, photo, itemPhotos, note: note.trim() });
+      if (ok) _tkDraftClear(draftKey);
+      else tkQueueWork(task.id, { sig, checked, itemPhotos, photo });   // not sent → keep the live progress flowing
+    } finally { sending.current = false; }
   };
 
   const syncText = sync === "pending" ? "กำลังบันทึก…" : sync === "saved" ? "บันทึกแล้ว ✓" : sync === "offline" ? "ยังไม่ได้ส่งขึ้นระบบ — จะลองใหม่อัตโนมัติ" : "";
@@ -1813,8 +1860,8 @@ function TaskDetail({ m, id, onBack }) {
       if (r.error) { setErr(r.error); return; }
       setPendingShot(p => omit(p, sku));
       if (typeof setProductImage === "function" && !(typeof resolveProductImage === "function" && resolveProductImage(sku))) setProductImage(sku, cap.clean || cap.u);
-      _tkMilestone(before, r.task);
       const all = ((r.task.data || {}).lines || []).every(l => _tkPhotoDone(r.task, l.sku));
+      if (!all) _tkMilestone(before, r.task);   // the last shot closes the task → "done" is the one report
       if (all) await finishPhoto(r.task);
     } catch (e) {
       setErr("อัปโหลดรูปไม่สำเร็จ: " + ((e && e.message) || e));
@@ -1867,7 +1914,7 @@ function TaskDetail({ m, id, onBack }) {
           {task.type === "receive" && !canWork && workOpen && mgr && <div style={tkMuted}>รอ {task.assigneeName} นับ{task.status === "partial" ? "กล่องถัดไป" : ""}</div>}
           {task.type === "receive" && ["done", "cancel"].includes(task.status) && <div style={tkMuted}>{task.status === "done" ? "ปิดงานแล้ว" : "ยกเลิกแล้ว"}</div>}
           {task.type === "general" && (
-            <GeneralWork key={task.id + ":" + (d.items || []).join("\u0001")} m={m} task={task} editable={canWork} onSubmit={submitGeneral}/>
+            <GeneralWork key={task.id + ":" + (d.items || []).join("\u0001") + ":" + (d.evidence || "one")} m={m} task={task} editable={canWork} onSubmit={submitGeneral}/>
           )}
           {task.type === "general" && task.status === "review" && mgr && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>

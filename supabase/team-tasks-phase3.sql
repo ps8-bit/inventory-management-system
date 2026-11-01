@@ -53,9 +53,19 @@ create or replace function public.team_tasks_guard() returns trigger
 language plpgsql as $$
 declare
   k text;
-  ev text; n int; i int;
+  ev text; n int;
+  pat constant text := '%/storage/v1/object/public/product-images/task/%';
   locked text[] := array['lines', 'rounds', 'items', 'trk', 'supplier', 'selfBy', 'recurringId', 'evidence'];
 begin
+  -- Server-owned status-transition stamp (every writer, managers included): the
+  -- order-push replay guard keys on it, so a no-op update can't mint a new key.
+  if new.status is distinct from old.status then
+    new.data := jsonb_set(coalesce(new.data, '{}'::jsonb), '{statusAt}', to_jsonb(clock_timestamp()::text), true);
+  elsif old.data ? 'statusAt' then
+    new.data := jsonb_set(coalesce(new.data, '{}'::jsonb), '{statusAt}', old.data -> 'statusAt', true);
+  else
+    new.data := coalesce(new.data, '{}'::jsonb) - 'statusAt';
+  end if;
   if auth.uid() is null then return new; end if;                     -- service role / cron
   if public.auth_role() in ('admin', 'manager') then return new; end if;
   new.type := old.type;            new.title := old.title;
@@ -79,9 +89,9 @@ begin
   end if;
   -- The timeline is append-only for non-managers.
   if coalesce(jsonb_array_length(new.data -> 'log'), 0) < coalesce(jsonb_array_length(old.data -> 'log'), 0)
-     or (old.data ? 'log' and (select coalesce(jsonb_agg(e order by i), '[]'::jsonb)
-           from jsonb_array_elements(new.data -> 'log') with ordinality x(e, i)
-           where i <= jsonb_array_length(old.data -> 'log')) is distinct from old.data -> 'log') then
+     or (old.data ? 'log' and (select coalesce(jsonb_agg(e order by ord), '[]'::jsonb)
+           from jsonb_array_elements(new.data -> 'log') with ordinality x(e, ord)
+           where ord <= jsonb_array_length(old.data -> 'log')) is distinct from old.data -> 'log') then
     new.data := jsonb_set(new.data, '{log}', coalesce(old.data -> 'log', '[]'::jsonb), true);
   end if;
   -- Evidence and counts are frozen once the report is in (or the task is closed).
@@ -93,13 +103,13 @@ begin
     ev := coalesce(new.data ->> 'evidence', 'one');
     n  := coalesce(jsonb_array_length(new.data -> 'items'), 0);
     if ev = 'one' then
-      if coalesce(new.data ->> 'photo', '') = '' then
+      if coalesce(new.data ->> 'photo', '') not like pat then
         raise exception 'ต้องแนบรูปก่อนส่งรายงาน' using errcode = '23514';
       end if;
     else
-      for i in 0 .. n - 1 loop
-        if coalesce(new.data -> 'itemPhotos' -> i -> 'after' ->> 'u', '') = ''
-           or (ev = 'item2' and coalesce(new.data -> 'itemPhotos' -> i -> 'before' ->> 'u', '') = '') then
+      for ix in 0 .. n - 1 loop
+        if coalesce(new.data -> 'itemPhotos' -> ix -> 'after' ->> 'u', '') not like pat
+           or (ev = 'item2' and coalesce(new.data -> 'itemPhotos' -> ix -> 'before' ->> 'u', '') not like pat) then
           raise exception 'ต้องมีรูปครบทุกข้อก่อนส่งรายงาน' using errcode = '23514';
         end if;
       end loop;
@@ -142,6 +152,7 @@ begin
     get diagnostics c = row_count; n := n + c;
   end loop;
   return n;
+end $$;
 
 -- F. realtime for team_tasks (RLS still applies: staff receive only their own rows)
 do $$
