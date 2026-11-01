@@ -76,10 +76,11 @@ async function _piUpload(sku, blob) {
    task/<random>.<ext> in the same bucket; returns its public URL. Staff can
    insert there (product_images_insert), and a task photo the owner then picks as
    the product photo is already "ours", so setProductImage never re-mirrors it. */
-async function uploadTaskPhoto(file) {
+async function uploadTaskPhoto(file, opts) {
   if (typeof sb === "undefined" || !sb.storage) throw new Error("ไม่ได้เชื่อมต่อฐานข้อมูล");
-  const blob = await _piToBlob(await fileToWebp(file, { maxSize: 1400 }), 1400);
-  const ext = blob.type === "image/webp" ? "webp" : "jpg";
+  // opts.raw: an already-encoded blob (the watermarked JPEG from tasks.jsx) goes up as-is.
+  const blob = opts && opts.raw ? file : await _piToBlob(await fileToWebp(file, { maxSize: 1400 }), 1400);
+  const ext = blob.type === "image/webp" ? "webp" : blob.type === "image/png" ? "png" : "jpg";
   const path = `task/${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.${ext}`;
   const { error } = await sb.storage.from(PI_BUCKET).upload(path, blob, { contentType: blob.type, cacheControl: "31536000", upsert: false });
   if (error) throw error;

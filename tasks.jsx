@@ -49,7 +49,7 @@ const TASKS_LS = "ims_team_tasks_v1";
 const TK_SEEN = "ims_task_seen_v1:";          // + uid → { [taskId]: status }
 const TK_OVERDUE_DAY = "ims_task_overdue_day:"; // + uid → "YYYY-MM-DD" of the last overdue toast
 const TK_DRAFT = "ims_task_draft:";            // + taskId + ":" + slot
-const EMPTY_CNT = { good: "", dmg: "", ev: [], pp: "" };
+const EMPTY_CNT = { good: "", dmg: "", ev: [], pp: "", ppw: "" };
 const TK_WEEKDAYS = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
 const TK_CONFLICT = "งานนี้ถูกแก้จากอีกเครื่อง — โหลดข้อมูลล่าสุดแล้ว ลองอีกครั้ง";
 
@@ -110,11 +110,12 @@ function _tkNotifyDiff(list) {
   const me = _tkMe();
   if (!me.id) return;
   const mgr = canManageTasks();
+  const rec = isTaskReportRecipient();   // report toasts follow the setting; the badge stays for every manager
   const seen = _tkSeenLoad();
   const next = {};
   list.forEach(t => { next[t.id] = t.status; });
+  const msgs = [];
   if (seen) {
-    const msgs = [];
     list.forEach(t => {
       const prev = seen[t.id];
       if (prev === t.status) return;
@@ -123,14 +124,41 @@ function _tkNotifyDiff(list) {
       if (mine && t.status === "todo" && prev === undefined) msgs.push(`งานใหม่: ${t.title}`);
       else if (mine && t.status === "back") msgs.push(`งานถูกส่งกลับ: ${t.title}`);
       else if (mine && prev === "blocked" && t.status !== "blocked" && TASK_OPEN.includes(t.status)) msgs.push(`แก้ปัญหาแล้ว ทำต่อได้: ${t.title}`);
-      else if (mgr && t.status === "review") msgs.push(`รออนุมัติ: ${t.title} · ${t.assigneeName}`);
-      else if (mgr && t.status === "blocked") msgs.push(`ติดปัญหา: ${t.title} — ${d.reason || ""}`);
-      else if (mgr && t.type === "photo" && t.status === "done" && prev !== undefined) msgs.push(`ถ่ายรูปเสร็จ: ${t.title}`);
+      else if (rec && t.status === "review") msgs.push(`รออนุมัติ: ${t.title} · ${t.assigneeName}`);
+      else if (rec && t.status === "blocked") msgs.push(`ติดปัญหา: ${t.title} — ${d.reason || ""}`);
+      else if (rec && t.status === "done" && prev !== undefined && prev !== "done")
+        msgs.push(t.type === "photo" ? `ถ่ายรูปเสร็จ: ${t.title}` : `ปิดงานแล้ว: ${t.title} · ${t.assigneeName}`);
     });
-    if (msgs.length > 3) _tkToast(`มีงานอัปเดต ${msgs.length} รายการ`, "info");
-    else msgs.forEach(msg => _tkToast(msg, "info"));
   }
   _tkSeenSave(next);
+  // Milestones (50 / 100 %) of general/photo tasks for report recipients. First run only records.
+  if (rec) {
+    try {
+      const k = "ims_task_seen_pct_v1:" + me.id;
+      const raw = localStorage.getItem(k);
+      const map = raw ? (JSON.parse(raw) || {}) : {};
+      list.forEach(t => {
+        if (!["general", "photo"].includes(t.type) || !TK_WORK_OPEN.includes(t.status)) return;
+        const pct = taskProgress(t, false).pct;
+        const b = pct >= 100 ? 100 : pct >= 50 ? 50 : 0;
+        if (raw && b > (map[t.id] || 0)) msgs.push(b >= 100 ? `${t.assigneeName} ทำ “${t.title}” ครบ 100% แล้ว` : `${t.assigneeName} ทำ “${t.title}” ไปแล้ว ${pct}%`);
+        map[t.id] = Math.max(b, map[t.id] || 0);
+      });
+      localStorage.setItem(k, JSON.stringify(map));
+    } catch (e) {}
+  }
+  if (msgs.length > 3) _tkToast(`มีงานอัปเดต ${msgs.length} รายการ`, "info");
+  else msgs.forEach(msg => _tkToast(msg, "info"));
+  // Overdue push: whichever device sees it first asks the server once (server dedupes across devices).
+  try {
+    const k = "ims_task_od_push:" + me.id;
+    const sent = JSON.parse(localStorage.getItem(k) || "{}") || {};
+    overdueTasks(mgr ? list : list.filter(t => t.assignee === me.id)).forEach(t => {
+      if (sent[t.id] === t.due) return;
+      sent[t.id] = t.due; notifyTask(t, "overdue");
+    });
+    localStorage.setItem(k, JSON.stringify(sent));
+  } catch (e) {}
   // Overdue: once per day per device.
   try {
     const od = overdueTasks(mgr ? list : list.filter(t => t.assignee === me.id)).length;
@@ -199,6 +227,9 @@ function startTaskSync() {
   spawnRecurringTasks().then(refreshTasks, refreshTasks);
   setInterval(() => { if (document.visibilityState === "visible") refreshTasks(); }, 60000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refreshTasks(); });
+  window.addEventListener("online", () => Object.keys(_tkWorkQ).forEach(_tkFlushWork));
+  try { _tkSubscribe(); } catch (e) { console.warn("[tasks] realtime:", e && e.message); }
+  if (canManageTasks()) loadTaskReportSettings().catch(() => {});
   // Opened by tapping a task notification while the app was closed (sw.js → /?tk=<id>).
   try {
     const init = (window.__IMS_INIT && window.__IMS_INIT.search) || window.location.search || "";
@@ -218,9 +249,132 @@ function startTaskSync() {
   }
 }
 /* Targeted Web Push (order-push {mode:"task"}); fire-and-forget, never blocks. */
-function notifyTask(task, kind) {
+function notifyTask(task, kind, extra) {
   if (!task || typeof sendOrderPush !== "function") return;
-  try { sendOrderPush({ mode: "task", taskId: task.id, kind }); } catch (e) {}
+  try { sendOrderPush({ mode: "task", taskId: task.id, kind, ...(extra || {}) }); } catch (e) {}
+}
+/* 50 % / 100 % milestone of a general/photo task → report recipients (server dedupes). */
+function _tkMilestone(before, t) {
+  if (!t || !["general", "photo"].includes(t.type) || !TK_WORK_OPEN.includes(t.status)) return;
+  const after = taskProgress(t, false).pct;
+  const ms = before < 100 && after >= 100 ? 100 : before < 50 && after >= 50 ? 50 : 0;
+  if (ms) notifyTask(t, "progress", { milestone: ms });
+}
+/* Realtime: its OWN channel — never add team_tasks to 'ims-sync': a binding to a table
+   that isn't published (phase-3 SQL not run) silences the whole channel (2026-10-07). */
+function _tkSubscribe() {
+  if (!_tkDb() || !sb.channel) return;
+  if (sb.getChannels && sb.getChannels().some(c => c.topic === "realtime:ims-tasks")) return;
+  let t = null;
+  sb.channel("ims-tasks")
+    .on("postgres_changes", { event: "*", schema: "public", table: "team_tasks" }, () => { clearTimeout(t); t = setTimeout(refreshTasks, 1200); })
+    .subscribe();
+}
+
+/* ── live worker progress: per-task coalescing queue (whole-row, updated_at-guarded) ── */
+const TK_WORK_OPEN = ["todo", "doing", "back", "partial"];
+const _tkWorkQ = {};                 // taskId → { local, timer, running, again }
+function _tkWorkState(id, state) {
+  window.__tkWork = { ...(window.__tkWork || {}), [id]: state };
+  window.dispatchEvent(new CustomEvent("ims-task-work", { detail: { id, state } }));
+}
+function tkQueueWork(taskId, local) {
+  const q = _tkWorkQ[taskId] || (_tkWorkQ[taskId] = {});
+  q.local = local;
+  clearTimeout(q.timer);
+  q.timer = setTimeout(() => _tkFlushWork(taskId), 700);   // coalesce fast taps
+  _tkWorkState(taskId, "pending");
+}
+function tkCancelWork(taskId) { const q = _tkWorkQ[taskId]; if (q) { clearTimeout(q.timer); q.local = null; } }
+async function _tkFlushWork(taskId) {
+  const q = _tkWorkQ[taskId];
+  if (!q || !q.local) return;
+  if (q.running) { q.again = true; return; }
+  q.running = true;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const local = q.local;
+      if (!local) return;
+      const cur = loadTasks().find(t => t.id === taskId);
+      if (!cur || !TK_WORK_OPEN.includes(cur.status)) { q.local = null; _tkWorkState(taskId, "idle"); return; }
+      // The owner changed the checklist: GeneralWork remounts (key) and re-queues remapped state.
+      if (((cur.data || {}).items || []).join("\u0001") !== local.sig) { q.local = null; _tkWorkState(taskId, "idle"); return; }
+      const before = taskProgress(cur, false).pct;
+      const r = await saveTask(cur, { status: cur.status === "todo" ? "doing" : cur.status,
+        data: { checked: local.checked, itemPhotos: local.itemPhotos, photo: local.photo || "" } }, null);
+      if (r.ok) {
+        if (q.local === local) q.local = null;   // edits made meanwhile stay queued
+        _tkWorkState(taskId, q.local ? "pending" : "saved");
+        _tkMilestone(before, r.task);
+        return;
+      }
+      if (r.conflict) continue;                  // saveTask already refreshed the cache
+      _tkWorkState(taskId, "offline");           // network / RLS — keep it, retry later
+      clearTimeout(q.timer); q.timer = setTimeout(() => _tkFlushWork(taskId), 15000);
+      return;
+    }
+    _tkWorkState(taskId, "offline");
+    clearTimeout(q.timer); q.timer = setTimeout(() => _tkFlushWork(taskId), 15000);
+  } finally {
+    q.running = false;
+    if (q.again) { q.again = false; if (q.local) { clearTimeout(q.timer); q.timer = setTimeout(() => _tkFlushWork(taskId), 300); } }
+  }
+}
+
+/* ── attention wiggle state (exported) ── */
+const TK_ATTN = "ims_task_attn_ack:";   // + uid → [signature strings acknowledged]
+function _tkAttnSet() {
+  const me = _tkMe(); const list = loadTasks();
+  const mine = canManageTasks()
+    ? list.filter(t => t.status === "review" || t.status === "blocked" || taskOverdue(t))   // same set as taskBadgeCount
+    : list.filter(t => t.assignee === me.id && TK_WORK_OPEN.includes(t.status));
+  // A task turning overdue, or a new round of work (status change), counts as new.
+  return mine.map(t => ({ t, sig: t.id + ":" + t.status + (taskOverdue(t) ? ":od" : "") }));
+}
+function taskAttention() {           // "" | "on" | "strong"
+  const me = _tkMe(); if (!me.id) return "";
+  let ack = [];
+  try { ack = JSON.parse(localStorage.getItem(TK_ATTN + me.id) || "[]"); } catch (e) {}
+  if (!Array.isArray(ack)) ack = [];
+  const fresh = _tkAttnSet().filter(x => !ack.includes(x.sig));
+  if (!fresh.length) return "";
+  return fresh.some(x => taskOverdue(x.t) || x.t.status === "todo" || x.t.status === "back" || x.t.status === "blocked") ? "strong" : "on";
+}
+function ackTaskAttention() {
+  const me = _tkMe(); if (!me.id) return;
+  let prev = null;
+  try { prev = localStorage.getItem(TK_ATTN + me.id); } catch (e) {}
+  const next = JSON.stringify(_tkAttnSet().map(x => x.sig).slice(0, 300));
+  if (prev === next) return;    // nothing new → no event (TaskList re-runs this on every list change)
+  try { localStorage.setItem(TK_ATTN + me.id, next); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-tasks-change"));
+}
+
+/* ── who receives task reports (team_task_settings, phase-3 SQL) ── */
+const TK_REPORT_DEFAULT = { roles: ["admin"], users: [], telegram: true };
+let _tkReportCfg = null;
+async function loadTaskReportSettings(force) {
+  if (_tkReportCfg && !force) return _tkReportCfg;
+  if (!_tkDb() || !canManageTasks()) return TK_REPORT_DEFAULT;
+  const { data, error } = await sb.from("team_task_settings").select("*").eq("id", 1).maybeSingle();
+  _tkReportCfg = (error || !data) ? { ...TK_REPORT_DEFAULT, missing: !!error }
+    : { roles: data.report_roles || ["admin"], users: data.report_users || [], telegram: data.telegram !== false };
+  return _tkReportCfg;
+}
+async function saveTaskReportSettings(cfg) {
+  if (!cfg.roles.length && !cfg.users.length) return { error: "ต้องเลือกผู้รับอย่างน้อย 1 คน" };
+  if (!_tkDb()) return { error: "ไม่ได้เชื่อมต่อฐานข้อมูล" };
+  const { data, error } = await sb.from("team_task_settings").upsert({ id: 1, report_roles: cfg.roles, report_users: cfg.users,
+    telegram: !!cfg.telegram, updated_by_name: _tkMe().name, updated_at: new Date().toISOString() }).select();
+  if (error) return { error: /team_task_settings|does not exist|schema cache/i.test(error.message || "") ? "ต้องรัน supabase/team-tasks-phase3.sql ก่อน"
+    : /row-level/i.test(error.message || "") ? "เฉพาะแอดมินเท่านั้น" : error.message };
+  if (!data || !data.length) return { error: "เฉพาะแอดมินเท่านั้น" };     // verified save, never assumed
+  _tkReportCfg = { roles: cfg.roles, users: cfg.users, telegram: !!cfg.telegram };
+  return { ok: true };
+}
+function isTaskReportRecipient() {
+  const me = _tkMe(); const c = _tkReportCfg || TK_REPORT_DEFAULT;
+  return canManageTasks() && (c.roles.includes(me.role) || c.users.includes(me.id));
 }
 function _tkLog(task, text) {
   const me = _tkMe();
@@ -292,14 +446,16 @@ async function loadTaskTemplates() {
   _tplMissing = false;
   return data || [];
 }
-async function createTaskTemplate({ title, items, assignee, assigneeName, weekday }) {
+async function createTaskTemplate({ title, items, assignee, assigneeName, weekday, evidence }) {
   if (!_tkDb()) return { error: "ไม่ได้เชื่อมต่อฐานข้อมูล" };
   const row = {
     id: "P" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    title, items, assignee, assignee_name: assigneeName, weekday, active: true, created_by_name: _tkMe().name
+    title, items, assignee, assignee_name: assigneeName, weekday, active: true, created_by_name: _tkMe().name,
+    ...(evidence && evidence !== "one" ? { evidence } : {})
   };
   const { data, error } = await sb.from("team_task_templates").insert(row).select();
   if (error) {
+    if (/evidence/i.test(error.message || "")) return { error: "ต้องรัน supabase/team-tasks-phase3.sql ก่อน" };
     if (/team_task_templates|does not exist|schema cache/i.test(error.message || "")) { _tplMissing = true; return { error: "ต้องรัน supabase/team-tasks-phase2.sql ก่อน" }; }
     return { error: /row-level security/i.test(error.message) ? "ไม่มีสิทธิ์ตั้งงานประจำ" : error.message };
   }
@@ -410,9 +566,79 @@ function _tkMatchCode(code, lines) {
     return l.sku.toLowerCase() === c || (p && p.barcode && String(p.barcode).toLowerCase() === c);
   });
 }
-async function _tkUpload(file) {
+/* ── phase 3: watermarked, camera-first task photos ──
+   Every task photo gets shop · task, label, SERVER date/time and the staff name
+   burned in. Catalog photos (receive pp, photo-task shots) also go up clean. */
+const TK_SHOP = () => {
+  const n = window._DB_STORE && window._DB_STORE.name;
+  return (n && n !== "ชื่อร้านค้า / คลังสินค้า") ? n : (window.__storeName || "PS TACTICAL");
+};
+const _tkFmt = ms => new Date(ms).toLocaleString("th-TH", { day: "numeric", month: "short", year: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+function _tkFit(g, text, maxW) {
+  if (g.measureText(text).width <= maxW) return text;
+  let s = text;
+  while (s.length > 1 && g.measureText(s + "…").width > maxW) s = s.slice(0, -1);
+  return s + "…";
+}
+function _tkLoadImg(file) {
+  if (typeof createImageBitmap === "function") {
+    return createImageBitmap(file, { imageOrientation: "from-image" }).catch(() => _tkLoadImgEl(file));
+  }
+  return _tkLoadImgEl(file);
+}
+function _tkLoadImgEl(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const i = new Image();
+    i.onload = () => { URL.revokeObjectURL(url); res(i); };
+    i.onerror = () => { URL.revokeObjectURL(url); rej(new Error("เปิดรูปภาพไม่ได้")); };
+    i.src = url;
+  });
+}
+/* Call the moment a file is picked; keep the result for retries so a retry
+   doesn't restamp the time or mis-flag the file as old. */
+async function tkPrepShot(file) {
+  if (!file || !/^image\//.test(file.type || "")) throw new Error("เลือกไฟล์รูปภาพเท่านั้น");
+  if (file.size > 20 * 1024 * 1024) throw new Error("ไฟล์ใหญ่เกิน 20 MB");
+  const at = typeof dbServerTimeMs === "function" ? await dbServerTimeMs() : Date.now();
+  const old = !!(file.lastModified && at - file.lastModified > 15 * 60000);
+  return { file, at, old };
+}
+async function tkWatermark(shot, title, label) {
+  const img = await _tkLoadImg(shot.file);
+  const iw = img.width || img.naturalWidth, ih = img.height || img.naturalHeight;
+  const k = Math.min(1, 1600 / Math.max(iw, ih));
+  const W = Math.max(1, Math.round(iw * k)), H = Math.max(1, Math.round(ih * k));
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  g.drawImage(img, 0, 0, W, H);
+  try { if (img.close) img.close(); } catch (e) {}
+  const me = _tkMe();
+  const rows = [TK_SHOP() + " · " + title, label, _tkFmt(shot.at) + " · ถ่ายโดย " + me.name];
+  if (shot.old) rows.push("⚠ ไฟล์รูปเดิมเมื่อ " + _tkFmt(shot.file.lastModified));
+  const fs = Math.max(14, Math.round(Math.min(W, H) * 0.034));
+  const lh = Math.round(fs * 1.35), pad = Math.round(fs * 0.7);
+  const bh = pad * 2 + rows.length * lh;
+  try { if (document.fonts && document.fonts.load) await document.fonts.load(`600 ${fs}px "IBM Plex Sans Thai"`); } catch (e) {}
+  g.fillStyle = "rgba(0,0,0,.58)"; g.fillRect(0, H - bh, W, bh);
+  g.fillStyle = "#e8650f"; g.fillRect(0, H - bh, Math.max(4, Math.round(fs * 0.3)), bh);
+  g.fillStyle = "#fff"; g.textBaseline = "top";
+  rows.forEach((t, i) => {
+    g.font = `${i === 0 ? 600 : 400} ${fs}px "IBM Plex Sans Thai", "IBM Plex Sans", sans-serif`;
+    g.fillText(_tkFit(g, String(t || ""), W - pad * 3), Math.round(pad * 1.6), H - bh + pad + i * lh);
+  });
+  const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.85));
+  c.width = c.height = 0;
+  if (!blob) throw new Error("แปลงรูปไม่สำเร็จ");
+  return blob;
+}
+/* → { u, clean, at, by, old }. `clean` only when product:true. */
+async function tkCapture(shot, opts) {
+  const title = opts.title, label = opts.label, product = opts.product;
   if (typeof uploadTaskPhoto !== "function") throw new Error("อัปโหลดรูปไม่ได้");
-  return uploadTaskPhoto(file);
+  const blob = await tkWatermark(shot, title, label);
+  const [u, clean] = await Promise.all([uploadTaskPhoto(blob, { raw: true }), product ? uploadTaskPhoto(shot.file) : Promise.resolve("")]);
+  return { u, clean: clean || "", at: new Date(shot.at).toISOString(), by: _tkMe().name, old: shot.old };
 }
 
 /* ── small shared UI ── */
@@ -474,10 +700,105 @@ const tkCard = { background: "var(--surface)", border: "1px solid var(--border)"
 const tkRow = { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: "1px solid var(--border)", flexWrap: "wrap" };
 const tkMuted = { fontSize: 12.5, color: "var(--muted)" };
 
+/* ── phase 3: progress model + bars + ticks ──
+   mgr=true → receive % by quantity (received+damaged ÷ expected); staff never see quantities. */
+function taskProgress(t, mgr) {
+  const d = (t && t.data) || {};
+  if (!t) return { pct: 0, done: 0, total: 0, label: "" };
+  if (t.type === "general") {
+    const items = d.items || [];
+    const done = items.filter((_, i) => _tkItemDone(d, i)).length;
+    return { pct: items.length ? Math.round(100 * done / items.length) : 0, done, total: items.length, label: `ทำแล้ว ${done}/${items.length} ข้อ` };
+  }
+  if (t.type === "photo") {
+    const lines = d.lines || [];
+    const done = lines.filter(l => _tkPhotoDone(t, l.sku)).length;
+    return { pct: lines.length ? Math.round(100 * done / lines.length) : 0, done, total: lines.length, label: `ถ่ายแล้ว ${done}/${lines.length}` };
+  }
+  const lines = d.lines || [];
+  if (mgr) {
+    const exp = lines.reduce((s, l) => s + (l.exp || 0), 0);
+    const got = lines.reduce((s, l) => s + Math.min(l.exp || 0, (l.recv || 0) + (l.dmg || 0)), 0);
+    const pend = d.round ? Object.values(d.round.lines || {}).reduce((s, x) => s + _tkN(x.good) + _tkN(x.dmg), 0) : 0;
+    return { pct: exp ? Math.round(100 * got / exp) : 0, done: got, total: exp,
+      label: `รับแล้ว ${got}/${exp} ชิ้น` + (pend ? ` · รออนุมัติ +${pend}` : "") };
+  }
+  // Staff: SKUs counted in the current round only — never quantities.
+  let counted = 0;
+  if (d.round) counted = Object.values(d.round.lines || {}).filter(x => _tkN(x.good) + _tkN(x.dmg) > 0).length;
+  else {
+    const dr = _tkDraftLoad(_tkDraftKey(t, "r" + ((d.rounds || []).length + 1)));
+    if (dr && dr.cnt) counted = lines.filter(l => { const c = dr.cnt[l.sku]; return c && (_tkN(c.good) + _tkN(c.dmg) > 0); }).length;
+  }
+  return { pct: lines.length ? Math.round(100 * counted / lines.length) : 0, done: counted, total: lines.length, label: `นับแล้ว ${counted}/${lines.length} SKU` };
+}
+function TkTick({ ok, size = 26 }) {
+  return <span aria-hidden="true" style={{ width: size, height: size, borderRadius: "50%", flexShrink: 0, display: "grid", placeItems: "center",
+    border: "2px solid " + (ok ? "var(--success)" : "var(--border)"), background: ok ? "var(--success)" : "transparent", color: "#fff", fontSize: size * 0.55, fontWeight: 700 }}>{ok ? "✓" : ""}</span>;
+}
+function TkProgress({ t, p, mini }) {
+  const pr = p || taskProgress(t, canManageTasks());
+  const full = pr.total > 0 && pr.done >= pr.total;
+  const c = full ? "var(--success)" : "var(--accent)";
+  return (
+    <div style={{ marginTop: mini ? 4 : 0 }}>
+      {!mini && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <span style={tkMuted}>{full ? "✅ ครบแล้ว" : pr.label}</span>
+        <b className="tnum" style={{ color: c, fontSize: 16 }}>{pr.pct}%</b></div>}
+      <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pr.pct} aria-label={pr.label}
+        style={{ height: mini ? 6 : 10, borderRadius: 999, background: "var(--border)", overflow: "hidden", marginTop: mini ? 0 : 6 }}>
+        <i style={{ display: "block", height: "100%", width: Math.min(100, pr.pct) + "%", background: full ? "var(--success)" : "var(--brand-grad, var(--accent))", transition: "width .4s" }}/>
+      </div>
+    </div>
+  );
+}
+/* One photo slot (camera-first). Empty = dashed accent box; filled = cover image;
+   edit mode re-shoots on tap, readOnly opens the viewer. */
+function TkShotSlot({ m, label, shot, busy, disabled, error, onPick, onRetry, readOnly, lockedText }) {
+  const has = !!(shot && shot.u);
+  const box = { position: "relative", display: "block", aspectRatio: "4 / 3", minHeight: 44, borderRadius: 12, overflow: "hidden",
+    border: has ? "1px solid var(--border)" : "2px dashed " + (disabled ? "var(--border)" : "var(--accent)"),
+    background: has ? "var(--surface-2)" : (disabled ? "var(--surface-2)" : "var(--accent-soft)"),
+    cursor: disabled ? "not-allowed" : (readOnly ? (has ? "zoom-in" : "default") : "pointer"), opacity: disabled ? 0.6 : 1 };
+  const inner = (
+    <>
+      {has ? <img src={shot.u} alt={label} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>
+        : <span style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", textAlign: "center", padding: 6, fontSize: 13, fontWeight: 600, color: disabled ? "var(--muted)" : "var(--accent)" }}>
+            {readOnly ? "ไม่มีรูป" : disabled ? (lockedText || label) : "📷 " + label}
+          </span>}
+      {has && <span style={{ position: "absolute", left: 6, top: 6, fontSize: 11, padding: "2px 6px", borderRadius: 6, background: "rgba(0,0,0,.55)", color: "#fff" }}>{label}</span>}
+      {has && shot.old && <span className="badge" style={{ position: "absolute", right: 6, top: 6, background: "var(--warning-soft)", color: "var(--warning)" }}>รูปจากคลังภาพ</span>}
+      {busy && <span style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,.45)", color: "#fff", fontSize: 13 }}>กำลังอัปโหลด…</span>}
+    </>
+  );
+  return (
+    <div>
+      {readOnly
+        ? <div role={has ? "button" : undefined} tabIndex={has ? 0 : undefined} style={box}
+            onClick={() => has && typeof openProductImageViewer === "function" && openProductImageViewer(shot.u, label)}>{inner}</div>
+        : <label style={box} aria-label={label}>
+            {inner}
+            <input type="file" accept="image/*" capture="environment" disabled={disabled || busy} style={{ display: "none" }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onPick(f); }}/>
+          </label>}
+      {has && shot.at && <div style={{ ...tkMuted, fontSize: 11.5, marginTop: 3 }}>{new Date(shot.at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}{shot.by ? " · " + shot.by : ""}</div>}
+      {error && (
+        <div style={{ color: "var(--danger)", fontSize: 12.5, marginTop: 4 }}>
+          {error} {onRetry && <button type="button" className={m ? "m-chip" : "btn btn-sm"} onClick={onRetry} style={{ minHeight: 32 }}>ลองอีกครั้ง</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── list row ── */
 function TaskRow({ t, onOpen }) {
   const ty = TASK_TYPES[t.type] || TASK_TYPES.general;
   const sub = [ty.label, t.assigneeName, t.due ? "กำหนด " + t.due : ""].filter(Boolean).join(" · ");
+  const mgrView = canManageTasks();
+  const pr = taskProgress(t, mgrView);
+  const prFull = pr.total > 0 && pr.done >= pr.total;
+  const staffRecv = t.type === "receive" && !mgrView;
   return (
     <button type="button" onClick={() => onOpen(t.id)}
       style={{ ...tkRow, width: "100%", background: "none", border: "none", borderTop: "1px solid var(--border)", textAlign: "left", cursor: "pointer", font: "inherit", color: "var(--fg)" }}>
@@ -486,7 +807,11 @@ function TaskRow({ t, onOpen }) {
         <span style={{ display: "block", fontWeight: 600, fontSize: 14 }}>{t.title}</span>
         <span style={tkMuted}>{sub}</span>
         {taskOverdue(t) && <span className="badge" style={{ marginLeft: 6, background: "var(--danger-soft)", color: "var(--danger)" }}>เลยกำหนด · เลย {_tkDaysLate(t.due)} วัน</span>}
+        {t.status !== "cancel" && <TkProgress p={pr} mini/>}
       </span>
+      {t.status !== "cancel" && (staffRecv
+        ? <span style={{ ...tkMuted, flexShrink: 0 }}>{pr.label}</span>
+        : <b className="tnum" style={{ color: prFull ? "var(--success)" : "var(--accent)", flexShrink: 0 }}>{pr.pct}%</b>)}
       <TkPill status={t.status}/>
     </button>
   );
@@ -503,6 +828,8 @@ function TaskList({ m, onOpen, onNew }) {
   const me = _tkMe();
   const mgr = canManageTasks();
   const [filter, setFilter] = useStateTk("open");
+  // Opening the list acknowledges the attention wiggle (and again on new arrivals while visible).
+  useEffectTk(() => { ackTaskAttention(); }, [list.length]);
   const mine = mgr ? list : list.filter(t => t.assignee === me.id);
   const shown = mine.filter(t => filter === "open" ? TASK_OPEN.includes(t.status) : !TASK_OPEN.includes(t.status));
   let groups = [[null, shown]];
@@ -519,7 +846,7 @@ function TaskList({ m, onOpen, onNew }) {
   const count = s => mine.filter(t => s.includes(t.status)).length;
   const kpis = [["รอทำ", count(["todo", "doing", "back", "partial"]), "var(--fg)"], ["รออนุมัติ", count(["review"]), "var(--accent)"],
     ["ติดปัญหา", count(["blocked"]), "var(--danger)"], ["เลยกำหนด", overdueTasks(mine).length, "var(--danger)"], ["เสร็จแล้ว", count(["done"]), "var(--success)"]];
-  const filters = [["open", "งานที่ยังไม่ปิด"], ["closed", "ปิดแล้ว"]].concat(mgr ? [["tpl", "งานประจำ"]] : []);
+  const filters = [["open", "งานที่ยังไม่ปิด"], ["closed", "ปิดแล้ว"]].concat(mgr ? [["tpl", "งานประจำ"]] : []).concat(me.role === "admin" ? [["notify", "การแจ้งเตือน"]] : []);
   return (
     <div>
       {_tasksMissing && (
@@ -540,7 +867,7 @@ function TaskList({ m, onOpen, onNew }) {
           <button key={id} type="button" className={"m-chip" + (filter === id ? " on" : "")} onClick={() => setFilter(id)}>{lab}</button>
         ))}
       </div>
-      {filter === "tpl" ? <TemplateList m={m}/> : (
+      {filter === "notify" ? <TaskReportSettings m={m}/> : filter === "tpl" ? <TemplateList m={m}/> : (
         <div style={tkCard}>
           {!shown.length && <div style={{ ...tkMuted, padding: "8px 0" }}>{filter === "open" ? (mgr ? "ยังไม่มีงานค้าง — กด “มอบหมายงาน” เพื่อเริ่ม" : "ไม่มีงานค้าง") : "ยังไม่มีงานที่ปิดแล้ว"}</div>}
           {groups.map(([lab, arr], gi) => arr.length ? (
@@ -589,7 +916,7 @@ function TemplateList({ m }) {
           <span style={{ width: 38, height: 38, borderRadius: 12, background: "var(--accent-soft)", display: "grid", placeItems: "center", fontSize: 18, flexShrink: 0 }} aria-hidden="true">🔁</span>
           <span style={{ flex: 1, minWidth: 140 }}>
             <span style={{ display: "block", fontWeight: 600, fontSize: 14, opacity: t.active ? 1 : 0.55 }}>{t.title}</span>
-            <span style={tkMuted}>ทุกวัน{TK_WEEKDAYS[t.weekday] || "?"} · {t.assignee_name || ""} · เช็กลิสต์ {(t.items || []).length} ข้อ</span>
+            <span style={tkMuted}>ทุกวัน{TK_WEEKDAYS[t.weekday] || "?"} · {t.assignee_name || ""} · เช็กลิสต์ {(t.items || []).length} ข้อ{t.evidence === "item" ? " · รูปทุกข้อ" : t.evidence === "item2" ? " · รูปก่อน+หลัง" : ""}</span>
           </span>
           <button type="button" className={m ? "m-chip" + (t.active ? " on" : "") : "btn btn-sm"} disabled={busy === t.id} onClick={() => toggle(t)}>{t.active ? "เปิด" : "ปิด"}</button>
           <button type="button" className={m ? "m-chip" : "btn btn-sm"} disabled={busy === t.id} style={{ color: "var(--danger)" }} onClick={() => del(t)}>ลบ</button>
@@ -603,6 +930,7 @@ function TemplateList({ m }) {
    `edit` = an existing task to change before work starts (type + assignee are
    fixed then; reassign lives in TaskDetail). `preset` = { type, skus } from an
    "assign from" button. */
+const TK_EVIDENCE = { one: "รูปหลังทำ 1 รูป", item: "รูปทุกข้อ", item2: "รูปก่อน + หลัง ทุกข้อ" };
 function _tkEditSummary(edit, next) {
   const out = [];
   const od = edit.data || {};
@@ -623,6 +951,7 @@ function _tkEditSummary(edit, next) {
     if ((nd.supplier || "") !== (od.supplier || "")) out.push(`ผู้ขาย ${nd.supplier || "-"}`);
   }
   if (edit.type === "general" && (nd.items || []).join("\n") !== (od.items || []).join("\n")) out.push(`เช็กลิสต์ ${(nd.items || []).length} ข้อ`);
+  if (edit.type === "general" && (nd.evidence || "one") !== (od.evidence || "one")) out.push("รูป: " + (TK_EVIDENCE[nd.evidence || "one"] || nd.evidence));
   return out.join(", ") || "ไม่มีการเปลี่ยนแปลง";
 }
 function TkRoleWarn({ person }) {
@@ -649,6 +978,11 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
   const [skuQ, setSkuQ] = useStateTk("");
   const [qty, setQty] = useStateTk("");
   const [items, setItems] = useStateTk(ed ? (ed.items || []).join("\n") : "");
+  const [evidence, setEvidence] = useStateTk(() => {
+    if (ed) return ed.evidence || "one";
+    let v = null; try { v = localStorage.getItem("ims_task_evidence_last"); } catch (e) {}
+    return TK_EVIDENCE[v] ? v : "one";
+  });
   const [repeat, setRepeat] = useStateTk(false);
   const [weekday, setWeekday] = useStateTk(() => new Date().getDay());
   const [newOpen, setNewOpen] = useStateTk(false);
@@ -696,17 +1030,37 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
     const finalTitle = title.trim() || (edit ? edit.title : autoTitle);
     const data = type === "receive" ? { trk: trk.trim(), supplier: supplier.trim(), lines }
       : isPhoto ? { lines: lines.map(l => ({ sku: l.sku })) }
-      : { items: list, checked: edit ? list.map(() => false) : [] };
+      : { items: list, checked: [], evidence, itemPhotos: [] };
 
     if (edit) {
-      const cur = loadTasks().find(t => t.id === edit.id) || edit;
-      const cd = cur.data || {};
-      if (cur.updatedAt !== edit.updatedAt || (cur.type === "receive" && !(["todo", "doing"].includes(cur.status) && !(cd.rounds || []).length && !cd.round)))
-        return setErr("งานนี้เปลี่ยนไปแล้ว (พนักงานส่งรายงาน/แก้จากอีกเครื่อง) — ปิดแล้วเปิดแก้ใหม่");
-      const patch = { title: finalTitle, due, data };
+      const stale = "งานนี้เปลี่ยนไปแล้ว (พนักงานส่งรายงาน/แก้จากอีกเครื่อง) — ปิดแล้วเปิดแก้ใหม่";
+      let r = null;
       setBusy(true);
-      const r = await saveTask(edit, patch, "แก้ไขรายละเอียดงาน: " + _tkEditSummary(edit, patch));
-      setBusy(false);
+      try {
+        if (edit.type === "general") {
+          // Staff save ticks/photos live, so updated_at moves while they work: refuse only when
+          // an OWNER field changed meanwhile, then save against the fresh row (retry on a race).
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const cur = loadTasks().find(t => t.id === edit.id) || edit;
+            const cd = cur.data || {};
+            const sameOwner = cur.title === edit.title && (cur.due || "") === (edit.due || "") && cur.assignee === edit.assignee
+              && JSON.stringify(cd.items || []) === JSON.stringify(ed.items || []) && (cd.evidence || "one") === (ed.evidence || "one");
+            if (!sameOwner || !["todo", "doing", "back"].includes(cur.status)) { setBusy(false); return setErr(stale); }
+            const gdata = { items: list, evidence,
+              checked: _tkRemap(cd.items, cd.checked, list, false),
+              itemPhotos: _tkRemap(cd.items, cd.itemPhotos, list, null) };
+            const patch = { title: finalTitle, due, data: gdata };
+            r = await saveTask(cur, patch, "แก้ไขรายละเอียดงาน: " + _tkEditSummary(edit, patch));
+            if (!r.conflict) break;
+          }
+        } else {
+          const cur = loadTasks().find(t => t.id === edit.id) || edit;
+          const cd = cur.data || {};
+          if (cur.updatedAt !== edit.updatedAt || (cur.type === "receive" && !(["todo", "doing"].includes(cur.status) && !(cd.rounds || []).length && !cd.round))) { setBusy(false); return setErr(stale); }
+          const patch = { title: finalTitle, due, data };
+          r = await saveTask(edit, patch, "แก้ไขรายละเอียดงาน: " + _tkEditSummary(edit, patch));
+        }
+      } finally { setBusy(false); }
       if (r.conflict) { _tkToast(TK_CONFLICT, "warn"); return; }
       if (r.error) return setErr(r.error);
       _tkToast("บันทึกการแก้ไขแล้ว");
@@ -723,13 +1077,15 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
     if (!person) return setErr("เลือกผู้รับผิดชอบ");
     if (type === "general" && repeat) {
       setBusy(true);
-      const r = await createTaskTemplate({ title: finalTitle, items: list, assignee: person.id, assigneeName: person.name, weekday: Number(weekday) });
+      try { localStorage.setItem("ims_task_evidence_last", evidence); } catch (e) {}
+      const r = await createTaskTemplate({ title: finalTitle, items: list, assignee: person.id, assigneeName: person.name, weekday: Number(weekday), evidence });
       setBusy(false);
       if (r.error) return setErr(r.error);
       _tkToast(`ตั้งงานประจำทุกวัน${TK_WEEKDAYS[Number(weekday)]}ให้ ${person.name} แล้ว`);
       onCancel && onCancel();
       return;
     }
+    if (type === "general") { try { localStorage.setItem("ims_task_evidence_last", evidence); } catch (e) {} }
     setBusy(true);
     const r = await createTask({ type, title: finalTitle, data, assignee: person.id, assigneeName: person.name, due });
     setBusy(false);
@@ -823,6 +1179,17 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
         {type === "general" && (
           <textarea className={inp} rows={4} placeholder={"เช็กลิสต์ บรรทัดละ 1 ข้อ\nเช่น เช็ดโต๊ะแพ็ค\nเก็บกล่องเปล่า"} value={items} onChange={e => setItems(e.target.value)} style={{ width: "100%", resize: "vertical" }}/>
         )}
+        {type === "general" && (
+          <div>
+            <div style={{ ...tkMuted, fontWeight: 600, marginBottom: 6 }}>รูปจากเช็กลิสต์</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {["one", "item", "item2"].map(id => (
+                <button key={id} type="button" className={"m-chip" + (evidence === id ? " on" : "")} aria-pressed={evidence === id} onClick={() => setEvidence(id)}>{TK_EVIDENCE[id]}</button>
+              ))}
+            </div>
+            <div style={{ ...tkMuted, marginTop: 6 }}>พนักงานต้องถ่ายรูปตามนี้ก่อนส่งรายงาน — รูปจะประทับวันเวลาและชื่อผู้ถ่าย</div>
+          </div>
+        )}
         {err && <div role="alert" style={{ color: "var(--danger)", fontSize: 13 }}>{err}</div>}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <TkBtn m={m} primary disabled={busy} onClick={submit} style={m ? { flex: 1 } : {}}>{busy ? "กำลังบันทึก…" : edit ? "บันทึกการแก้ไข" : (type === "general" && repeat ? "ตั้งงานประจำ" : "มอบหมาย")}</TkBtn>
@@ -867,9 +1234,9 @@ function ReceiveCount({ m, task, onSubmit, selfApprove }) {
   const inp = m ? "m-input" : "input";
   const positions = useMemoTk(() => (typeof allPositions === "function" ? allPositions().map(p => p.code) : []), []);
   const setLine = (sku, k, v) => updateCnt(c => ({ ...c, [sku]: { ...(c[sku] || EMPTY_CNT), [k]: v } }));
-  const upload = async (key, file, apply) => {
+  const upload = async (key, file, title, label, product, apply) => {
     setBusyKey(key); setErr("");
-    try { apply(await _tkUpload(file)); }
+    try { const shot = await tkPrepShot(file); apply(await tkCapture(shot, { title, label, product })); }
     catch (e) { setErr("อัปโหลดรูปไม่สำเร็จ: " + (e && e.message || e)); }
     finally { setBusyKey(""); }
   };
@@ -907,12 +1274,14 @@ function ReceiveCount({ m, task, onSubmit, selfApprove }) {
     const me = _tkMe();
     const round = {
       by: me.id, byName: me.name, at: new Date().toISOString(), shelf, note: note.trim(), pkg, extras,
-      lines: Object.fromEntries(lines.map(l => [l.sku, { good: _tkN(cOf(l.sku).good), dmg: _tkN(cOf(l.sku).dmg), ev: cOf(l.sku).ev || [], pp: cOf(l.sku).pp || "" }]))
+      lines: Object.fromEntries(lines.map(l => [l.sku, { good: _tkN(cOf(l.sku).good), dmg: _tkN(cOf(l.sku).dmg), ev: cOf(l.sku).ev || [], pp: cOf(l.sku).pp || "", ppw: cOf(l.sku).ppw || "" }]))
     };
     try { const ok = await onSubmit(round, approveNow); if (ok) _tkDraftClear(draftKey); } finally { sending.current = false; }
   };
+  const countedN = lines.filter(l => _tkN(cOf(l.sku).good) + _tkN(cOf(l.sku).dmg) > 0).length;
   return (
     <div>
+      <div style={{ marginBottom: 10 }}><TkProgress p={{ pct: lines.length ? Math.round(100 * countedN / lines.length) : 0, done: countedN, total: lines.length, label: `นับแล้ว ${countedN}/${lines.length} SKU` }}/></div>
       {draft0 && <div style={{ ...tkMuted, marginBottom: 8 }}>กู้คืนการนับที่ค้างไว้บนเครื่องนี้แล้ว</div>}
       {task.status === "back" && d.comment && <div style={{ ...tkCard, background: "var(--danger-soft)", borderColor: "var(--danger)", fontSize: 13, marginBottom: 10 }}>ส่งกลับให้นับใหม่: {d.comment}</div>}
       {(d.rounds || []).length > 0 && <div style={{ ...tkMuted, marginBottom: 8 }}>กล่อง/รอบที่ {(d.rounds || []).length + 1} — นับเฉพาะของที่มาถึงรอบนี้</div>}
@@ -931,7 +1300,7 @@ function ReceiveCount({ m, task, onSubmit, selfApprove }) {
             <input className={inp} placeholder="ชื่อ/ลักษณะสินค้า" value={extraDraft.name} onChange={e => setExtraDraft({ ...extraDraft, name: e.target.value })}/>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <input className={inp} type="number" inputMode="numeric" min="1" value={extraDraft.qty} onChange={e => setExtraDraft({ ...extraDraft, qty: e.target.value })} style={{ width: 90 }}/>
-              <TkPhotoBtn m={m} label="รูป" done={!!extraDraft.photo} busy={busyKey === "x"} onPick={f => upload("x", f, u => setExtraDraft(x => ({ ...x, photo: u })))}/>
+              <TkPhotoBtn m={m} label="รูป" done={!!extraDraft.photo} busy={busyKey === "x"} onPick={f => upload("x", f, task.title, "ของเกิน " + extraDraft.code, false, r => setExtraDraft(x => ({ ...x, photo: r.u })))}/>
               <TkBtn m={false} primary onClick={addExtra}>แจ้งของเกิน</TkBtn>
               <TkBtn m={false} onClick={() => { setExtraDraft(null); setErr(""); }}>ไม่ใช่</TkBtn>
             </div>
@@ -945,6 +1314,7 @@ function ReceiveCount({ m, task, onSubmit, selfApprove }) {
           const hasPic = typeof resolveProductImage === "function" && resolveProductImage(l.sku);
           return (
             <div key={l.sku} style={tkRow}>
+              <TkTick ok={_tkN(c.good) + _tkN(c.dmg) > 0} size={22}/>
               <TkProductPic sku={l.sku} size={m ? 56 : 52}/>
               <span style={{ flex: 1, minWidth: 140 }}>
                 <span className="mono" style={{ fontSize: 13 }}>{l.sku}</span><br/>
@@ -953,10 +1323,10 @@ function ReceiveCount({ m, task, onSubmit, selfApprove }) {
               <label style={tkMuted}>ดี <input className={inp + " tnum"} type="number" inputMode="numeric" min="0" placeholder="0" value={c.good} onChange={e => setLine(l.sku, "good", e.target.value)} style={{ width: 76 }}/></label>
               <label style={tkMuted}>เสีย <input className={inp + " tnum"} type="number" inputMode="numeric" min="0" placeholder="0" value={c.dmg} onChange={e => setLine(l.sku, "dmg", e.target.value)} style={{ width: 76 }}/></label>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", width: "100%" }}>
-                <TkPhotoBtn m={m} label="หลักฐาน" done={(c.ev || []).length > 0} busy={busyKey === "ev" + l.sku} onPick={f => upload("ev" + l.sku, f, u => setLine(l.sku, "ev", [...((cntRef.current[l.sku] || EMPTY_CNT).ev || []), u]))}/>
-                {!hasPic && <TkPhotoBtn m={m} label="ถ่ายรูปสินค้า" done={!!c.pp} busy={busyKey === "pp" + l.sku} onPick={f => upload("pp" + l.sku, f, u => setLine(l.sku, "pp", u))}/>}
+                <TkPhotoBtn m={m} label="หลักฐาน" done={(c.ev || []).length > 0} busy={busyKey === "ev" + l.sku} onPick={f => upload("ev" + l.sku, f, task.title, l.sku + " · หลักฐาน/ของเสีย", false, r => setLine(l.sku, "ev", [...((cntRef.current[l.sku] || EMPTY_CNT).ev || []), r.u]))}/>
+                {!hasPic && <TkPhotoBtn m={m} label="ถ่ายรูปสินค้า" done={!!c.pp} busy={busyKey === "pp" + l.sku} onPick={f => upload("pp" + l.sku, f, task.title, l.sku + " · รูปสินค้า", true, r => updateCnt(cc => ({ ...cc, [l.sku]: { ...(cc[l.sku] || EMPTY_CNT), pp: r.clean || r.u, ppw: r.u } })))}/>}
               </div>
-              <TkThumbs urls={[c.pp, ...(c.ev || [])]} size={48}/>
+              <TkThumbs urls={[c.ppw || c.pp, ...(c.ev || [])]} size={48}/>
             </div>
           );
         })}
@@ -970,7 +1340,7 @@ function ReceiveCount({ m, task, onSubmit, selfApprove }) {
       )}
       <TkSection title="รูปพัสดุ · ชั้นที่วาง · หมายเหตุ">
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-          <TkPhotoBtn m={m} label="รูปพัสดุ" done={pkg.length > 0} busy={busyKey === "pkg"} onPick={f => upload("pkg", f, u => setPkg(a => [...a, u]))}/>
+          <TkPhotoBtn m={m} label="รูปพัสดุ" done={pkg.length > 0} busy={busyKey === "pkg"} onPick={f => upload("pkg", f, task.title, "รูปพัสดุ", false, r => setPkg(a => [...a, r.u]))}/>
           <select className={inp} value={shelf} onChange={e => setShelf(e.target.value)} style={{ flex: 1, minWidth: 160 }}>
             <option value="">เลือกชั้นที่วาง…</option>
             {positions.map(c => <option key={c} value={c}>{c}</option>)}
@@ -994,10 +1364,12 @@ function ReceiveProgress({ task }) {
   const lines = (task.data && task.data.lines) || [];
   return (
     <div style={{ overflowX: "auto" }}>
+      <div style={{ marginBottom: 8 }}><TkProgress p={taskProgress(task, true)}/></div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
-        <thead><tr style={{ color: "var(--muted)" }}>{["SKU", "สั่ง", "รับแล้ว", "เสีย", "ค้าง"].map((h, i) => <th key={h} style={{ textAlign: i ? "right" : "left", padding: "6px 4px", fontWeight: 500 }}>{h}</th>)}</tr></thead>
+        <thead><tr style={{ color: "var(--muted)" }}><th aria-label="ครบ" style={{ width: 24 }}/>{["SKU", "สั่ง", "รับแล้ว", "เสีย", "ค้าง"].map((h, i) => <th key={h} style={{ textAlign: i ? "right" : "left", padding: "6px 4px", fontWeight: 500 }}>{h}</th>)}</tr></thead>
         <tbody>{lines.map(l => (
           <tr key={l.sku} style={{ borderTop: "1px solid var(--border)" }}>
+            <td style={{ padding: "6px 2px" }}>{_tkLeft(l) === 0 ? <TkTick ok size={18}/> : null}</td>
             <td className="mono" style={{ padding: "6px 4px" }}>{l.sku}</td>
             <td style={{ textAlign: "right", padding: "6px 4px" }}>{l.exp}</td>
             <td style={{ textAlign: "right", padding: "6px 4px" }}>{l.recv || 0}</td>
@@ -1036,7 +1408,7 @@ function ReceiveReview({ m, task, onApprove, onBack }) {
               <span style={tkMuted}>สั่ง {l.exp} · รับแล้ว {l.recv || 0} · รอบนี้ ดี {x.good}{x.dmg ? <span style={{ color: "var(--danger)" }}> · เสีย {x.dmg}</span> : null}</span>
             </span>
             <span className="badge" style={{ background: `var(--${tone}-soft)`, color: `var(--${tone})`, fontWeight: 600 }}>{lab}</span>
-            <TkThumbs urls={[x.pp, ...(x.ev || [])]} size={48}/>
+            <TkThumbs urls={[x.ppw || x.pp, ...(x.ev || [])]} size={48}/>
             {x.pp && (
               <label style={{ ...tkMuted, display: "flex", gap: 6, alignItems: "center", width: "100%" }}>
                 <input type="checkbox" checked={!!usePP[l.sku]} onChange={e => setUsePP({ ...usePP, [l.sku]: e.target.checked })}/> ใช้รูปที่พนักงานถ่ายเป็นรูปสินค้า
@@ -1076,45 +1448,163 @@ function ReceiveReview({ m, task, onApprove, onBack }) {
 /* ── general task: checklist + after photo ── */
 function GeneralWork({ m, task, editable, onSubmit }) {
   const d = task.data || {};
+  const items = d.items || [];
+  const ev = d.evidence || "one";
+  const sig = items.join("\u0001");
   const draftKey = _tkDraftKey(task, "g");
-  const [draft0] = useStateTk(() => editable ? _tkDraftLoad(draftKey) : null);
-  const [checked, setChecked] = useStateTk(() => (d.items || []).map((_, i) =>
-    (draft0 && Array.isArray(draft0.checked) && draft0.checked.length === (d.items || []).length) ? !!draft0.checked[i] : !!(d.checked || [])[i]));
-  const [photo, setPhoto] = useStateTk(() => (draft0 && draft0.photo) || d.photo || "");
-  const [note, setNote] = useStateTk(() => (draft0 && draft0.note) || "");
+  // Draft = the offline safety net: { items, checked, itemPhotos, photo, note, dirty }.
+  const [init] = useStateTk(() => {
+    const draft = editable ? _tkDraftLoad(draftKey) : null;
+    const pad = arr => items.map((_, i) => (arr || [])[i] || null);
+    if (draft && draft.dirty) {
+      const same = JSON.stringify(draft.items || []) === JSON.stringify(items);
+      const ch = same ? (draft.checked || []) : _tkRemap(draft.items, draft.checked, items, false);
+      return { dirty: true, checked: items.map((_, i) => !!ch[i]),
+        itemPhotos: pad(same ? draft.itemPhotos : _tkRemap(draft.items, draft.itemPhotos, items, null)),
+        photo: draft.photo || "", note: draft.note || "" };
+    }
+    return { dirty: false, checked: items.map((_, i) => !!(d.checked || [])[i]), itemPhotos: pad(d.itemPhotos),
+      photo: d.photo || "", note: (draft && draft.note) || "" };
+  });
+  const [checked, setChecked] = useStateTk(init.checked);
+  const [itemPhotos, setItemPhotos] = useStateTk(init.itemPhotos);
+  const [photo, setPhoto] = useStateTk(init.photo);
+  const [note, setNote] = useStateTk(init.note);
+  const [busy, setBusy] = useStateTk({});       // slot key → true
+  const [failed, setFailed] = useStateTk({});   // slot key → { shot, msg } (retry re-uses the prepared shot)
+  const [err, setErr] = useStateTk("");
+  const [sync, setSync] = useStateTk(() => ((window.__tkWork || {})[task.id]) || "");
+  const sending = useRefTk(false);
+  const dirtyRef = useRefTk(init.dirty);
+  const lastWork = useRefTk(null);
+  const stRef = useRefTk(null);
+  stRef.current = { checked, itemPhotos, photo, note };
+
+  // Item modes: the tick follows the photos, so legacy readers of `checked` stay consistent.
+  useEffectTk(() => {
+    if (ev === "one") return;
+    const nc = items.map((_, i) => _tkItemDone({ evidence: ev, itemPhotos }, i));
+    if (JSON.stringify(nc) !== JSON.stringify(checked)) setChecked(nc);
+  }, [itemPhotos]);
+  // Every local change: draft first (survives reload), then the live server queue.
   useEffectTk(() => {
     if (!editable) return;
-    if (!checked.some(Boolean) && !photo && !note.trim()) { _tkDraftClear(draftKey); return; }
-    _tkDraftSave(draftKey, { checked, photo, note });
-  }, [checked, photo, note, editable]);
-  const [busy, setBusy] = useStateTk(false);
-  const [err, setErr] = useStateTk("");
-  const sending = useRefTk(false);
+    const work = JSON.stringify([checked, itemPhotos, photo]);
+    const firstRun = lastWork.current === null;
+    const changed = !firstRun && lastWork.current !== work;
+    lastWork.current = work;
+    if (changed) dirtyRef.current = true;
+    if (changed || (firstRun && init.dirty)) tkQueueWork(task.id, { sig, checked, itemPhotos, photo });
+    if (!dirtyRef.current && !note.trim()) return;
+    _tkDraftSave(draftKey, { items, checked, itemPhotos, photo, note, dirty: dirtyRef.current });
+  }, [checked, itemPhotos, photo, note, editable]);
+  useEffectTk(() => {
+    const h = e => {
+      if (!e.detail || e.detail.id !== task.id) return;
+      setSync(e.detail.state);
+      if (e.detail.state === "saved" && editable) {
+        dirtyRef.current = false;
+        const s = stRef.current;
+        _tkDraftSave(draftKey, { items, checked: s.checked, itemPhotos: s.itemPhotos, photo: s.photo, note: s.note, dirty: false });
+      }
+    };
+    window.addEventListener("ims-task-work", h);
+    return () => window.removeEventListener("ims-task-work", h);
+  }, []);
+
+  const local = editable ? { ...d, checked, itemPhotos, photo } : d;
+  const pr = taskProgress({ ...task, data: local }, false);
+  const complete = pr.total > 0 && pr.done >= pr.total && (ev !== "one" || !!local.photo);
+
+  const shootSlot = async (key, file, retryShot) => {
+    setBusy(b => ({ ...b, [key]: true })); setFailed(f => omit(f, key)); setErr("");
+    let shot = retryShot;
+    try {
+      if (!shot) shot = await tkPrepShot(file);
+      const parts = key.split(":");                 // "photo" → parts[1] undefined
+      const is = parts[0], k = parts[1];
+      const label = key === "photo" ? "รูปหลังทำ" : `ข้อ ${Number(is) + 1} ${items[Number(is)]} · ${k === "before" ? "ก่อน" : "หลัง"}`;
+      const cap = await tkCapture(shot, { title: task.title, label });
+      const s = { u: cap.u, at: cap.at, by: cap.by, old: cap.old };
+      if (key === "photo") setPhoto(cap.u);
+      else setItemPhotos(arr => { const n = [...arr]; const i = Number(is); n[i] = { ...(n[i] || {}), [k]: s }; return n; });
+    } catch (e) { setFailed(f => ({ ...f, [key]: { shot, msg: (e && e.message) || "อัปโหลดไม่สำเร็จ" } })); }
+    finally { setBusy(b => omit(b, key)); }
+  };
+  const slot = (key, label, shotObj, extra) => {
+    const f = failed[key];
+    return (
+      <TkShotSlot key={key} m={m} label={label} shot={shotObj} busy={!!busy[key]} readOnly={!editable}
+        disabled={!!(extra && extra.disabled)} lockedText={extra && extra.lockedText}
+        error={f ? f.msg : ""} onPick={file => shootSlot(key, file)} onRetry={f && f.shot ? () => shootSlot(key, null, f.shot) : null}/>
+    );
+  };
+
   const submit = async () => {
     if (sending.current) return;
-    if ((d.items || []).some((_, i) => !checked[i])) return setErr("ติ๊กให้ครบทุกข้อก่อนส่ง");
-    if (!photo) return setErr("ถ่ายรูปหลังทำ 1 รูป");
+    if (Object.keys(busy).length) return setErr("รอให้รูปอัปโหลดเสร็จก่อน");
+    if (ev === "one") {
+      if (items.some((_, i) => !checked[i])) return setErr("ติ๊กให้ครบทุกข้อก่อนส่ง");
+      if (!photo) return setErr("ถ่ายรูปหลังทำ 1 รูป");
+    } else {
+      const miss = items.findIndex((_, i) => !_tkItemDone(local, i));
+      if (miss >= 0) return setErr("ข้อ " + (miss + 1) + " ยังไม่มีรูป" + (ev === "item2" ? "ก่อน/หลัง" : ""));
+    }
     sending.current = true;
-    try { const ok = await onSubmit({ checked, photo, note: note.trim() }); if (ok) _tkDraftClear(draftKey); } finally { sending.current = false; }
+    tkCancelWork(task.id);
+    const ch = ev === "one" ? checked : items.map((_, i) => _tkItemDone(local, i));
+    try { const ok = await onSubmit({ checked: ch, photo, itemPhotos, note: note.trim() }); if (ok) _tkDraftClear(draftKey); } finally { sending.current = false; }
   };
+
+  const syncText = sync === "pending" ? "กำลังบันทึก…" : sync === "saved" ? "บันทึกแล้ว ✓" : sync === "offline" ? "ยังไม่ได้ส่งขึ้นระบบ — จะลองใหม่อัตโนมัติ" : "";
+  const ro = local.itemPhotos || [];
   return (
     <div>
       {task.status === "back" && d.comment && <div style={{ ...tkCard, background: "var(--danger-soft)", borderColor: "var(--danger)", fontSize: 13, marginBottom: 10 }}>ส่งกลับแก้ไข: {d.comment}</div>}
-      {(d.items || []).map((it, i) => (
-        <label key={i} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 0", borderTop: "1px solid var(--border)", fontSize: 14 }}>
-          <input type="checkbox" style={{ width: 20, height: 20 }} checked={!!checked[i]} disabled={!editable} onChange={e => setChecked(checked.map((c, j) => j === i ? e.target.checked : c))}/> {it}
-        </label>
-      ))}
-      <TkThumbs urls={[photo]} size={96}/>
+      {editable && (
+        <div style={{ marginBottom: 10 }}>
+          {syncText && <div role="status" style={{ ...tkMuted, fontSize: 11.5, textAlign: "right", color: sync === "offline" ? "var(--warning)" : "var(--muted)" }}>{syncText}</div>}
+          <TkProgress p={pr}/>
+        </div>
+      )}
+      {ev !== "one" && editable && <div style={{ ...tkMuted, marginBottom: 6 }}>ติ๊กเขียวอัตโนมัติเมื่อถ่ายรูปครบ</div>}
+      {items.map((it, i) => {
+        if (ev === "one") {
+          return (
+            <button key={i} type="button" role="checkbox" aria-checked={!!(local.checked || [])[i]} disabled={!editable}
+              onClick={() => setChecked(checked.map((c, j) => j === i ? !c : c))}
+              style={{ display: "flex", gap: 10, alignItems: "center", width: "100%", minHeight: 44, padding: "8px 0", border: "none", borderTop: "1px solid var(--border)", background: "none", font: "inherit", fontSize: 14, color: "var(--fg)", textAlign: "left", cursor: editable ? "pointer" : "default" }}>
+              <TkTick ok={!!(local.checked || [])[i]}/> <span style={{ flex: 1, minWidth: 0 }}>{it}</span>
+            </button>
+          );
+        }
+        const p = ro[i] || {};
+        const ok = _tkItemDone(local, i);
+        return (
+          <div key={i} style={{ padding: "10px 0", borderTop: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
+              <TkTick ok={ok}/> <span style={{ flex: 1, minWidth: 0, fontWeight: 600 }}>{`${i + 1}. ${it}`}</span>
+            </div>
+            {ev === "item2" ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {slot(i + ":before", editable ? "ก่อนทำ" : "ก่อน", p.before)}
+                {slot(i + ":after", editable ? "หลังทำ" : "หลัง", p.after, { disabled: editable && !(p.before && p.before.u), lockedText: "ถ่าย “ก่อนทำ” ก่อน" })}
+              </div>
+            ) : (
+              <div style={{ maxWidth: m ? "100%" : 260 }}>{slot(i + ":after", "รูปงาน", p.after)}</div>
+            )}
+          </div>
+        );
+      })}
+      {ev === "one" && (editable
+        ? <div style={{ maxWidth: m ? "100%" : 260, marginTop: 10 }}>{slot("photo", "รูปหลังทำ", photo ? { u: photo } : null)}</div>
+        : <TkThumbs urls={[local.photo]} size={96}/>)}
       {d.note && <div style={{ ...tkMuted, marginTop: 6 }}>หมายเหตุ: {d.note}</div>}
       {editable && (
         <>
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-            <TkPhotoBtn m={m} label="รูปหลังทำ" done={!!photo} busy={busy} onPick={async f => { setBusy(true); try { setPhoto(await _tkUpload(f)); } catch (e) { setErr("อัปโหลดรูปไม่สำเร็จ"); } setBusy(false); }}/>
-          </div>
-          <input className={m ? "m-input" : "input"} placeholder="หมายเหตุ (ถ้ามี)" value={note} onChange={e => setNote(e.target.value)} style={{ width: "100%", marginTop: 8 }}/>
+          <input className={m ? "m-input" : "input"} placeholder="หมายเหตุ (ถ้ามี)" value={note} onChange={e => setNote(e.target.value)} style={{ width: "100%", marginTop: 10 }}/>
           {err && <div role="alert" style={{ color: "var(--danger)", fontSize: 13, marginTop: 6 }}>{err}</div>}
-          <div style={{ marginTop: 10 }}><TkBtn m={m} primary onClick={submit}>ส่งรายงาน</TkBtn></div>
+          <div style={{ marginTop: 10 }}><TkBtn m={m} primary disabled={!complete} onClick={submit}>{complete ? "ส่งรายงาน" : "ถ่ายรูปให้ครบก่อนส่ง"}</TkBtn></div>
         </>
       )}
     </div>
@@ -1124,6 +1614,23 @@ function GeneralWork({ m, task, editable, onSubmit }) {
 /* ── photo task: one photo per line; closes itself when every line has one ── */
 const _tkResumeStatus = s => ["todo", "doing", "back", "partial"].includes(s) ? s : "doing";
 const _tkPhotoDone = (t, sku) => !!((((t && t.data) || {}).shots || {})[sku] || (typeof resolveProductImage === "function" && resolveProductImage(sku)));
+function _tkItemDone(d, i) {
+  const ev = d.evidence || "one";
+  const p = (d.itemPhotos || [])[i] || {};
+  if (ev === "one") return !!(d.checked || [])[i];
+  return !!(p.after && p.after.u) && (ev !== "item2" || !!(p.before && p.before.u));
+}
+/* Keep per-item state attached to the item's TEXT when the owner edits the list. */
+function _tkRemap(oldItems, arr, newItems, empty) {
+  const used = new Set();
+  return (newItems || []).map(txt => {
+    const j = (oldItems || []).findIndex((o, k) => o === txt && !used.has(k));
+    if (j < 0) return empty;
+    used.add(j);
+    const v = (arr || [])[j];
+    return v === undefined ? empty : v;
+  });
+}
 function PhotoWork({ m, task, editable, onShot, onFinish, busySku, pending }) {
   const d = task.data || {};
   const lines = d.lines || [];
@@ -1132,7 +1639,7 @@ function PhotoWork({ m, task, editable, onShot, onFinish, busySku, pending }) {
   const allDone = lines.length > 0 && done === lines.length;
   return (
     <div>
-      <div style={{ fontWeight: 600, fontSize: 14 }}>ถ่ายแล้ว <span className="tnum">{done}/{lines.length}</span></div>
+      <TkProgress t={task}/>
       {lines.map(l => {
         const p = _tkProduct(l.sku);
         const shelf = p ? ((typeof productHomeLoc === "function" && productHomeLoc(p)) || "ยังไม่จัดเก็บ") : "";
@@ -1145,7 +1652,7 @@ function PhotoWork({ m, task, editable, onShot, onFinish, busySku, pending }) {
               <span className="mono" style={{ fontSize: 13 }}>{l.sku}</span><br/>
               <span style={tkMuted}>{p ? p.name : "ไม่พบสินค้า"}{shelf ? " · " + shelf : ""}</span>
             </span>
-            {ok ? <span style={{ color: "var(--success)", fontWeight: 600, fontSize: 13 }}>✓ ถ่ายแล้ว</span>
+            {ok ? <TkTick ok/>
               : editable ? (pend
                 ? <button type="button" className={m ? "m-chip" : "btn btn-sm"} disabled={!!busySku} onClick={() => onShot(l.sku, null)}>{busySku === l.sku ? "กำลังบันทึก…" : "บันทึกรูปอีกครั้ง"}</button>
                 : <TkPhotoBtn m={m} label="ถ่ายรูป" busy={!!busySku} onPick={f => onShot(l.sku, f)}/>)
@@ -1235,6 +1742,7 @@ function TaskDetail({ m, id, onBack }) {
         _tkToast(saved.error || "งานนี้ถูกแก้จากอีกเครื่อง — ยังไม่ได้รับเข้า ลองอีกครั้ง", "error");
         return false;
       }
+      if (done) notifyTask(saved.task, "done");
       const reason = `รับเข้าตามงาน ${cur.data.trk || cur.title}`;
       if (rows.length && typeof receiveStockAndRecord === "function") receiveStockAndRecord(rows, reason, { audit: true });
       if (rows.length && typeof applyReceiveLocs === "function") {
@@ -1260,11 +1768,22 @@ function TaskDetail({ m, id, onBack }) {
     if (!selfMode) notifyTask(saved, "review");
     return true;
   };
+  /* Saved against the FRESH row (live progress saves move updated_at); one retry on a
+     race is safe because the patch carries only worker fields. */
   const submitGeneral = async (res) => {
-    if (selfMode) return !!(await save({ status: "done", data: { ...res, selfBy: null } }, "ทำเองและปิดงาน", "ปิดงานแล้ว"));
-    const saved = await save({ status: "review", data: { ...res, comment: "" } }, "ส่งรายงาน", "ส่งรายงานแล้ว รอเจ้าของอนุมัติ");
-    if (saved) notifyTask(saved, "review");
-    return !!saved;
+    setErr("");
+    const patch = selfMode ? { status: "done", data: { ...res, selfBy: null } } : { status: "review", data: { ...res, comment: "" } };
+    let r = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cur = loadTasks().find(t => t.id === task.id) || task;
+      r = await saveTask(cur, patch, selfMode ? "ทำเองและปิดงาน" : "ส่งรายงาน");
+      if (!r.conflict) break;
+    }
+    if (r.conflict) { _tkToast(TK_CONFLICT, "warn"); return false; }
+    if (r.error) { setErr(r.error); return false; }
+    _tkToast(selfMode ? "ปิดงานแล้ว" : "ส่งรายงานแล้ว รอเจ้าของอนุมัติ");
+    notifyTask(r.task, selfMode ? "done" : "review");
+    return true;
   };
 
   /* Photo task: save the shot on the task first, then show it on the product,
@@ -1282,16 +1801,19 @@ function TaskDetail({ m, id, onBack }) {
     shooting.current = true;
     setShotBusy(sku); setErr("");
     try {
-      let url = pendingShot[sku];
-      if (file) { url = await _tkUpload(file); setPendingShot(p => ({ ...p, [sku]: url })); }
-      if (!url) return;
+      let cap = pendingShot[sku];
+      if (file) { cap = await tkCapture(await tkPrepShot(file), { title: task.title, label: sku + " · รูปสินค้า", product: true }); setPendingShot(p => ({ ...p, [sku]: cap })); }
+      if (!cap) return;
       const cur = loadTasks().find(t => t.id === task.id) || task;
       const cd = cur.data || {};
-      const r = await saveTask(cur, { status: cur.status === "todo" ? "doing" : cur.status, data: { shots: { ...(cd.shots || {}), [sku]: url } } }, "ถ่ายรูป " + sku);
+      const before = taskProgress(cur, false).pct;
+      const r = await saveTask(cur, { status: cur.status === "todo" ? "doing" : cur.status,
+        data: { shots: { ...(cd.shots || {}), [sku]: cap.u }, shotsClean: { ...(cd.shotsClean || {}), [sku]: cap.clean } } }, "ถ่ายรูป " + sku);
       if (r.conflict) { _tkToast(TK_CONFLICT, "warn"); return; }
       if (r.error) { setErr(r.error); return; }
       setPendingShot(p => omit(p, sku));
-      if (typeof setProductImage === "function" && !(typeof resolveProductImage === "function" && resolveProductImage(sku))) setProductImage(sku, url);
+      if (typeof setProductImage === "function" && !(typeof resolveProductImage === "function" && resolveProductImage(sku))) setProductImage(sku, cap.clean || cap.u);
+      _tkMilestone(before, r.task);
       const all = ((r.task.data || {}).lines || []).every(l => _tkPhotoDone(r.task, l.sku));
       if (all) await finishPhoto(r.task);
     } catch (e) {
@@ -1324,6 +1846,7 @@ function TaskDetail({ m, id, onBack }) {
             <button type="button" className={m ? "m-chip" : "btn btn-sm"} onClick={() => setEditing(true)}>แก้ไขงาน</button>
           </div>
         )}
+        {task.status !== "cancel" && !(task.type === "general" && canWork) && !(task.type === "receive" && mgr) && <div style={{ marginTop: 10 }}><TkProgress t={task}/></div>}
         {task.status === "blocked" && <div style={{ marginTop: 10, padding: 10, borderRadius: 12, background: "var(--danger-soft)", color: "var(--danger)", fontSize: 13 }}>ติดปัญหา: {d.reason}</div>}
         {task.type === "receive" && mgr && <div style={{ marginTop: 10 }}><ReceiveProgress task={task}/></div>}
       </div>
@@ -1348,7 +1871,7 @@ function TaskDetail({ m, id, onBack }) {
           )}
           {task.type === "general" && task.status === "review" && mgr && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-              <TkBtn m={m} primary onClick={() => save({ status: "done" }, "อนุมัติ · ปิดงาน", "ปิดงานแล้ว")}>อนุมัติ</TkBtn>
+              <TkBtn m={m} primary onClick={() => save({ status: "done" }, "อนุมัติ · ปิดงาน", "ปิดงานแล้ว").then(s => { if (s) notifyTask(s, "done"); })}>อนุมัติ</TkBtn>
               <TkBtn m={m} onClick={() => { const c = reason.trim(); if (!c) return setErr("ใส่คอมเมนต์ในช่องด้านล่างก่อนส่งกลับ"); save({ status: "back", data: { comment: c } }, "ส่งกลับแก้ไข: " + c, "ส่งกลับแล้ว").then(s => { if (s) notifyTask(s, "back"); }); setReason(""); }}>ส่งกลับแก้ไข</TkBtn>
             </div>
           )}
@@ -1401,6 +1924,77 @@ function TaskDetail({ m, id, onBack }) {
         ))}
       </div>
       {!m && <div style={{ marginTop: 12 }}><TkBtn onClick={onBack}>← กลับไปรายการงาน</TkBtn></div>}
+    </div>
+  );
+}
+
+/* ── who receives task reports (admin only; shared by both shells) ── */
+function TaskReportSettings({ m }) {
+  const [cfg, setCfg] = useStateTk(null);
+  const [people, setPeople] = useStateTk([]);
+  const [busy, setBusy] = useStateTk(false);
+  const [test, setTest] = useStateTk(null);
+  const [testing, setTesting] = useStateTk(false);
+  useEffectTk(() => {
+    loadTaskReportSettings(true).then(c => setCfg({ roles: [...c.roles], users: [...c.users], telegram: c.telegram !== false, missing: !!c.missing }));
+    loadTaskAssignees().then(list => setPeople((list || []).filter(p => p.role === "admin" || p.role === "manager")));
+  }, []);
+  if (!cfg) return <div style={tkCard}><div style={tkMuted}>กำลังโหลด…</div></div>;
+  const toggleIn = (key, v) => setCfg(c => ({ ...c, [key]: c[key].includes(v) ? c[key].filter(x => x !== v) : [...c[key], v] }));
+  const save = async () => {
+    setBusy(true);
+    const r = await saveTaskReportSettings(cfg);
+    setBusy(false);
+    if (r.error) _tkToast(r.error, "error"); else _tkToast("บันทึกผู้รับรายงานแล้ว");
+  };
+  const runTest = async () => {
+    if (typeof sendOrderPush !== "function") return setTest({ error: "ส่งไม่ได้" });
+    setTesting(true); setTest(null);
+    const r = await sendOrderPush({ mode: "task-tg-test" });
+    setTesting(false);
+    setTest(r && r.data ? r.data : { error: (r && r.error && (r.error.message || String(r.error))) || "ส่งไม่สำเร็จ" });
+  };
+  const chk = { display: "flex", gap: 8, alignItems: "center", minHeight: 40, fontSize: 14 };
+  return (
+    <div style={tkCard}>
+      {cfg.missing && (
+        <div style={{ ...tkCard, background: "var(--warning-soft)", borderColor: "var(--warning)", marginBottom: 10, fontSize: 13 }}>
+          ต้องรัน supabase/team-tasks-phase3.sql ก่อน — ตอนนี้ส่งให้แอดมินเท่านั้น
+        </div>
+      )}
+      <div style={{ fontWeight: 700, fontSize: 15 }}>ใครได้รับรายงานงาน</div>
+      <div style={{ ...tkMuted, marginBottom: 8 }}>ส่งรายงาน, เสร็จ/ปิดงาน, ติดปัญหา, เลยกำหนด, ความคืบหน้า 50%/100%</div>
+      <label style={chk}><input type="checkbox" checked={cfg.roles.includes("admin")} onChange={() => toggleIn("roles", "admin")}/> แอดมิน (เจ้าของร้าน)</label>
+      <label style={chk}><input type="checkbox" checked={cfg.roles.includes("manager")} onChange={() => toggleIn("roles", "manager")}/> ผู้จัดการทุกคน</label>
+      <TkSection title="หรือเลือกเฉพาะคน">
+        {!people.length && <div style={tkMuted}>ไม่มีรายชื่อ</div>}
+        {people.map(p => (
+          <label key={p.id} style={chk}><input type="checkbox" checked={cfg.users.includes(p.id)} onChange={() => toggleIn("users", p.id)}/> {p.name} <span style={tkMuted}>· {p.role}</span></label>
+        ))}
+      </TkSection>
+      <TkSection title="Telegram">
+        <label style={chk}><input type="checkbox" checked={!!cfg.telegram} onChange={e => setCfg(c => ({ ...c, telegram: e.target.checked }))}/> ส่ง Telegram ส่วนตัวถึงเจ้าของพร้อมรูป</label>
+        <div style={{ marginTop: 6 }}>
+          <button type="button" className={m ? "m-chip" : "btn btn-sm"} disabled={testing} onClick={runTest}>{testing ? "กำลังทดสอบ…" : "ทดสอบ Telegram เจ้าของ"}</button>
+        </div>
+        {test && (
+          <div role="status" style={{ ...tkCard, background: "var(--surface-2)", marginTop: 8, fontSize: 13 }}>
+            {test.result === "sent" ? <span style={{ color: "var(--success)" }}>ส่งแล้ว — ดูในแชตส่วนตัวกับบอท</span>
+              : test.result === "no-owner-chat" ? (
+                <div>
+                  <div style={{ fontWeight: 600 }}>ยังไม่ได้ตั้ง TELEGRAM_OWNER_CHAT_ID</div>
+                  {(test.candidates || []).map(c => <div key={c.id} className="mono">{(c.name || "-") + " — " + c.id}</div>)}
+                  <ol style={{ margin: "6px 0 0", paddingLeft: 20 }}>
+                    <li>ทักบอทในแชตส่วนตัว (กด Start)</li>
+                    <li>กดทดสอบอีกครั้งเพื่อดู id</li>
+                    <li>ใส่ id ใน Supabase secret TELEGRAM_OWNER_CHAT_ID</li>
+                  </ol>
+                </div>
+              ) : <span style={{ color: "var(--danger)" }}>{test.error || "ส่งไม่สำเร็จ"}</span>}
+          </div>
+        )}
+      </TkSection>
+      <div style={{ marginTop: 14 }}><TkBtn m={m} primary disabled={busy} onClick={save}>{busy ? "กำลังบันทึก…" : "บันทึก"}</TkBtn></div>
     </div>
   );
 }
@@ -1494,5 +2088,7 @@ Object.assign(window, {
   canManageTasks, taskBadgeCount, taskOverdueCount, overdueTasks, skusInOpenTasks, useTasks,
   notifyTask, openTaskFromAnywhere, takePendingTaskOpen, spawnRecurringTasks,
   loadTaskTemplates, createTaskTemplate, setTaskTemplateActive, deleteTaskTemplate,
-  TeamTasks, MTasks, MTaskNew, MTaskDetail
+  TeamTasks, MTasks, MTaskNew, MTaskDetail,
+  taskProgress, TkProgress, TkTick, taskAttention, ackTaskAttention, loadTaskReportSettings, saveTaskReportSettings,
+  isTaskReportRecipient, tkPrepShot, tkCapture, tkQueueWork, tkCancelWork
 });

@@ -1068,7 +1068,7 @@ function App({ user, onLogout, onSwitchUser }) {
             <React.Fragment key={group}>
               <div className="nav-group">{NAV_GROUP_LABELS[group]}</div>
               {items.map(n => (
-                <NavItem key={n.id} item={n} active={page === n.id} onClick={() => goTo(n.id)} badge={badges[n.id]}/>
+                <NavItem key={n.id} item={n} active={page === n.id} onClick={() => goTo(n.id)} badge={badges[n.id]} attn={n.id === "tasks" && typeof taskAttention === "function" ? taskAttention() : ""}/>
               ))}
             </React.Fragment>
           );
@@ -1185,13 +1185,13 @@ function App({ user, onLogout, onSwitchUser }) {
   );
 }
 
-function NavItem({ item, active, onClick, badge }) {
+function NavItem({ item, active, onClick, badge, attn }) {
   const Icon = item.icon;
   return (
     <div className={"nav-item" + (active ? " active" : "")} onClick={onClick}>
       <Icon className="nav-icon" size={16}/>
       <span>{item.label}</span>
-      {badge != null && <span className="nav-badge">{badge}</span>}
+      {badge != null && <span className={"nav-badge" + (attn ? " tk-attn" + (attn === "strong" ? " is-strong" : "") : "")}>{badge}</span>}
     </div>
   );
 }

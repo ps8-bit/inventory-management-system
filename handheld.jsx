@@ -404,8 +404,9 @@ function MPackHome({ ctx }) {
           const n = taskBadgeCount();
           const mgr = typeof canManageTasks === "function" && canManageTasks();
           const od = typeof taskOverdueCount === "function" ? taskOverdueCount() : 0;
+          const at = typeof taskAttention === "function" ? taskAttention() : "";
           return (
-            <button type="button" className={"mh-strip" + (n > 0 ? " is-alert" : "")} onClick={() => ctx.push("tasks")} style={{ marginBottom: 12, width: "100%" }}>
+            <button type="button" className={"mh-strip" + (n > 0 ? " is-alert" : "") + (at ? " tk-attn" + (at === "strong" ? " is-strong" : "") : "")} onClick={() => ctx.push("tasks")} style={{ marginBottom: 12, width: "100%" }}>
               <span style={{ width: 40, height: 40, borderRadius: 12, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}><Icons.Check size={20}/></span>
               <span><b>{mgr ? "งานของทีม" : "งานของฉัน"}</b></span>
               <span className="mh-strip-sep"/>
@@ -647,8 +648,9 @@ function MHome({ ctx }) {
           const n = taskBadgeCount();
           const mgr = typeof canManageTasks === "function" && canManageTasks();
           const od = typeof taskOverdueCount === "function" ? taskOverdueCount() : 0;
+          const at = typeof taskAttention === "function" ? taskAttention() : "";
           return (
-            <button type="button" className={"mh-strip" + (n > 0 ? " is-alert" : "")} onClick={() => ctx.push("tasks")} style={{ marginBottom: 12 }}>
+            <button type="button" className={"mh-strip" + (n > 0 ? " is-alert" : "") + (at ? " tk-attn" + (at === "strong" ? " is-strong" : "") : "")} onClick={() => ctx.push("tasks")} style={{ marginBottom: 12 }}>
               <span style={{ width: 40, height: 40, borderRadius: 12, background: "var(--accent-soft)", color: "var(--accent)", display: "grid", placeItems: "center", flexShrink: 0 }}><Icons.Check size={20}/></span>
               <span><b>{mgr ? "งานของทีม" : "งานของฉัน"}</b></span>
               <span className="mh-strip-sep"/>

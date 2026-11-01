@@ -454,38 +454,171 @@ async function sendTelegram(chats: string[], messages: TgMessage[]): Promise<{ s
 // overlaps the auth + order checks instead of running after them.
 if (tgToken()) cardAssets().catch(() => {});
 
-// ── งานของทีม task pushes ──────────────────────────────────────────────────
-// Targeted, not broadcast: assigned/back/resume go to the assignee, review/
-// blocked/done to every live admin/manager. The caller's own user id is always
-// dropped. `kind` is checked against the row so a client can't spam arbitrary
-// notifications. No customer data, and no `alert` key, so sw.js keeps these out
-// of the order inbox.
-const TASK_KINDS = ["assigned", "back", "resume", "review", "blocked", "done"];
+// ── งานของทีม task pushes (phase 3) ────────────────────────────────────────
+// Targeted, not broadcast. assigned/back/resume → the assignee (only while that
+// account is live); review/blocked/done/progress/overdue → the REPORT RECIPIENTS
+// (team_task_settings, resolved here, never from the client). `kind` is checked
+// against the live row, an old state is refused (120 s, except overdue) and every
+// (task, kind, key) is claimed once in team_task_push_log, so a replay sends nothing.
+// Telegram: the owner's PRIVATE chat (TELEGRAM_OWNER_CHAT_ID) gets reports with the
+// evidence album; the existing staff GROUP gets only text alerts for
+// assigned/back/overdue — never photos, never expected receive quantities.
+// No customer data, and no `alert` key, so sw.js keeps these out of the order inbox.
+const TASK_KINDS = ["assigned", "back", "resume", "review", "blocked", "done", "progress", "overdue"];
+const REPORT_KINDS = ["review", "blocked", "done", "progress", "overdue"];   // → report recipients
+const STAFF_TG_KINDS = ["assigned", "back", "overdue"];
 const TASK_OPEN_WORK = ["todo", "doing", "back", "partial"];
+const APP_URL = "https://psstock.vercel.app";
+const OWN_PHOTO = (Deno.env.get("SUPABASE_URL") || "") + "/storage/v1/object/public/product-images/";
+const bkkToday = () => new Date(Date.now() + 7 * 3600e3).toISOString().slice(0, 10);
+const bkkTime = () => new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+function staffWhat(row: any): string {        // what to do — NEVER expected receive quantities (blind count)
+  const d: any = row.data || {};
+  if (row.type === "receive") return `นับรับสินค้า ${(d.lines || []).length} รายการ` + (d.trk ? ` · เลขพัสดุ ${esc(str(d.trk, 40))}` : "");
+  if (row.type === "photo") return `ถ่ายรูปสินค้า ${(d.lines || []).length} รายการ`;
+  const ev = d.evidence || "one";
+  return `เช็กลิสต์ ${(d.items || []).length} ข้อ` + (ev === "item2" ? " · ต้องถ่ายรูปก่อน+หลังทุกข้อ" : ev === "item" ? " · ต้องถ่ายรูปทุกข้อ" : " · ถ่ายรูปหลังทำ 1 รูป");
+}
+function staffGroupText(row: any, kind: string, by: string): string {
+  const who = esc(str(row.assignee_name, 30)) || "ไม่ระบุ";
+  const title = esc(str(row.title, 80));
+  const head = kind === "assigned" ? `📦 <b>งานใหม่ถึง ${who}</b>`
+    : kind === "back" ? `↩️ <b>ส่งกลับให้ ${who} แก้ไข</b>`
+    : `⏰ <b>${who} — งานเลยกำหนด</b>`;
+  const out = [head, `📝 ${title}`];
+  if (row.due) out.push(`📅 กำหนด ${esc(row.due)}`);
+  out.push(`👉 ${staffWhat(row)}`);
+  if (kind === "back") out.push(`💬 ${esc(str((row.data || {}).comment, 200))}`);
+  if (kind === "overdue") out.push("กรุณาทำให้เสร็จ หรือกด “ติดปัญหา” ในแอป");
+  if (kind === "assigned" && by) out.push(`มอบหมายโดย ${esc(by)}`);
+  return out.join("\n").slice(0, 3500);
+}
+
+async function taskPct(admin: any, row: any) {   // mirrors tasks.jsx taskProgress (manager view)
+  const d: any = row.data || {};
+  if (row.type === "general") {
+    const items = Array.isArray(d.items) ? d.items : []; const ev = d.evidence || "one";
+    const ip = Array.isArray(d.itemPhotos) ? d.itemPhotos : []; const ch = Array.isArray(d.checked) ? d.checked : [];
+    const done = items.filter((_: any, i: number) => ev === "one" ? !!ch[i]
+      : !!(ip[i]?.after?.u) && (ev !== "item2" || !!(ip[i]?.before?.u))).length;
+    return { pct: items.length ? Math.round(100 * done / items.length) : 0, done, total: items.length, unit: "ข้อ" };
+  }
+  if (row.type === "photo") {
+    const lines = Array.isArray(d.lines) ? d.lines : [];
+    const urls = await photoUrls(admin, lines.map((l: any) => l.sku));
+    const done = lines.filter((l: any) => (d.shots || {})[l.sku] || urls[l.sku]).length;
+    return { pct: lines.length ? Math.round(100 * done / lines.length) : 0, done, total: lines.length, unit: "รายการ" };
+  }
+  const lines = Array.isArray(d.lines) ? d.lines : [];
+  const exp = lines.reduce((s: number, l: any) => s + (Number(l.exp) || 0), 0);
+  const got = lines.reduce((s: number, l: any) => s + Math.min(Number(l.exp) || 0, (Number(l.recv) || 0) + (Number(l.dmg) || 0)), 0);
+  return { pct: exp ? Math.round(100 * got / exp) : 0, done: got, total: exp, unit: "ชิ้น" };
+}
+/* Evidence photos for the owner's album, max 10, our own bucket only (a staff-written
+   URL can't make Telegram fetch an arbitrary host). */
+function taskPhotos(row: any): { url: string; caption: string }[] {
+  const d: any = row.data || {}; const out: { url: string; caption: string }[] = [];
+  const add = (u: unknown, c: string) => { if (typeof u === "string" && OWN_PHOTO.length > 40 && u.startsWith(OWN_PHOTO)) out.push({ url: u, caption: c.slice(0, 200) }); };
+  if (row.type === "general") {
+    const items = d.items || [];
+    if ((d.evidence || "one") === "one") add(d.photo, "รูปหลังทำ");
+    else items.forEach((it: string, i: number) => { const p = (d.itemPhotos || [])[i] || {}; add(p.before?.u, `ข้อ ${i + 1} ${it} · ก่อน`); add(p.after?.u, `ข้อ ${i + 1} ${it} · หลัง`); });
+  } else if (row.type === "photo") {
+    (d.lines || []).forEach((l: any) => add((d.shots || {})[l.sku], l.sku));
+  } else {
+    const r = d.round || (Array.isArray(d.rounds) && d.rounds.length ? d.rounds[d.rounds.length - 1] : null);
+    if (r) {
+      (r.pkg || []).forEach((u: string) => add(u, "รูปพัสดุ"));
+      Object.entries(r.lines || {}).forEach(([sku, x]: [string, any]) => { add(x.ppw, sku + " · รูปสินค้า"); (x.ev || []).forEach((u: string) => add(u, sku + " · หลักฐาน")); });
+      (r.extras || []).forEach((x: any) => add(x.photo, "ของเกิน " + str(x.name, 40)));
+    }
+  }
+  return out.slice(0, 10);
+}
+
+async function reportCfg(admin: any) {
+  const { data, error } = await admin.from("team_task_settings").select("report_roles, report_users, telegram").eq("id", 1).maybeSingle();
+  return {
+    roles: !error && data && Array.isArray(data.report_roles) ? data.report_roles : ["admin"],
+    users: !error && data && Array.isArray(data.report_users) ? data.report_users : [],
+    telegram: !(data && data.telegram === false),
+  };
+}
+async function reportUserIds(admin: any, cfg: any): Promise<string[]> {
+  const { data } = await admin.auth.admin.listUsers({ page: 1, perPage: 200 });
+  return ((data && data.users) || []).filter((u: any) => {
+    const r = (u.app_metadata || {}).role;
+    const banned = u.banned_until && new Date(u.banned_until).getTime() > Date.now();
+    return !banned && ["admin", "manager"].includes(r) && (cfg.roles.includes(r) || cfg.users.includes(u.id));
+  }).map((u: any) => u.id);
+}
+const ownerChats = () => [...new Set((Deno.env.get("TELEGRAM_OWNER_CHAT_ID") || "").split(",").map((c) => c.trim()).filter(Boolean))];
+
+const KIND_TH: Record<string, [string, string]> = { review: ["📝", "ส่งรายงาน · รออนุมัติ"], blocked: ["⚠️", "ติดปัญหา"],
+  done: ["✅", "เสร็จแล้ว"], progress: ["📈", "ความคืบหน้า"], overdue: ["⏰", "เลยกำหนด"] };
+function reportText(row: any, kind: string, pr: any, nPhotos: number): string {
+  const d: any = row.data || {}; const [ic, lab] = KIND_TH[kind];
+  const out = [`${ic} <b>${esc(lab)}: ${esc(str(row.title, 80))}</b>`, `👤 ${esc(str(row.assignee_name, 30))} · 🕒 ${esc(bkkTime())}`];
+  out.push(row.type === "receive" ? `📦 รับแล้ว ${pr.done}/${pr.total} ชิ้น (${pr.pct}%)` : `✅ ทำแล้ว ${pr.done}/${pr.total} ${pr.unit} (${pr.pct}%)` + (nPhotos ? ` · รูป ${nPhotos} รูป` : ""));
+  if (row.type === "receive" && d.round) {
+    const g = Object.values(d.round.lines || {}).reduce((s: number, x: any) => s + (Number(x.good) || 0), 0);
+    const b = Object.values(d.round.lines || {}).reduce((s: number, x: any) => s + (Number(x.dmg) || 0), 0);
+    out.push(`รอบนี้ ดี ${g}` + (b ? ` · เสีย ${b}` : "") + (d.round.note ? ` · ${esc(str(d.round.note, 120))}` : ""));
+  }
+  if (kind === "blocked") out.push(`⚠️ ${esc(str(d.reason, 200))}`);
+  if (kind === "overdue") out.push(`กำหนด ${esc(row.due)}`);
+  if (d.note && row.type === "general" && kind === "review") out.push(`📝 ${esc(str(d.note, 200))}`);
+  return out.join("\n").slice(0, 1000);   // always fits a caption
+}
+/* Owner's private chat only. Every message carries the "open in app" button. */
+async function tgTaskSend(chat_id: string, taskId: string, text: string, photos: { url: string; caption: string }[]) {
+  const token = tgToken(); if (!token) return;
+  const reply_markup = { inline_keyboard: [[{ text: "เปิดงานในแอป", url: APP_URL + "/?tk=" + encodeURIComponent(taskId) }]] };
+  if (photos.length >= 2) {   // sendMediaGroup can't carry buttons → album, then a short message with the button
+    const ok = await tgCall(token, "sendMediaGroup", { chat_id, media: photos.map((p, i) => i === 0
+      ? { type: "photo", media: p.url, caption: text, parse_mode: "HTML" } : { type: "photo", media: p.url, caption: p.caption }) });
+    await tgCall(token, "sendMessage", { chat_id, text: ok ? text.split("\n")[0] : text, parse_mode: "HTML", reply_markup, disable_web_page_preview: true });
+  } else if (photos.length === 1) {
+    if (!(await tgCall(token, "sendPhoto", { chat_id, photo: photos[0].url, caption: text, parse_mode: "HTML", reply_markup })))
+      await tgCall(token, "sendMessage", { chat_id, text, parse_mode: "HTML", reply_markup, disable_web_page_preview: true });
+  } else await tgCall(token, "sendMessage", { chat_id, text, parse_mode: "HTML", reply_markup, disable_web_page_preview: true });
+}
+
 async function sendTaskPush(admin: any, user: any, role: string, body: any, hasPush: boolean) {
-  if (!hasPush) return { ok: true, sent: 0 };
   const taskId = str(body.taskId, 80);
   const kind = String(body.kind || "");
   if (!taskId || !TASK_KINDS.includes(kind)) return { ok: false, error: "bad kind" };
   const { data: row, error } = await admin.from("team_tasks")
-    .select("id, title, type, status, assignee, assignee_name, due, data, updated_at").eq("id", taskId).maybeSingle();
+    .select("id, title, type, status, assignee, assignee_name, due, data, updated_at, created_at").eq("id", taskId).maybeSingle();
   if (error) return { ok: false, error: error.message };
   if (!row) return { ok: false, error: "not found" };
   const mgr = ["admin", "manager"].includes(role);
   if (!mgr && row.assignee !== user.id) return { ok: false, error: "not found" };   // same answer: don't leak which ids exist
   // Every legitimate notifyTask fires right after the save that changed the status;
-  // an old state can't be replayed to spam phones.
-  if (Date.now() - Date.parse(row.updated_at) > 120000) return { ok: true, sent: 0, stale: true };
+  // an old state can't be replayed to spam phones. Overdue is a system event.
+  if (kind !== "overdue" && Date.now() - Date.parse(row.updated_at) > 120000) return { ok: true, sent: 0, stale: true };
   const st = row.status;
+  const ms = Number(body.milestone);
+  const pr = await taskPct(admin, row);
   const valid =
     kind === "assigned" ? mgr && ["todo", "doing", "partial", "back"].includes(st)
     : kind === "back" ? mgr && st === "back"
     : kind === "resume" ? mgr && TASK_OPEN_WORK.includes(st)
     : kind === "review" ? st === "review"
     : kind === "blocked" ? st === "blocked"
-    : kind === "done" ? row.type === "photo" && st === "done"
+    : kind === "done" ? st === "done"
+    : kind === "progress" ? ["general", "photo"].includes(row.type) && TASK_OPEN_WORK.includes(st) && [50, 100].includes(ms) && pr.pct >= ms
+    : kind === "overdue" ? ["todo", "doing", "back", "partial", "blocked"].includes(st) && !!row.due && row.due < bkkToday()
     : false;
   if (!valid) return { ok: false, error: "bad kind" };
+
+  // Claim (dedupe) before sending anything.
+  const key = kind === "progress" ? "p" + ms : kind === "overdue" ? "od" + row.due : String(row.updated_at);
+  const { data: cl, error: ce } = await admin.from("team_task_push_log")
+    .upsert({ task_id: row.id, kind, key }, { onConflict: "task_id,kind,key", ignoreDuplicates: true }).select("task_id");
+  if (ce) { if (kind === "progress" || kind === "overdue") return { ok: true, sent: 0, skipped: "no log" }; }   // phase-3 SQL not run: those two would be unbounded
+  else if (!cl || !cl.length) return { ok: true, sent: 0, dup: true };
 
   const liveRole = async (id: string): Promise<string | null> => {
     try {
@@ -496,29 +629,59 @@ async function sendTaskPush(admin: any, user: any, role: string, body: any, hasP
       return u && !banned ? ((u.app_metadata || {}).role || null) : null;
     } catch { return null; }
   };
+  const assigneeLive = row.assignee ? !!(await liveRole(row.assignee)) : false;
+  const isReport = REPORT_KINDS.includes(kind);
+  const cfg = isReport ? await reportCfg(admin) : null;
   let targetIds: string[] = [];
   if (["assigned", "back", "resume"].includes(kind)) {
-    targetIds = row.assignee ? [row.assignee] : [];
+    targetIds = assigneeLive ? [row.assignee] : [];
   } else {
-    const { data: all } = await admin.from("push_subscriptions").select("user_id");
-    const ids = [...new Set((all || []).map((s: any) => s.user_id).filter(Boolean))] as string[];
-    const roles = await Promise.all(ids.map(liveRole));
-    targetIds = ids.filter((_, i) => ["admin", "manager"].includes(roles[i] || ""));
+    targetIds = await reportUserIds(admin, cfg).catch(() => [] as string[]);
+    if (kind === "overdue" && assigneeLive) targetIds.push(row.assignee);
   }
-  targetIds = targetIds.filter((id) => id && id !== user.id);
-  if (!targetIds.length) return { ok: true, sent: 0, failed: 0 };
+  targetIds = [...new Set(targetIds)].filter((id) => id && (kind === "overdue" || id !== user.id));
 
   const d: any = row.data || {};
   const title = str(row.title, 60);
   const by = str((user.user_metadata as any)?.name || (user.user_metadata as any)?.full_name || "เจ้าของ", 30);
   const who = str(row.assignee_name, 30);
+
+  // Telegram runs after the response (never awaited before json()).
+  const runTg = async () => {
+    const token = tgToken();
+    if (!token) return;
+    if (isReport && cfg && cfg.telegram && (role !== "admin" || kind === "overdue")) {
+      const photos = ["review", "done"].includes(kind) ? taskPhotos(row) : [];
+      const text = reportText(row, kind, pr, photos.length);
+      for (const chat_id of ownerChats()) { try { await tgTaskSend(chat_id, row.id, text, photos); } catch (e) { console.error("task tg owner", e); } }
+    }
+    if (STAFF_TG_KINDS.includes(kind) && assigneeLive) {
+      const chats = await telegramChats(admin).catch(() => [] as string[]);
+      const text = staffGroupText(row, kind, kind === "assigned" ? by : "");
+      const reply_markup = { inline_keyboard: [[{ text: "เปิดงาน", url: APP_URL + "/?tk=" + encodeURIComponent(row.id) }]] };
+      for (const chat_id of chats) {
+        try { await tgCall(token, "sendMessage", { chat_id, text, parse_mode: "HTML", disable_web_page_preview: true, reply_markup }); }
+        catch (e) { console.error("task tg group", e); }
+      }
+    }
+  };
+  const er = (globalThis as any).EdgeRuntime;
+  const tgP = runTg().catch((e) => console.error("task tg", e));
+  let telegram: string = "queued";
+  if (er && typeof er.waitUntil === "function") er.waitUntil(tgP);
+  else { await tgP; telegram = "sent"; }
+
+  if (!hasPush || !targetIds.length) return { ok: true, sent: 0, failed: 0, telegram };
+
   const text: Record<string, [string, string]> = {
     assigned: ["📋 งานใหม่ · " + title, by + " มอบหมายงานให้คุณ" + (row.due ? " · กำหนด " + row.due : "")],
     back:     ["↩️ ส่งกลับแก้ไข · " + title, str(d.comment, 120)],
     resume:   ["▶️ ทำต่อได้ · " + title, "เจ้าของแก้ปัญหาแล้ว"],
     review:   ["✅ รออนุมัติ · " + title, who + " ส่งรายงานแล้ว"],
     blocked:  ["⚠️ ติดปัญหา · " + title, who + ": " + str(d.reason, 120)],
-    done:     ["📷 เสร็จแล้ว · " + title, who + " ถ่ายรูปครบ"],
+    done:     ["✅ เสร็จแล้ว · " + title, who + (row.type === "photo" ? " ถ่ายรูปครบ" : " · ปิดงานแล้ว")],
+    progress: ["📈 " + ms + "% · " + title, who + " ทำแล้ว " + pr.done + "/" + pr.total],
+    overdue:  ["⏰ เลยกำหนด · " + title, "กำหนด " + row.due + " · " + who],
   };
   const [t, b] = text[kind];
   const payload = { title: str(t, 90), body: str(b, 160), tag: "ims-task-" + row.id,
@@ -526,7 +689,7 @@ async function sendTaskPush(admin: any, user: any, role: string, body: any, hasP
 
   const { data: subs, error: se } = await admin.from("push_subscriptions")
     .select("endpoint, p256dh, auth, user_id").in("user_id", targetIds);
-  if (se) return { ok: false, error: se.message };
+  if (se) return { ok: false, error: se.message, telegram };
   let sent = 0, failed = 0;
   const dead: string[] = [];
   await Promise.all((subs || []).map(async (s: any) => {
@@ -543,7 +706,7 @@ async function sendTaskPush(admin: any, user: any, role: string, body: any, hasP
     }
   }));
   if (dead.length) await admin.from("push_subscriptions").delete().in("endpoint", dead);
-  return { ok: true, sent, failed };
+  return { ok: true, sent, failed, telegram };
 }
 
 Deno.serve(async (req) => {
@@ -569,13 +732,36 @@ Deno.serve(async (req) => {
   const SUBJECT = Deno.env.get("VAPID_SUBJECT") || "https://psstock.vercel.app";
   const hasPush = !!(PUB && PRIV);
   const hasTelegram = !!tgToken();
-  if (!hasPush && !hasTelegram) return json({ ok: false, error: "VAPID keys not configured" }, 500);
-  if (hasPush) webpush.setVapidDetails(SUBJECT, PUB, PRIV);
 
   let body: any;
   try { body = await req.json(); } catch { return json({ ok: false, error: "Bad JSON" }, 400); }
 
-  // {mode:"task"} → a targeted งานของทีม push (tasks.jsx notifyTask). Never Telegram.
+  // {mode:"task-tg-test"} (admin) → test the owner's PRIVATE chat, or list the private
+  // chats that messaged the bot so the owner can copy their id (no webhook is set, so
+  // getUpdates works). Group ids stay with the order-push test.
+  if (body && body.mode === "task-tg-test") {
+    if (role !== "admin") return json({ ok: false, error: "Forbidden" }, 403);
+    const token = tgToken();
+    if (!token) return json({ ok: false, error: "TELEGRAM_BOT_TOKEN not set" });
+    const owner = ownerChats();
+    if (owner.length) {
+      let ok = 0;
+      for (const chat_id of owner) if (await tgCall(token, "sendMessage", { chat_id, text: "✅ ทดสอบรายงานงานถึงเจ้าของ — ใช้งานได้" })) ok++;
+      return json({ ok: ok > 0, result: ok ? "sent" : "failed", error: ok ? undefined : _tgLastError });
+    }
+    const r = await fetch(`https://api.telegram.org/bot${token}/getUpdates?allowed_updates=[]`).then((x) => x.json()).catch(() => null);
+    const seen: Record<string, string> = {};
+    ((r && r.result) || []).forEach((u: any) => {
+      const c = (u.message || u.edited_message || {}).chat;
+      if (c && c.type === "private") seen[String(c.id)] = [c.first_name, c.last_name].filter(Boolean).join(" ") || c.username || "";
+    });
+    return json({ ok: false, result: "no-owner-chat", candidates: Object.entries(seen).map(([id, name]) => ({ id, name })) });
+  }
+
+  if (!hasPush && !hasTelegram) return json({ ok: false, error: "VAPID keys not configured" }, 500);
+  if (hasPush) webpush.setVapidDetails(SUBJECT, PUB, PRIV);
+
+  // {mode:"task"} → a targeted งานของทีม push (tasks.jsx notifyTask) + task Telegram.
   if (body && body.mode === "task") return json(await sendTaskPush(admin, user, role, body, hasPush));
 
   // {mode:"test"} → one test push to the CALLER's own devices (settings button).
