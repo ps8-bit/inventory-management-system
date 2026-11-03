@@ -605,6 +605,20 @@ function parseRecipientBlob(raw) {
   // don't collide with ต./อ./จ. (critical for this shop's many ranked buyers).
   const RANK = /(?:[ก-ฮ]{1,3}\.){2,}/g;
   const looksAddr = (line) => addrKw.test(line.replace(RANK, " "));
+  // "ยศ ชื่อ นามสกุล 89 ม.6 ต.…" → { name, addr }: split at the first address
+  // marker outside the rank, and hand a trailing house number ("89", "12/3")
+  // back to the address. null when nothing name-like precedes the address.
+  const splitNameFromAddr = (line) => {
+    const masked = line.replace(RANK, m => " ".repeat(m.length));
+    const km = masked.match(addrKw);
+    if (!km || km.index <= 0) return null;
+    let cut = km.index;
+    const hn = line.slice(0, cut).match(/\s(\d{1,5}(?:[\/\-]\d{1,4})?)\s*$/);
+    if (hn) cut = hn.index + 1;
+    const name = line.slice(0, cut).trim();
+    if (!name || !/[ก-๛a-z]/i.test(name)) return null;
+    return { name, addr: line.slice(cut).trim() };
+  };
 
   // 1) Phone — exact-length patterns so it can't bleed into an adjacent number.
   //    Mobile = 10 digits (0[689]+8), +66 mobile, or landline = 9 digits (0[2-7]+7).
@@ -660,6 +674,12 @@ function parseRecipientBlob(raw) {
   // 3a/3b) Resolve name then build addr from remaining lines.
   {
     let restLines = rest.split(/\n+/).map(s => s.trim()).filter(Boolean);
+    // Every line looks like an address → the name is probably glued to the
+    // front of the first one ("ส.ต.ท.ปกรณ์ สารชาติ 89 ม.6 ต.…"). Split it off.
+    if (!out.name && restLines.length && restLines.every(looksAddr)) {
+      const sp = splitNameFromAddr(restLines[0]);
+      if (sp) { out.name = sp.name; restLines[0] = sp.addr; }
+    }
     if (!out.name) {
       const nameLine = restLines.find(l => !looksAddr(l));
       if (nameLine) {
@@ -681,11 +701,16 @@ function parseRecipientBlob(raw) {
   // marker. Mask any leading rank/title first (preserving indices) so its dots
   // aren't mistaken for the split point.
   if (out.name && !addr) {
-    const masked = out.name.replace(RANK, m => " ".repeat(m.length));
-    const km = masked.match(addrKw);
-    if (km && km.index > 0) { addr = out.name.slice(km.index).trim(); out.name = out.name.slice(0, km.index).trim(); }
+    const sp = splitNameFromAddr(out.name);
+    if (sp) { addr = sp.addr; out.name = sp.name; }
   }
   out.name = out.name.replace(/\s+/g, " ").trim();
+
+  // Delivery notes in brackets ("(ห้องตัดผมใต้แฟลต…)") aren't part of the
+  // tambon→zip tail — the gazetteer's canonical rewrite would drop them, so
+  // lift them out and keep them on the main address line.
+  const notes = [];
+  addr = addr.replace(/[(（][^()（）]*[)）]/g, m => { notes.push(m.trim()); return " "; });
 
   // 4) Split the address across the label's two lines (main / subdistrict→postal).
   //    Prefer the Thai-address gazetteer (data-anchored: validates against real
@@ -718,6 +743,7 @@ function parseRecipientBlob(raw) {
       }
     }
   }
+  if (notes.length) out.addr1 = [out.addr1, ...notes].filter(Boolean).join(" ");
 
   if (!out.name && !out.phone && !out.addr1 && !out.addr2) return null;
   const leftoverBase = primaryPhoneRaw ? text0.replace(primaryPhoneRaw, " ") : text0;
