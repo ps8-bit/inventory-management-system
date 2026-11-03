@@ -866,7 +866,7 @@ function buildTaskSuggestions() {
   const out = [];
   const prods = typeof PRODUCTS !== "undefined" ? PRODUCTS : [];
   if (typeof productIsStored === "function") {
-    const un = prods.filter(p => (Number(p.qty) || 0) > 0 && !productIsStored(p));
+    const un = prods.filter(p => (Number(p.qty) || 0) > 0 && !productIsStored(p)).sort((a, b) => (Number(b.qty) || 0) - (Number(a.qty) || 0));
     if (un.length) out.push({ id: "unshelved", icon: "📦", n: un.length, text: `สินค้ามีสต็อกแต่ยังไม่จัดเก็บ ${un.length} SKU`,
       preset: { type: "general", title: `เก็บสินค้าเข้าชั้น ${Math.min(un.length, TK_SUGGEST_MAX)} รายการ`, items: un.slice(0, TK_SUGGEST_MAX).map(_tkSkuLine) } });
   }
@@ -877,7 +877,9 @@ function buildTaskSuggestions() {
       preset: { type: "general", urgent: true, title: `แพ็คออร์เดอร์ค้าง ${Math.min(late.length, TK_SUGGEST_MAX)} ออร์เดอร์`,
         items: late.slice(0, TK_SUGGEST_MAX).map(o => (typeof orderShortId === "function" ? orderShortId(o) : o.id) + (o.customer ? " · " + o.customer : "")) } });
   }
-  const low = prods.filter(p => (Number(p.reorder) || 0) > 0 && (Number(p.qty) || 0) <= Number(p.reorder));
+  // Same rule as the dashboard "ต้องสั่งซื้อ" tile (out of stock, or at/below the reorder point); emptiest first.
+  const low = prods.filter(p => { const q = Number(p.qty) || 0; return q === 0 || q <= (Number(p.reorder) || 0); })
+    .sort((a, b) => (Number(a.qty) || 0) - (Number(b.qty) || 0));
   if (low.length) out.push({ id: "lowstock", icon: "🛒", n: low.length, text: `สต็อกต่ำกว่าจุดสั่งซื้อ ${low.length} SKU`,
     preset: { type: "general", title: `เช็คสต็อก / สั่งซื้อ ${Math.min(low.length, TK_SUGGEST_MAX)} SKU`,
       items: low.slice(0, TK_SUGGEST_MAX).map(p => `${_tkSkuLine(p)} (เหลือ ${Number(p.qty) || 0})`) } });
