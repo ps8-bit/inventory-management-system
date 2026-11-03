@@ -856,6 +856,63 @@ function TaskRow({ t, onOpen }) {
   );
 }
 
+/* ── suggested tasks (manager only) ──
+   Built from data the app already has. Nothing is created until the owner taps
+   "สร้างงาน", which opens the normal create form prefilled. A dismissed card is
+   remembered with its count, so it comes back only when the count changes. */
+const TK_SUGGEST_MAX = 40;
+function _tkSkuLine(p) { return `${p.sku} — ${p.name || ""}`.trim(); }
+function buildTaskSuggestions() {
+  const out = [];
+  const prods = typeof PRODUCTS !== "undefined" ? PRODUCTS : [];
+  if (typeof productIsStored === "function") {
+    const un = prods.filter(p => (Number(p.qty) || 0) > 0 && !productIsStored(p));
+    if (un.length) out.push({ id: "unshelved", icon: "📦", n: un.length, text: `สินค้ามีสต็อกแต่ยังไม่จัดเก็บ ${un.length} SKU`,
+      preset: { type: "general", title: `เก็บสินค้าเข้าชั้น ${Math.min(un.length, TK_SUGGEST_MAX)} รายการ`, items: un.slice(0, TK_SUGGEST_MAX).map(_tkSkuLine) } });
+  }
+  if (typeof buildOrders === "function" && typeof isPendingOrder === "function" && typeof packLateDays === "function") {
+    let late = [];
+    try { late = buildOrders().filter(o => isPendingOrder(o) && o.status === "picking" && packLateDays(o) > 0); } catch (e) {}
+    if (late.length) out.push({ id: "latepack", icon: "⏰", n: late.length, text: `ออร์เดอร์รอแพ็คเกินกำหนด ${late.length} ออร์เดอร์`,
+      preset: { type: "general", urgent: true, title: `แพ็คออร์เดอร์ค้าง ${Math.min(late.length, TK_SUGGEST_MAX)} ออร์เดอร์`,
+        items: late.slice(0, TK_SUGGEST_MAX).map(o => (typeof orderShortId === "function" ? orderShortId(o) : o.id) + (o.customer ? " · " + o.customer : "")) } });
+  }
+  const low = prods.filter(p => (Number(p.reorder) || 0) > 0 && (Number(p.qty) || 0) <= Number(p.reorder));
+  if (low.length) out.push({ id: "lowstock", icon: "🛒", n: low.length, text: `สต็อกต่ำกว่าจุดสั่งซื้อ ${low.length} SKU`,
+    preset: { type: "general", title: `เช็คสต็อก / สั่งซื้อ ${Math.min(low.length, TK_SUGGEST_MAX)} SKU`,
+      items: low.slice(0, TK_SUGGEST_MAX).map(p => `${_tkSkuLine(p)} (เหลือ ${Number(p.qty) || 0})`) } });
+  return out;
+}
+const TK_SUGGEST_KEY = "ims_task_suggest_hide_v1";
+const TK_SUGGEST_EVENTS = ["ims-products-change", "ims-orders-change", "ims-labels-change"];
+function TaskSuggestions({ onCreate }) {
+  const [, bump] = useStateTk(0);
+  useEffectTk(() => {
+    const f = () => bump(x => x + 1);
+    TK_SUGGEST_EVENTS.forEach(e => window.addEventListener(e, f));
+    return () => TK_SUGGEST_EVENTS.forEach(e => window.removeEventListener(e, f));
+  }, []);
+  let hidden = {};
+  try { hidden = JSON.parse(localStorage.getItem(TK_SUGGEST_KEY) || "{}") || {}; } catch (e) {}
+  const list = buildTaskSuggestions().filter(x => hidden[x.id] !== x.n);
+  if (!list.length) return null;
+  const hide = x => { try { localStorage.setItem(TK_SUGGEST_KEY, JSON.stringify({ ...hidden, [x.id]: x.n })); } catch (e) {} bump(v => v + 1); };
+  return (
+    <div style={{ ...tkCard, marginBottom: 12 }}>
+      <div style={{ fontWeight: 600, marginBottom: 2 }}>💡 งานที่ระบบแนะนำ</div>
+      <div style={tkMuted}>จากข้อมูลคลังตอนนี้ — กดสร้างงานเพื่อตรวจ/แก้ก่อนมอบหมาย</div>
+      {list.map(x => (
+        <div key={x.id} style={tkRow}>
+          <span style={{ fontSize: 18 }} aria-hidden="true">{x.icon}</span>
+          <span style={{ flex: 1, minWidth: 0, fontSize: 14 }}>{x.text}</span>
+          <button type="button" className="m-chip on" onClick={() => onCreate(x.preset)}>สร้างงาน</button>
+          <button type="button" className="m-chip" onClick={() => hide(x)}>ซ่อน</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ── task list (both roles) ── */
 const _tkSortGroup = arr => [...arr].sort((a, b) => {
   const ua = a.data && a.data.urgent ? 0 : 1, ub = b.data && b.data.urgent ? 0 : 1;
@@ -908,6 +965,7 @@ function TaskList({ m, onOpen, onNew }) {
           <button key={id} type="button" className={"m-chip" + (filter === id ? " on" : "")} onClick={() => setFilter(id)}>{lab}</button>
         ))}
       </div>
+      {mgr && onNew && filter === "open" && <TaskSuggestions onCreate={onNew}/>}
       {filter === "notify" ? <TaskReportSettings m={m}/> : filter === "tpl" ? <TemplateList m={m}/> : (
         <div style={tkCard}>
           {!shown.length && <div style={{ ...tkMuted, padding: "8px 0" }}>{filter === "open" ? (mgr ? "ยังไม่มีงานค้าง — กด “มอบหมายงาน” เพื่อเริ่ม" : "ไม่มีงานค้าง") : "ยังไม่มีงานที่ปิดแล้ว"}</div>}
@@ -1005,11 +1063,11 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
   const [edit] = useStateTk(() => editLive);
   const ed = edit ? (edit.data || {}) : null;
   const [type, setType] = useStateTk(() => edit ? edit.type : ((preset && preset.type) || "receive"));
-  const [title, setTitle] = useStateTk(edit ? edit.title : "");
+  const [title, setTitle] = useStateTk(edit ? edit.title : ((preset && preset.title) || ""));
   const [trk, setTrk] = useStateTk(ed ? (ed.trk || "") : "");
   const [supplier, setSupplier] = useStateTk(ed ? (ed.supplier || "") : "");
   const [due, setDue] = useStateTk(edit ? (edit.due || "") : _tkToday());
-  const [urgent, setUrgent] = useStateTk(!!(edit && edit.data && edit.data.urgent));
+  const [urgent, setUrgent] = useStateTk(!!(edit ? edit.data && edit.data.urgent : preset && preset.urgent));
   const [who, setWho] = useStateTk("");
   const [people, setPeople] = useStateTk([]);
   const [lines, setLines] = useStateTk(() => {
@@ -1019,7 +1077,7 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
   });
   const [skuQ, setSkuQ] = useStateTk("");
   const [qty, setQty] = useStateTk("");
-  const [items, setItems] = useStateTk(ed ? (ed.items || []).join("\n") : "");
+  const [items, setItems] = useStateTk(ed ? (ed.items || []).join("\n") : ((preset && Array.isArray(preset.items)) ? preset.items.join("\n") : ""));
   const [evidence, setEvidence] = useStateTk(() => {
     if (ed) return ed.evidence || "one";
     let v = null; try { v = localStorage.getItem("ims_task_evidence_last"); } catch (e) {}
@@ -2096,8 +2154,8 @@ function TeamTasks({ pushToast }) {
         </div>
       </div>
       <div style={{ maxWidth: 860 }}>
-        {view.v === "list" && <TaskList onOpen={id => setView({ v: "task", id })} onNew={mgr ? () => setView({ v: "new" }) : null}/>}
-        {view.v === "new" && <TaskCreate key={view.preset ? "preset" + (view.preset.skus || []).length : "new"} preset={view.preset} onDone={id => setView({ v: "task", id })} onCancel={() => setView({ v: "list" })}/>}
+        {view.v === "list" && <TaskList onOpen={id => setView({ v: "task", id })} onNew={mgr ? pre => setView({ v: "new", preset: pre && pre.type ? pre : null }) : null}/>}
+        {view.v === "new" && <TaskCreate key={view.preset ? "preset" + (view.preset.title || "") + (view.preset.skus || []).length : "new"} preset={view.preset} onDone={id => setView({ v: "task", id })} onCancel={() => setView({ v: "list" })}/>}
         {view.v === "task" && <TaskDetail key={view.id} id={view.id} onBack={() => setView({ v: "list" })}/>}
       </div>
     </div>
@@ -2115,7 +2173,7 @@ function MTasks({ ctx }) {
         {mgr && <button className="m-action accent" onClick={() => ctx.push("task-new")} aria-label="มอบหมายงาน"><Icons.Plus size={16}/></button>}
       </div>
       <div className="m-content">
-        <TaskList m onOpen={id => ctx.push("task", { id })} onNew={mgr ? () => ctx.push("task-new") : null}/>
+        <TaskList m onOpen={id => ctx.push("task", { id })} onNew={mgr ? pre => ctx.push("task-new", pre && pre.type ? { preset: pre } : undefined) : null}/>
       </div>
     </>
   );
