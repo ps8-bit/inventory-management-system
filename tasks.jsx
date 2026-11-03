@@ -1633,7 +1633,7 @@ function GeneralWork({ m, task, editable, onSubmit }) {
               <TkTick ok={ok}/> <span style={{ flex: 1, minWidth: 0, fontWeight: 600 }}>{`${i + 1}. ${it}`}</span>
             </div>
             {ev === "item2" ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, maxWidth: 420 }}>
                 {slot(i + ":before", editable ? "ก่อนทำ" : "ก่อน", p.before)}
                 {slot(i + ":after", editable ? "หลังทำ" : "หลัง", p.after, { disabled: editable && !(p.before && p.before.u), lockedText: "ถ่าย “ก่อนทำ” ก่อน" })}
               </div>
