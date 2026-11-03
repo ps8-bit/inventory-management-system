@@ -3108,3 +3108,30 @@ html[data-mobile="1"] .pf-row-tog .mark-tile { width: 24px !important; height: 2
 .pf-row.ro .pf-row-tog { cursor: inherit; padding: 1px; }
 .pf-row.ro .pf-row-tog .mark-tile { width: 16px !important; height: 16px !important; font-size: 7px !important; }
 .pf-row.editing { padding: 4px; border-radius: 10px; background: var(--accent-soft); }
+
+/* ── งานของทีม phase 3: attention wiggle (transform only, periodic) ── */
+:root { --tk-attn-cycle: 4s; --tk-attn-cycle-strong: 2.4s; --tk-attn-shift: 3px; --tk-attn-tilt: 6deg; }
+@keyframes tk-attn {
+  0%, 14%, 100% { transform: translateX(0); }
+  2%  { transform: translateX(calc(var(--tk-attn-shift) * -1)); }
+  4%  { transform: translateX(var(--tk-attn-shift)); }
+  6%  { transform: translateX(calc(var(--tk-attn-shift) * -1)); }
+  8%  { transform: translateX(var(--tk-attn-shift)); }
+  10% { transform: translateX(calc(var(--tk-attn-shift) * -0.5)); }
+  12% { transform: translateX(calc(var(--tk-attn-shift) * 0.5)); }
+}
+@keyframes tk-attn-badge {
+  0%, 14%, 100% { transform: rotate(0) scale(1); }
+  3%  { transform: rotate(calc(var(--tk-attn-tilt) * -1)) scale(1.12); }
+  6%  { transform: rotate(var(--tk-attn-tilt)) scale(1.12); }
+  9%  { transform: rotate(calc(var(--tk-attn-tilt) * -0.5)) scale(1.06); }
+  12% { transform: rotate(0) scale(1); }
+}
+.mh-strip.tk-attn { animation: tk-attn var(--tk-attn-cycle) ease-in-out infinite; will-change: transform; }
+.mh-strip.tk-attn.is-strong { --tk-attn-shift: 5px; animation-duration: var(--tk-attn-cycle-strong); }
+.nav-badge.tk-attn { display: inline-block; animation: tk-attn-badge var(--tk-attn-cycle) ease-in-out infinite; }
+.nav-badge.tk-attn.is-strong { --tk-attn-tilt: 12deg; animation-duration: var(--tk-attn-cycle-strong); background: var(--danger); color: #fff; }
+@media (prefers-reduced-motion: reduce) {
+  .mh-strip.tk-attn, .nav-badge.tk-attn { animation: none; }
+  [role="progressbar"] i { transition: none !important; }
+}

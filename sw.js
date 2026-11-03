@@ -3,7 +3,7 @@
    versioned assets (?v=...), so we do NOT cache app code to avoid stale bugs.
    v3: actively forces a fresh HTML shell + purges any old caches, so an installed
    PWA can never get stuck on an old build. */
-const VERSION = "ims-pwa-v5";
+const VERSION = "ims-pwa-v6";
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();
@@ -81,7 +81,7 @@ self.addEventListener("push", (event) => {
       renotify: true,
       icon: "/icon-192.png",
       badge: "/favicon-32.png",
-      data: { url: d.url || "/", orderId: d.alert && d.alert.id },
+      data: { url: d.url || "/", orderId: d.alert && d.alert.id, taskId: d.task && d.task.id },
     });
   })());
 });
@@ -95,7 +95,7 @@ self.addEventListener("notificationclick", (event) => {
     const list = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
     for (const c of list) {
       if ("focus" in c) {
-        c.postMessage({ type: "ims-push-open", orderId: data.orderId || null });
+        c.postMessage({ type: "ims-push-open", orderId: data.orderId || null, taskId: data.taskId || null });
         return c.focus();
       }
     }

@@ -2506,8 +2506,8 @@ const ROLES = [
 /* "adjust" is a mobile-menu-only id (no ALL_NAV entry, so it can never appear
    in the desktop sidebar) — it gates the MMore ปรับสต็อก row per role. */
 const ROLE_NAV = {
-  admin:   ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
-  manager: ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
+  admin:   ["dashboard","tasks","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
+  manager: ["dashboard","tasks","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
   staff:   ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","bundles","labels","tracking","handheld"],
   // พนักงานแพ็ค — the แพ็คสินค้า page only (desktop sidebar AND mobile: no home/tabs).
   packer:  ["pack"],
@@ -2537,16 +2537,17 @@ const CAPS = [
   { id: "editProduct", label: "แก้ไขข้อมูลสินค้า",   desc: "แก้ชื่อ ราคา หมวดหมู่ และตำแหน่งจัดเก็บ", server: ["admin", "manager", "staff"] },
   { id: "renameSku",   label: "แก้ไขรหัส SKU",       desc: "เปลี่ยนรหัส SKU ของสินค้าเดิม (ย้ายสต็อก ตำแหน่ง และชุดสินค้าไปรหัสใหม่ทันที)", server: ["admin", "manager"] },
   { id: "deleteData",  label: "ลบข้อมูล",            desc: "ลบสินค้า ออร์เดอร์ และอาคาร/ชั้น/ตำแหน่ง", server: ["admin", "manager"] },
-  { id: "exportData",  label: "ส่งออก/พิมพ์รายงาน",  desc: "ดาวน์โหลด CSV รายงาน Excel และพิมพ์รายงาน" }
+  { id: "exportData",  label: "ส่งออก/พิมพ์รายงาน",  desc: "ดาวน์โหลด CSV รายงาน Excel และพิมพ์รายงาน" },
+  { id: "manageTasks", label: "มอบหมายและอนุมัติงาน", desc: "สร้างงานให้พนักงาน อนุมัติรายงาน (รับสินค้าเข้าตามงาน) และเปลี่ยนผู้รับผิดชอบ", server: ["admin", "manager"] }
 ];
 
 const DEFAULT_ROLE_CAPS = {
-  admin:   { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: true,  deleteData: true,  exportData: true },
-  manager: { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: true,  deleteData: true,  exportData: true },
+  admin:   { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: true,  deleteData: true,  exportData: true, manageTasks: true },
+  manager: { viewCost: true,  viewSales: true,  sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: true,  deleteData: true,  exportData: true, manageTasks: true },
   // Warehouse staff work the floor: they move stock but never see money.
-  staff:   { viewCost: false, viewSales: false, sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: false, deleteData: false, exportData: true },
-  packer:  { viewCost: false, viewSales: false, sell: false, adjustStock: false, addProduct: false, editProduct: false, renameSku: false, deleteData: false, exportData: false },
-  viewer:  { viewCost: true,  viewSales: true,  sell: false, adjustStock: false, addProduct: false, editProduct: false, renameSku: false, deleteData: false, exportData: true }
+  staff:   { viewCost: false, viewSales: false, sell: true,  adjustStock: true,  addProduct: true,  editProduct: true,  renameSku: false, deleteData: false, exportData: true, manageTasks: false },
+  packer:  { viewCost: false, viewSales: false, sell: false, adjustStock: false, addProduct: false, editProduct: false, renameSku: false, deleteData: false, exportData: false, manageTasks: false },
+  viewer:  { viewCost: true,  viewSales: true,  sell: false, adjustStock: false, addProduct: false, editProduct: false, renameSku: false, deleteData: false, exportData: true, manageTasks: false }
 };
 
 const ROLE_PERMS_KEY = "ims_role_perms";

@@ -4,6 +4,7 @@ const { useState: useStateApp, useEffect: useEffectApp, useRef: useRefApp, useMe
 
 const ALL_NAV = [
   { id: "dashboard", label: "หน้าหลัก",       icon: Icons.Dash,    group: "main" },
+  { id: "tasks",     label: "งานของทีม",       icon: Icons.Check,   group: "main" },
   { id: "inbound",   label: "รับเข้าสินค้า",   icon: Icons.In,      group: "ops"   },
   { id: "outbound",  label: "จัดส่งสินค้า",    icon: Icons.Out,     group: "ops"   },
   { id: "pack",      label: "แพ็คสินค้า",      icon: Icons.Pack,    group: "ops"   },
@@ -30,6 +31,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 const CRUMB_MAP = {
   dashboard: "หน้าหลัก",
+  tasks: "งานของทีม",
   "pack-home": "หน้าหลัก",
   inbound: "รับเข้าสินค้า",
   outbound: "จัดส่งสินค้า",
@@ -89,11 +91,15 @@ function computeBadges() {
   // every label ever made (271, of which 213 were long shipped).
   const labels = labelsArr.filter(l => !(l && (l.tracking || (l.data && l.data.tracking)))).length;
 
+  // --- tasks: reports to approve (manager) / my open tasks (everyone else) ---
+  const tasks = (typeof taskBadgeCount === "function") ? taskBadgeCount() : 0;
+
   return {
     inbound:  inbound  > 0 ? inbound  : null,
     outbound: outbound > 0 ? outbound : null,
     pack:     pack     > 0 ? pack     : null,
     labels:   labels   > 0 ? labels   : null,
+    tasks:    tasks    > 0 ? tasks    : null,
   };
 }
 
@@ -104,10 +110,13 @@ function useBadges() {
     window.addEventListener("ims-products-change", refresh);
     window.addEventListener("ims-orders-change",   refresh);
     window.addEventListener("ims-labels-change",   refresh);
+    window.addEventListener("ims-tasks-change",    refresh);
+    if (typeof startTaskSync === "function") startTaskSync();
     return () => {
       window.removeEventListener("ims-products-change", refresh);
       window.removeEventListener("ims-orders-change",   refresh);
       window.removeEventListener("ims-labels-change",   refresh);
+      window.removeEventListener("ims-tasks-change",    refresh);
     };
   }, []);
   return b;
@@ -968,6 +977,21 @@ function App({ user, onLogout, onSwitchUser }) {
     window.scrollTo(0, 0);
   };
   const focusFor = (p) => (pageFocus && pageFocus.page === p ? pageFocus : null);
+  /* งานของทีม: a task push / ?tk= link (tasks.jsx openTaskFromAnywhere) and the
+     inventory "มอบหมายถ่ายรูป" button both land on the tasks page; TeamTasks
+     reads window.__pendingTaskOpen / __pendingTaskNew when it mounts. */
+  useEffectApp(() => {
+    const open = () => {
+      if (typeof canOpenPage === "function" && canOpenPage("tasks")) { goTo("tasks"); return; }
+      if (typeof takePendingTaskOpen === "function") takePendingTaskOpen(); else window.__pendingTaskOpen = null;   // not allowed → discard
+      window.__pendingTaskNew = null;
+    };
+    const onNew = (e) => { window.__pendingTaskNew = (e && e.detail) || null; open(); };
+    window.addEventListener("ims-open-task", open);
+    window.addEventListener("ims-open-task-new", onNew);
+    if (window.__pendingTaskOpen) open();
+    return () => { window.removeEventListener("ims-open-task", open); window.removeEventListener("ims-open-task-new", onNew); };
+  }, []);
 
   /* Build the visible NAV: filter by role + visibility + order.
      roleNav() honours the admin's per-role override (app_state "role_perms")
@@ -1044,7 +1068,7 @@ function App({ user, onLogout, onSwitchUser }) {
             <React.Fragment key={group}>
               <div className="nav-group">{NAV_GROUP_LABELS[group]}</div>
               {items.map(n => (
-                <NavItem key={n.id} item={n} active={page === n.id} onClick={() => goTo(n.id)} badge={badges[n.id]}/>
+                <NavItem key={n.id} item={n} active={page === n.id} onClick={() => goTo(n.id)} badge={badges[n.id]} attn={n.id === "tasks" && typeof taskAttention === "function" ? taskAttention() : ""}/>
               ))}
             </React.Fragment>
           );
@@ -1105,6 +1129,7 @@ function App({ user, onLogout, onSwitchUser }) {
           {page === "finder"    && <ProductFinder pushToast={pushToast} goTo={goTo} focus={focusFor("finder")}/>}
           {page === "inventory" && <Inventory pushToast={pushToast} density={t.density} goTo={goTo} focus={focusFor("inventory")}/>}
           {page === "stocktake" && <StockTake pushToast={pushToast}/>}
+          {page === "tasks" && typeof TeamTasks === "function" && <TeamTasks pushToast={pushToast}/>}
           {page === "locations" && <Locations goTo={goTo}/>}
           {page === "import"    && <ImportPage pushToast={pushToast} goTo={goTo}/>}
           {page === "labels"    && <Labels pushToast={pushToast} store={store}/>}
@@ -1160,13 +1185,13 @@ function App({ user, onLogout, onSwitchUser }) {
   );
 }
 
-function NavItem({ item, active, onClick, badge }) {
+function NavItem({ item, active, onClick, badge, attn }) {
   const Icon = item.icon;
   return (
     <div className={"nav-item" + (active ? " active" : "")} onClick={onClick}>
       <Icon className="nav-icon" size={16}/>
       <span>{item.label}</span>
-      {badge != null && <span className="nav-badge">{badge}</span>}
+      {badge != null && <span className={"nav-badge" + (attn ? " tk-attn" + (attn === "strong" ? " is-strong" : "") : "")}>{badge}</span>}
     </div>
   );
 }
