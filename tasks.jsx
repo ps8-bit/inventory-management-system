@@ -829,6 +829,7 @@ function TkShotSlot({ m, label, shot, busy, disabled, error, onPick, onRetry, re
 }
 
 /* ── list row ── */
+const TK_BACK_REASONS = ["รูปไม่ชัด ถ่ายใหม่", "ถ่ายรูปไม่ครบ", "ยังทำไม่เสร็จ", "จำนวนไม่ตรง นับใหม่", "ผิดตำแหน่ง/ผิดสินค้า"];
 function TaskRow({ t, onOpen }) {
   const ty = TASK_TYPES[t.type] || TASK_TYPES.general;
   const sub = [ty.label, t.assigneeName, t.due ? "กำหนด " + t.due : ""].filter(Boolean).join(" · ");
@@ -843,6 +844,7 @@ function TaskRow({ t, onOpen }) {
       <span style={{ flex: 1, minWidth: 0 }}>
         <span style={{ display: "block", fontWeight: 600, fontSize: 14 }}>{t.title}</span>
         <span style={tkMuted}>{sub}</span>
+        {t.data && t.data.urgent && TASK_OPEN.includes(t.status) && <span className="badge" style={{ marginLeft: 6, background: "var(--danger)", color: "#fff" }}>🔥 ด่วน</span>}
         {taskOverdue(t) && <span className="badge" style={{ marginLeft: 6, background: "var(--danger-soft)", color: "var(--danger)" }}>เลยกำหนด · เลย {_tkDaysLate(t.due)} วัน</span>}
         {t.status !== "cancel" && <TkProgress p={pr} mini/>}
       </span>
@@ -856,6 +858,8 @@ function TaskRow({ t, onOpen }) {
 
 /* ── task list (both roles) ── */
 const _tkSortGroup = arr => [...arr].sort((a, b) => {
+  const ua = a.data && a.data.urgent ? 0 : 1, ub = b.data && b.data.urgent ? 0 : 1;
+  if (ua !== ub) return ua - ub;
   const da = a.due || "9999-99-99", db = b.due || "9999-99-99";
   if (da !== db) return da < db ? -1 : 1;
   return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
@@ -1005,6 +1009,7 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
   const [trk, setTrk] = useStateTk(ed ? (ed.trk || "") : "");
   const [supplier, setSupplier] = useStateTk(ed ? (ed.supplier || "") : "");
   const [due, setDue] = useStateTk(edit ? (edit.due || "") : _tkToday());
+  const [urgent, setUrgent] = useStateTk(!!(edit && edit.data && edit.data.urgent));
   const [who, setWho] = useStateTk("");
   const [people, setPeople] = useStateTk([]);
   const [lines, setLines] = useStateTk(() => {
@@ -1068,6 +1073,7 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
     const data = type === "receive" ? { trk: trk.trim(), supplier: supplier.trim(), lines }
       : isPhoto ? { lines: lines.map(l => ({ sku: l.sku })) }
       : { items: list, checked: [], evidence, itemPhotos: [] };
+    data.urgent = urgent;
 
     if (edit) {
       const stale = "งานนี้เปลี่ยนไปแล้ว (พนักงานส่งรายงาน/แก้จากอีกเครื่อง) — ปิดแล้วเปิดแก้ใหม่";
@@ -1083,7 +1089,7 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
             const sameOwner = cur.title === edit.title && (cur.due || "") === (edit.due || "") && cur.assignee === edit.assignee
               && JSON.stringify(cd.items || []) === JSON.stringify(ed.items || []) && (cd.evidence || "one") === (ed.evidence || "one");
             if (!sameOwner || !["todo", "doing", "back"].includes(cur.status)) { setBusy(false); return setErr(stale); }
-            const gdata = { items: list, evidence,
+            const gdata = { items: list, evidence, urgent,
               checked: _tkRemap(cd.items, cd.checked, list, false),
               itemPhotos: _tkRemap(cd.items, cd.itemPhotos, list, null) };
             const patch = { title: finalTitle, due, data: gdata };
@@ -1166,6 +1172,12 @@ function TaskCreate({ m, onDone, onCancel, edit: editLive, preset }) {
         {!(type === "general" && repeat && !edit) && (
           <label style={tkMuted}>กำหนดเสร็จ
             <input className={inp} type="date" value={due} onChange={e => setDue(e.target.value)} style={{ width: "100%", marginTop: 4 }}/>
+          </label>
+        )}
+        {!(type === "general" && repeat && !edit) && (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
+            <input type="checkbox" checked={urgent} onChange={e => setUrgent(e.target.checked)}/>
+            <span>🔥 งานด่วน <span style={tkMuted}>(ขึ้นบนสุดของรายการ)</span></span>
           </label>
         )}
         <input className={inp} placeholder={type === "receive" ? "ชื่องาน (ไม่ใส่ = ตั้งจากเลขพัสดุ)" : isPhoto ? "ชื่องาน (ไม่ใส่ = ถ่ายรูปสินค้า N รายการ)" : "ชื่องาน เช่น ทำความสะอาดโซนแพ็ค"} value={title} onChange={e => setTitle(e.target.value)}/>
@@ -1932,6 +1944,13 @@ function TaskDetail({ m, id, onBack }) {
       {(canWork || (mgr && TASK_OPEN.includes(task.status))) && (
         <div style={{ ...tkCard, marginTop: 12 }}>
           <input className={inp} placeholder={mgr ? "เหตุผล / คอมเมนต์" : "ติดปัญหาอะไร? (เช่น ของยังไม่มา ไม่มีถุงขยะ)"} value={reason} onChange={e => { setReason(e.target.value); setErr(""); }} style={{ width: "100%" }}/>
+          {mgr && task.status === "review" && task.type !== "receive" && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+              {TK_BACK_REASONS.map(r => (
+                <button key={r} type="button" className="m-chip" onClick={() => { setReason(r); setErr(""); }}>{r}</button>
+              ))}
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
             {canWork && task.status !== "blocked" && (
               <TkBtn m={m} danger onClick={() => reason.trim() ? save({ status: "blocked", data: { reason: reason.trim(), prevStatus: task.status } }, "แจ้งติดปัญหา: " + reason.trim(), "แจ้งเจ้าของแล้ว").then(s => { if (s) { notifyTask(s, "blocked"); setReason(""); } }) : setErr("ใส่เหตุผลที่ติดปัญหา")}>ติดปัญหา</TkBtn>
