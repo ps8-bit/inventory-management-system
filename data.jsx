@@ -2508,9 +2508,9 @@ const ROLES = [
 const ROLE_NAV = {
   admin:   ["dashboard","tasks","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","users","layout","history","settings"],
   manager: ["dashboard","tasks","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","import","bundles","labels","tracking","analytics","handheld","history","settings"],
-  staff:   ["dashboard","tasks","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","bundles","labels","tracking","handheld"],
+  staff:   ["dashboard","inbound","outbound","pack","finder","inventory","stocktake","adjust","locations","bundles","labels","tracking","handheld"],
   // พนักงานแพ็ค — the แพ็คสินค้า page only (desktop sidebar AND mobile: no home/tabs).
-  packer:  ["pack", "tasks"],
+  packer:  ["pack"],
   viewer:  ["dashboard","finder","inventory","locations","bundles","labels","tracking","analytics"]
 };
 
