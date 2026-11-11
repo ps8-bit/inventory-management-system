@@ -2619,9 +2619,11 @@ function _orderAlertSnap() {
       channel: (typeof orderChannelLabel === "function") ? orderChannelLabel(o) : (o.channel || ""),
       status: o.status,
       items: _orderAlertItems(o),
-      name: String(o.customer || "").trim(),
-      phone: String(o.phone || "").replace(/\D/g, ""),
-      addr: String(o.shippingAddr || "").trim(),
+      // An address typed on the pack screen lives in the `shipTo` override and wins.
+      name: String((o.shipTo && o.shipTo.name) || o.customer || "").trim(),
+      phone: String((o.shipTo && o.shipTo.phone) || o.phone || "").replace(/\D/g, ""),
+      addr: String((o.shipTo && o.shipTo.addr) || o.shippingAddr || "").trim(),
+      docs: String(o.docsMark || ""),
       note: String(o.note || "").trim(),
       cod: Number(o.codAmount) || 0,
       carrier: String(o.carrier || "").trim(),
@@ -2648,6 +2650,12 @@ const ORDER_ALERT_FIELDS = [
   { k: "cod",     label: "ยอด COD", fmt: (v) => v ? Number(v).toLocaleString() + " ฿" : "ไม่เก็บเงินปลายทาง" },
   { k: "note",    label: "หมายเหตุ" },
   { k: "pnote",   label: "โน้ตออร์เดอร์" },
+  // docsMark = "<what>|<iso>" — show the action + time, never the raw stamp.
+  { k: "docs",    label: "ใบปะหน้า / ไฟล์แนบ", fmt: (v) => {
+      if (!v) return "—";
+      const i = v.lastIndexOf("|"), t = new Date(v.slice(i + 1));
+      return v.slice(0, i) + (isNaN(t) ? "" : " " + t.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }));
+    } },
 ];
 
 /* prev → next snapshot → alert records.

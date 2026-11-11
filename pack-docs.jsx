@@ -669,7 +669,30 @@ async function deleteOrderDocs(ids) {
   refreshOrderFileIds().catch(() => {});
 }
 
+/* A label/attachment change is stamped on the order (override `docsMark`, which
+   syncs live): other devices reload the file and the order-alert watcher reports
+   it to the packers ("ใบปะหน้า / ไฟล์แนบ" field). order_files itself has no feed. */
+function markOrderDocs(orderId, what) {
+  if (!orderId || typeof setOrderField !== "function") return;
+  setOrderField(orderId, { docsMark: what + "|" + new Date().toISOString() });
+}
+function useOrderDocsMark(orderId) {
+  const read = () => {
+    const ov = (typeof loadOrderOverrides === "function") ? loadOrderOverrides() : {};
+    return (ov && ov[orderId] && ov[orderId].docsMark) || "";
+  };
+  const [mark, setMark] = useStatePD(read);
+  useEffectPD(() => {
+    const h = () => setMark(read());
+    h();
+    window.addEventListener("ims-orders-change", h);
+    return () => window.removeEventListener("ims-orders-change", h);
+  }, [orderId]);
+  return mark;
+}
+
 function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
+  const docsMark = useOrderDocsMark(orderId);
   const [list, setList] = useStatePD([]);
   const [state, setState] = useStatePD("loading");   // loading | ok | error
   const [busy, setBusy] = useStatePD("");
@@ -686,7 +709,7 @@ function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
       .then(l => { if (alive) { setList(l); setState("ok"); } })
       .catch(() => { if (alive) setState("error"); });
     return () => { alive = false; };
-  }, [orderId, rev]);
+  }, [orderId, rev, docsMark]);
 
   const pick = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -701,14 +724,14 @@ function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
       } catch (err) { pushToast(`${files[i].name}: ${err.message || "แนบไฟล์ไม่สำเร็จ"}`); }
     }
     setBusy("");
-    if (ok) { pushToast(`แนบไฟล์แล้ว ${ok} ไฟล์`); setRev(x => x + 1); }
+    if (ok) { pushToast(`แนบไฟล์แล้ว ${ok} ไฟล์`); setRev(x => x + 1); markOrderDocs(orderId, "เพิ่มไฟล์แนบ " + ok + " ไฟล์"); }
   };
   const remove = async (a) => {
     if (!confirm(`ลบไฟล์ "${a.name || "ไฟล์แนบ"}"?`)) return;
     setBusy("กำลังลบ…");
     const res = await deleteOrderAttachment(a.id);
     setBusy("");
-    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); }
+    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); markOrderDocs(orderId, "ลบไฟล์แนบ"); }
   };
 
   if (mobile || unified) {
@@ -2161,7 +2184,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   };
   const saveAddr = () => {
     if (typeof setOrderField !== "function") return;
-    setOrderField(order.id, { shipTo: { name: edit.name.trim(), phone: edit.phone.trim(), addr: edit.addr.trim() } });
+    setOrderField(order.id, { shipTo: { name: edit.name.trim(), phone: edit.phone.trim(), addr: edit.addr.trim() }, shipToAt: new Date().toISOString() });
     setEdit(null);
     pushToast("บันทึกที่อยู่แล้ว");
   };
@@ -2206,7 +2229,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
       .then(f => { if (alive) { setFile(f); setState(f ? "ok" : "none"); } })
       .catch(() => { if (alive) setState("error"); });
     return () => { alive = false; };
-  }, [order.id, rev]);
+  }, [order.id, rev, order.docsMark]);   // docsMark: another device replaced the label
 
   const pick = async (e) => {
     const f = e.target.files && e.target.files[0];
@@ -2217,7 +2240,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
       const data = await readOrderFile(f);
       const res = await saveOrderFile(order.id, data);
       if (res.error) pushToast("แนบไฟล์ไม่สำเร็จ: " + res.error);
-      else { pushToast("แนบใบปะหน้าแล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); }
+      else { pushToast("แนบใบปะหน้าแล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); markOrderDocs(order.id, file ? "เปลี่ยนใบปะหน้า" : "แนบใบปะหน้า"); }
     } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
     setBusy(false);
   };
@@ -2226,7 +2249,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
     setBusy(true);
     const res = await saveOrderFile(order.id, null);
     setBusy(false);
-    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); }
+    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); markOrderDocs(order.id, "ลบใบปะหน้า"); }
   };
   const cancel = async () => {
     const pcs = (lines || []).reduce((n, l) => n + (Number(l.qty) || 0), 0);
@@ -3002,7 +3025,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile, openFileViewer, nameOrderFileByOrderNo, openPackLabelBatch, markLabelsPrinted,
-  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
+  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, markOrderDocs, useOrderDocsMark, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });
