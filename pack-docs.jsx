@@ -721,33 +721,59 @@ function PackNotePhotos({ orderId }) {
   );
 }
 
-/* Persistent "this order was edited" marker. The alert panel only shows at the
-   moment of the change; once closed (or missed) nothing on the order said so.
-   Driven by THIS device's unacknowledged order alerts (per-device, like the
-   panel), so it clears on รับทราบ here or when the order is packed. */
-function usePackEditAlert(orderId) {
-  const read = () => (typeof loadOrderAlerts === "function" ? loadOrderAlerts() : []).find(a => a.id === orderId && a.kind === "edit") || null;
-  const [a, setA] = useStatePD(read);
-  useEffectPD(() => {
-    const h = () => setA(read());
-    h();
-    window.addEventListener("ims-order-alerts-change", h);
-    return () => window.removeEventListener("ims-order-alerts-change", h);
-  }, [orderId]);
-  return a;
+/* Persistent "this order was edited" marker on the pack list. Two sources:
+   the order's own `editMark` (synced — every device, incl. the editor's and one
+   that was closed at the time) and this device's live alert (covers edits from
+   clients that don't stamp yet). Cleared PER DEVICE: ตรวจสอบแล้ว, or opening the
+   order on a device that has no alert card for it. */
+const PACK_EDIT_ACK_KEY = "ims_pack_edit_ack_v1";
+function _packEditAcks() { try { return JSON.parse(localStorage.getItem(PACK_EDIT_ACK_KEY) || "{}") || {}; } catch (e) { return {}; } }
+function ackPackEdit(orderId) {
+  const m = _packEditAcks();
+  m[orderId] = Date.now();
+  // keep it small: drop acks older than 14 days
+  const cut = Date.now() - 14 * 86400000;
+  Object.keys(m).forEach(k => { if (m[k] < cut) delete m[k]; });
+  try { localStorage.setItem(PACK_EDIT_ACK_KEY, JSON.stringify(m)); } catch (e) {}
+  window.dispatchEvent(new CustomEvent("ims-order-alerts-change"));
 }
-function PackEditFlag({ orderId }) {
-  const a = usePackEditAlert(orderId);
-  if (!a) return null;
-  const parts = [...(a.diff || []).map(d => d.sku + " " + d.from + "→" + d.to), ...(a.fields || []).map(f => f.label)];
-  const time = a.at ? new Date(a.at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "";
-  // The order screen already shows the full before → after (with ตรวจสอบแล้ว);
-  // this chip is what the LIST was missing.
+function packEditInfo(order) {
+  if (!order) return null;
+  const al = (typeof loadOrderAlerts === "function" ? loadOrderAlerts() : []).find(a => a.id === order.id && a.kind === "edit");
+  if (al) return { at: al.at, by: "", what: [...(al.diff || []).map(d => d.sku + " " + d.from + "→" + d.to), ...(al.fields || []).map(f => f.label)], alert: true };
+  const m = order.editMark;
+  if (!m || !m.at) return null;
+  if ((_packEditAcks()[order.id] || 0) >= m.at) return null;
+  return { at: m.at, by: m.by || "", what: m.what || [], alert: false };
+}
+function usePackEditTick() {
+  const [, bump] = useStatePD(0);
+  useEffectPD(() => {
+    const h = () => bump(x => x + 1);
+    window.addEventListener("ims-order-alerts-change", h);
+    window.addEventListener("ims-orders-change", h);
+    return () => { window.removeEventListener("ims-order-alerts-change", h); window.removeEventListener("ims-orders-change", h); };
+  }, []);
+}
+function PackEditFlag({ order }) {
+  usePackEditTick();
+  const e = packEditInfo(order);
+  if (!e) return null;
+  const time = e.at ? new Date(e.at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "";
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4, alignSelf: "flex-start", maxWidth: "100%", padding: "2px 9px", borderRadius: 999, background: "var(--warning)", color: "#fff", fontSize: 11.5, fontWeight: 700, lineHeight: 1.4 }}>
-      ✏️ มีการแก้ไข{time ? " " + time : ""}{parts.length ? " · " + parts.join(", ") : ""} — ตรวจก่อนแพ็ค
+      ✏️ มีการแก้ไข{time ? " " + time : ""}{e.by ? " โดย " + e.by : ""}{e.what.length ? " · " + e.what.join(", ") : ""} — ตรวจก่อนแพ็ค
     </span>
   );
+}
+// Rendered inside an opened order: seeing it counts as checked on THIS device,
+// unless an alert card is waiting here (then ตรวจสอบแล้ว clears both).
+function PackEditSeen({ order }) {
+  useEffectPD(() => {
+    const e = packEditInfo(order);
+    if (e && !e.alert) ackPackEdit(order.id);
+  }, [order && order.id, order && order.editMark && order.editMark.at]);
+  return null;
 }
 
 function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
@@ -3093,7 +3119,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile, openFileViewer, nameOrderFileByOrderNo, openPackLabelBatch, markLabelsPrinted,
-  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, markOrderDocs, PackEditFlag, usePackEditAlert, useOrderDocsMark, MPackNew, MPackAdd, PackAddedBanner,
+  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, markOrderDocs, PackEditFlag, PackEditSeen, ackPackEdit, packEditInfo, useOrderDocsMark, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments, PackNotePhotos,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });
