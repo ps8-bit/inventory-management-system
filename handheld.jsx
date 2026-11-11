@@ -7908,7 +7908,7 @@ function MPack({ ctx }) {
                     </span>
                     {r.o.platformOrderNo && <span className="mp-orderno mono">{r.o.platform || "คำสั่งซื้อ"} {r.o.platformOrderNo}</span>}
                     {typeof PackLateBadge === "function" && packLateDays(r.o) > 0 && <span><PackLateBadge order={r.o} compact/></span>}
-                    {typeof PackEditFlag === "function" && <PackEditFlag orderId={r.o.id}/>}
+                    {typeof PackEditFlag === "function" && <PackEditFlag order={r.o}/>}
                     {w && <span className="mp-wave">กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</span>}
                     {typeof PackAddedBanner === "function" && <PackAddedBanner order={r.o} compact/>}
                     {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}
@@ -8142,6 +8142,7 @@ function MPackOrder({ ctx }) {
             {totals.shortLines > 0 && <><span>·</span><span style={{ color: "var(--warning)" }}>ของขาด {totals.shortLines}</span></>}
           </div>
           {order.note && <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--warning-soft)", color: "var(--warning)", borderRadius: 8, fontSize: 11.5 }}>โน้ต: {order.note}</div>}
+          {typeof PackEditSeen === "function" && <PackEditSeen order={order}/>}
           <MPackOrderNote orderId={order.id} user={ctx.user}/>
           {typeof OrderChangeBanner === "function" && <OrderChangeBanner orderId={order.id}/>}
           {typeof PackAddedBanner === "function" && <PackAddedBanner order={order}/>}

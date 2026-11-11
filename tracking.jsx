@@ -2543,7 +2543,10 @@ function _saveOrderAlerts(list) {
   try { localStorage.setItem(ORDER_ALERTS_KEY, JSON.stringify(list.slice(0, ORDER_ALERT_MAX))); } catch (e) {}
   window.dispatchEvent(new CustomEvent("ims-order-alerts-change"));
 }
-function ackOrderAlert(orderId) { _saveOrderAlerts(loadOrderAlerts().filter(a => a.id !== orderId)); }
+function ackOrderAlert(orderId) {
+  _saveOrderAlerts(loadOrderAlerts().filter(a => a.id !== orderId));
+  if (typeof ackPackEdit === "function") ackPackEdit(orderId);
+}
 function ackAllOrderAlerts() { _saveOrderAlerts([]); }
 
 /* Auto-close an alert ONLY when the work it asked for provably happened: the
@@ -2815,6 +2818,19 @@ function _orderAlertLiveIds() {
 }
 
 /* The watcher — started once by whichever shell mounts first. */
+/* Record an edit ON THE ORDER (override `editMark`, synced to every device), so
+   the pack list can flag it everywhere — including the device that made it, one
+   that was closed at the time, and the owner's. The live alert alone only reached
+   devices that had the app open, minus the editor. editMark is not a watched
+   field, so writing it raises no second alert. */
+function _stampOrderEdits(alerts) {
+  const by = (window.__currentUser && window.__currentUser.name) || "";
+  alerts.filter(a => a.kind === "edit").forEach(a => {
+    const what = [...(a.diff || []).map(d => d.sku), ...(a.fields || []).map(f => f.label)].slice(0, 6);
+    setTimeout(() => { if (typeof setOrderField === "function") setOrderField(a.id, { editMark: { at: Date.now(), by, what } }); }, 0);
+  });
+}
+
 let _oaStarted = false;
 function startOrderAlertWatch() {
   if (_oaStarted) return;
@@ -2881,7 +2897,7 @@ function startOrderAlertWatch() {
     const next = _orderAlertSnap();
     const own = _orderAlertDiff(snap, next, "local");
     snap = next;
-    if (own.length) _queueOrderPush(own);
+    if (own.length) { _queueOrderPush(own); _stampOrderEdits(own); }
   };
   ["ims-orders-change", "ims-labels-change", "ims-pack-change"].forEach(ev => window.addEventListener(ev, onChange));
   // Close alerts whose order has since been packed (here or on another device).
