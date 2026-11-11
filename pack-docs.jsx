@@ -669,7 +669,30 @@ async function deleteOrderDocs(ids) {
   refreshOrderFileIds().catch(() => {});
 }
 
+/* A label/attachment change is stamped on the order (override `docsMark`, which
+   syncs live): other devices reload the file and the order-alert watcher reports
+   it to the packers ("ใบปะหน้า / ไฟล์แนบ" field). order_files itself has no feed. */
+function markOrderDocs(orderId, what) {
+  if (!orderId || typeof setOrderField !== "function") return;
+  setOrderField(orderId, { docsMark: what + "|" + new Date().toISOString() });
+}
+function useOrderDocsMark(orderId) {
+  const read = () => {
+    const ov = (typeof loadOrderOverrides === "function") ? loadOrderOverrides() : {};
+    return (ov && ov[orderId] && ov[orderId].docsMark) || "";
+  };
+  const [mark, setMark] = useStatePD(read);
+  useEffectPD(() => {
+    const h = () => setMark(read());
+    h();
+    window.addEventListener("ims-orders-change", h);
+    return () => window.removeEventListener("ims-orders-change", h);
+  }, [orderId]);
+  return mark;
+}
+
 function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
+  const docsMark = useOrderDocsMark(orderId);
   const [list, setList] = useStatePD([]);
   const [state, setState] = useStatePD("loading");   // loading | ok | error
   const [busy, setBusy] = useStatePD("");
@@ -686,7 +709,7 @@ function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
       .then(l => { if (alive) { setList(l); setState("ok"); } })
       .catch(() => { if (alive) setState("error"); });
     return () => { alive = false; };
-  }, [orderId, rev]);
+  }, [orderId, rev, docsMark]);
 
   const pick = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -701,14 +724,14 @@ function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
       } catch (err) { pushToast(`${files[i].name}: ${err.message || "แนบไฟล์ไม่สำเร็จ"}`); }
     }
     setBusy("");
-    if (ok) { pushToast(`แนบไฟล์แล้ว ${ok} ไฟล์`); setRev(x => x + 1); }
+    if (ok) { pushToast(`แนบไฟล์แล้ว ${ok} ไฟล์`); setRev(x => x + 1); markOrderDocs(orderId, "เพิ่มไฟล์แนบ " + ok + " ไฟล์"); }
   };
   const remove = async (a) => {
     if (!confirm(`ลบไฟล์ "${a.name || "ไฟล์แนบ"}"?`)) return;
     setBusy("กำลังลบ…");
     const res = await deleteOrderAttachment(a.id);
     setBusy("");
-    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); }
+    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); markOrderDocs(orderId, "ลบไฟล์แนบ"); }
   };
 
   if (mobile || unified) {
@@ -2161,7 +2184,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   };
   const saveAddr = () => {
     if (typeof setOrderField !== "function") return;
-    setOrderField(order.id, { shipTo: { name: edit.name.trim(), phone: edit.phone.trim(), addr: edit.addr.trim() } });
+    setOrderField(order.id, { shipTo: { name: edit.name.trim(), phone: edit.phone.trim(), addr: edit.addr.trim() }, shipToAt: new Date().toISOString() });
     setEdit(null);
     pushToast("บันทึกที่อยู่แล้ว");
   };
@@ -2169,6 +2192,10 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   /* Read order number + tracking off the label once it's loaded, and keep them on
      the order (overrides) so search / tracking / ship-status use the real numbers. */
   const [codes, setCodes] = useStatePD(null);   // null | "reading" | {orderNo,tracking,platform} | "none"
+  // Set only on the device that just REPLACED the label: the new file's codes then
+  // overwrite the old ones (tracking/platform/name/address used to be fill-if-empty
+  // only, so a corrected label kept the previous label's tracking and address).
+  const replacedRef = useRefPD(false);
   useEffectPD(() => {
     if (!file) { setCodes(null); return; }
     let alive = true;
@@ -2178,12 +2205,17 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
         if (!alive) return;
         setCodes(c || "none");
         if (!c || !canAttach || typeof setOrderField !== "function") return;
+        const replaced = replacedRef.current;
+        replacedRef.current = false;
         const ch = {};
         if (c.orderNo && c.orderNo !== order.platformOrderNo) ch.platformOrderNo = c.orderNo;
-        if (c.platform && !order.platform) ch.platform = c.platform;
-        if (c.tracking && !order.tracking) ch.tracking = c.tracking;
-        if (c.name && isLabelPlaceholderName(order.customer)) ch.customer = c.name;
-        if (c.addr && !(order.shipTo && order.shipTo.addr) && !(packRecipientFor(order) || {}).addr) ch.shipTo = { name: c.name || "", phone: c.phone || "", addr: c.addr };
+        if (c.platform && (replaced ? c.platform !== order.platform : !order.platform)) ch.platform = c.platform;
+        if (c.tracking && (replaced ? c.tracking !== order.tracking : !order.tracking)) ch.tracking = c.tracking;
+        if (c.name && (replaced ? c.name !== order.customer : isLabelPlaceholderName(order.customer))) ch.customer = c.name;
+        if (c.addr && (replaced
+              ? c.addr !== ((order.shipTo && order.shipTo.addr) || "")
+              : (!(order.shipTo && order.shipTo.addr) && !(packRecipientFor(order) || {}).addr)))
+          ch.shipTo = { name: c.name || "", phone: c.phone || "", addr: c.addr };
         if (Object.keys(ch).length) setOrderField(order.id, ch);
       })
       .catch(() => { if (alive) setCodes("none"); });
@@ -2206,7 +2238,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
       .then(f => { if (alive) { setFile(f); setState(f ? "ok" : "none"); } })
       .catch(() => { if (alive) setState("error"); });
     return () => { alive = false; };
-  }, [order.id, rev]);
+  }, [order.id, rev, order.docsMark]);   // docsMark: another device replaced the label
 
   const pick = async (e) => {
     const f = e.target.files && e.target.files[0];
@@ -2217,7 +2249,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
       const data = await readOrderFile(f);
       const res = await saveOrderFile(order.id, data);
       if (res.error) pushToast("แนบไฟล์ไม่สำเร็จ: " + res.error);
-      else { pushToast("แนบใบปะหน้าแล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); }
+      else { if (file) replacedRef.current = true; pushToast("แนบใบปะหน้าแล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); markOrderDocs(order.id, file ? "เปลี่ยนใบปะหน้า" : "แนบใบปะหน้า"); }
     } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
     setBusy(false);
   };
@@ -2226,7 +2258,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
     setBusy(true);
     const res = await saveOrderFile(order.id, null);
     setBusy(false);
-    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); }
+    if (res.error) pushToast(res.error); else { pushToast("ลบไฟล์แล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); markOrderDocs(order.id, "ลบใบปะหน้า"); }
   };
   const cancel = async () => {
     const pcs = (lines || []).reduce((n, l) => n + (Number(l.qty) || 0), 0);
@@ -2461,8 +2493,17 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
       .map(p => ({ key: "s:" + p.sku, type: "sku", sku: p.sku, name: p.name, stock: avail(p.sku) }))
   ].sort((a, b) => (b.stock > 0) - (a.stock > 0));
   const hits = allHits.slice(0, 1000);
+  // A tap on the list only ADDS a product. A row already in the cart is never
+  // bumped from here — brushing it while scrolling silently raised the qty and the
+  // packer packed that wrong count. Quantity changes only via the cart's −/＋.
+  const [flashKey, setFlashKey] = useStatePD("");
   const add = (h) => {
-    setCart(c => c.some(x => x.key === h.key) ? c.map(x => x.key === h.key ? { ...x, qty: x.qty + 1 } : x) : [...c, { ...h, qty: 1 }]);
+    if (cart.some(x => x.key === h.key)) {
+      setFlashKey(h.key);
+      setTimeout(() => setFlashKey(k => (k === h.key ? "" : k)), 1400);
+      return;
+    }
+    setCart(c => c.some(x => x.key === h.key) ? c : [...c, { ...h, qty: 1 }]);
   };
   const setQty = (key, n) => setCart(c => n <= 0 ? c.filter(x => x.key !== key) : c.map(x => x.key === key ? { ...x, qty: n } : x));
 
@@ -2621,7 +2662,7 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
                   <span style={{ fontSize: 12, color: "var(--muted)" }}>{h.sku ? "" : "ชุดสินค้า · "}เหลือ {h.stock}</span>
                 </span>
                 {(() => { const inCart = cart.find(c => c.key === h.key); return inCart
-                  ? <span style={{ fontSize: 13, color: "#fff", background: "var(--accent)", borderRadius: 999, padding: "2px 9px", fontWeight: 700 }}>{inCart.qty}</span>
+                  ? <span style={{ fontSize: 12, color: "var(--success)", background: "var(--success-soft)", borderRadius: 999, padding: "2px 9px", fontWeight: 700, whiteSpace: "nowrap" }}>✓ เลือกแล้ว ×{inCart.qty}</span>
                   : <span style={{ fontSize: 20, color: "var(--accent)", fontWeight: 700 }}>＋</span>; })()}
               </button>
             ))}
@@ -2630,11 +2671,12 @@ function PackNewOrder({ onClose, pushToast, mobile, addTo, user }) {
         {cart.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
             {cart.map(x => (
-              <div key={x.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 12, background: "var(--surface-2)" }}>
+              <div key={x.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 12, background: flashKey === x.key ? "var(--warning-soft)" : "var(--surface-2)", outline: flashKey === x.key ? "2px solid var(--warning)" : "none", transition: "background .2s" }}>
                 {x.type === "sku" && typeof ProductImageThumb === "function" ? <ProductImageThumb sku={x.sku} size={44} radius={8} zoom caption={x.sku + (x.name ? " · " + x.name : "")}/> : <span style={{ width: 44, textAlign: "center", fontSize: 22 }}>📦</span>}
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span style={{ display: "block", fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.type === "bundle" ? "ชุด: " : ""}{x.name}</span>
                   {x.type === "sku" && <span className="mono" style={{ display: "block", fontSize: 13, fontWeight: 700, color: "var(--fg-2)", overflowWrap: "anywhere", lineHeight: 1.3 }}>{x.sku}</span>}
+                  {flashKey === x.key && <span style={{ display: "block", fontSize: 11.5, color: "var(--warning)", fontWeight: 700 }}>อยู่ในรายการแล้ว — ใช้ − / ＋ เพื่อเปลี่ยนจำนวน</span>}
                 </span>
                 <button className="btn btn-sm" style={{ width: 34, height: 34, justifyContent: "center", fontSize: 18 }} onClick={() => setQty(x.key, x.qty - 1)}>−</button>
                 <span className="tnum" style={{ width: 26, textAlign: "center", fontSize: 17, fontWeight: 700 }}>{x.qty}</span>
@@ -2992,7 +3034,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile, openFileViewer, nameOrderFileByOrderNo, openPackLabelBatch, markLabelsPrinted,
-  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, MPackNew, MPackAdd, PackAddedBanner,
+  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, markOrderDocs, useOrderDocsMark, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });

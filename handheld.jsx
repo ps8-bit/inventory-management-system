@@ -7660,14 +7660,52 @@ function MPackShortSheet({ line, picked, onClose, onResolve, pushToast }) {
 
 /* Queue of orders waiting to be packed. Doubles as the wave builder: tick several
    orders and start one merged walk. */
+/* Where the pack list was when an order was opened, so ← lands on the same card
+   instead of the top (same anchor approach as MInventory's _mInvMemo). */
+let _mPackMemo = null;
 function MPack({ ctx }) {
+  const memo = useMemoM(() => { const m = _mPackMemo; _mPackMemo = null; return m; }, []);
+  const contentRef = useRefM(null);
   const [tick, setTick] = useStateM(0);
   const [selecting, setSelecting] = useStateM(false);
   const [sel, setSel] = useStateM({});
   const [labelCfg, setLabelCfg] = useStateM(false);   // ⚙ ตั้งค่าใบปะหน้า — shop-wide
-  const [view, setView] = useStateM(() => (ctx.route.params && ctx.route.params.view === "done") ? "done" : "open");           // "open" = กำลังแพ็ค · "done" = แพ็คเสร็จแล้ว (reopen label/address)
-  const [showN, setShowN] = useStateM(30);               // long queues render in pages
-  const [plat, setPlat] = useStateM("");                // platform filter ("" = all)
+  const [view, setView] = useStateM(() => memo ? memo.view : ((ctx.route.params && ctx.route.params.view === "done") ? "done" : "open"));           // "open" = กำลังแพ็ค · "done" = แพ็คเสร็จแล้ว (reopen label/address)
+  const [showN, setShowN] = useStateM(memo ? memo.showN : 30);               // long queues render in pages
+  const [plat, setPlat] = useStateM(memo ? memo.plat : "");
+  // Re-pin the tapped card to its old on-screen offset while the list settles
+  // (cards above grow as badges/progress load), until the user scrolls.
+  useEffectM(() => {
+    if (!memo) return;
+    const el = contentRef.current;
+    if (!el) return;
+    let stop = false;
+    const halt = () => { stop = true; };
+    const pin = () => {
+      if (stop) return;
+      const card = memo.id ? el.querySelector('[data-oid="' + CSS.escape(memo.id) + '"]') : null;
+      if (card) el.scrollTop += (card.getBoundingClientRect().top - el.getBoundingClientRect().top) - memo.rowOffset;
+      else el.scrollTop = memo.scroll;
+    };
+    pin(); requestAnimationFrame(pin);
+    const timers = [80, 200, 400, 700, 1100, 1800].map(ms => setTimeout(pin, ms));
+    el.addEventListener("touchstart", halt, { passive: true });
+    el.addEventListener("wheel", halt, { passive: true });
+    el.addEventListener("load", pin, true);
+    return () => {
+      stop = true; timers.forEach(clearTimeout);
+      el.removeEventListener("touchstart", halt); el.removeEventListener("wheel", halt);
+      el.removeEventListener("load", pin, true);
+    };
+  }, []);
+  const openFrom = (ev, id, route, params) => {
+    const el = contentRef.current;
+    const card = ev && ev.currentTarget;
+    _mPackMemo = { view, plat, showN, id,
+                   scroll: el ? el.scrollTop : 0,
+                   rowOffset: (el && card) ? card.getBoundingClientRect().top - el.getBoundingClientRect().top : 0 };
+    ctx.push(route, params);
+  };                // platform filter ("" = all)
 
   useEffectM(() => {
     const refresh = () => setTick(t => t + 1);
@@ -7754,7 +7792,7 @@ function MPack({ ctx }) {
           </button>
         )}
       </div>
-      <div className="m-content">
+      <div className="m-content" ref={contentRef}>
         {/* กำลังแพ็ค / แพ็คเสร็จแล้ว */}
         {!selecting && (
           <div className="mp-tabs" role="tablist">
@@ -7778,7 +7816,7 @@ function MPack({ ctx }) {
             </div>
             <div className="mp-cards">
               {doneList.map(o => (
-                <button key={o.id} type="button" className="mp-card" onClick={() => ctx.push("pack-order", { id: o.id })}>
+                <button key={o.id} type="button" className="mp-card" data-oid={o.id} onClick={ev => openFrom(ev, o.id, "pack-order", { id: o.id })}>
                   <span className="mp-card-top">
                     <span className="mp-id mono">{o.id}</span>
                     {o.status === "packed"
@@ -7812,7 +7850,7 @@ function MPack({ ctx }) {
             {waves.length > 0 && !selecting && (
               <div className="mp-cards" style={{ marginBottom: 12 }}>
                 {waves.map(w => (
-                  <button key={w.id} type="button" className="mp-card mp-card-info" onClick={() => ctx.push("pack-wave", { batchId: w.id })}>
+                  <button key={w.id} type="button" className="mp-card mp-card-info" data-oid={"w:" + w.id} onClick={ev => openFrom(ev, "w:" + w.id, "pack-wave", { batchId: w.id })}>
                     <span className="mp-card-top">
                       <span className="mp-cust">หยิบรวม {(w.rec.orderIds || []).length} ออร์เดอร์</span>
                       <Icons.Chev size={15}/>
@@ -7851,11 +7889,11 @@ function MPack({ ctx }) {
                 const pf = typeof packPlatformOf === "function" ? packPlatformOf(r.o) : (r.o.channel || "");
                 const isSel = !!sel[r.o.id];
                 return (
-                  <button key={r.o.id} type="button" className={"mp-card" + (isSel ? " is-sel" : "") + (selecting && w ? " is-dim" : "")} aria-pressed={selecting ? isSel : undefined}
-                    onClick={() => {
+                  <button key={r.o.id} type="button" className={"mp-card" + (isSel ? " is-sel" : "") + (selecting && w ? " is-dim" : "")} aria-pressed={selecting ? isSel : undefined} data-oid={r.o.id}
+                    onClick={ev => {
                       if (selecting) { if (w) { ctx.pushToast("ออร์เดอร์นี้อยู่ในรอบหยิบรวมอื่นแล้ว"); return; } toggleSel(r.o.id); return; }
-                      if (w) { ctx.push("pack-wave", { batchId: w }); return; }
-                      ctx.push("pack-order", { id: r.o.id });
+                      if (w) { openFrom(ev, r.o.id, "pack-wave", { batchId: w }); return; }
+                      openFrom(ev, r.o.id, "pack-order", { id: r.o.id });
                     }}>
                     <span className="mp-card-top">
                       {selecting && <span className={"mp-check" + (isSel ? " on" : "")}>{isSel ? <Icons.Check size={13}/> : null}</span>}
