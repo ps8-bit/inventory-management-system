@@ -7603,6 +7603,7 @@ function PackQueue({ pushToast, goTo, user, focus }) {
                       <div className="pq-cust">{typeof PackOrderWho === "function" ? <PackOrderWho order={r.o}/> : (r.o.customer || "—")}</div>
                       {typeof packOrderTime === "function" && packOrderTime(r.o) && <div className="pq-time">{packOrderTime(r.o)}</div>}
                       {typeof PackLateBadge === "function" && <div><PackLateBadge order={r.o} compact/></div>}
+                      {typeof PackEditFlag === "function" && <div><PackEditFlag orderId={r.o.id}/></div>}
                       {w && <div style={{ fontSize: 11, color: "var(--info)", marginTop: 2 }}>หยิบรวม · {w.rec.stage === "sort" ? "แยกลงออร์เดอร์" : "เดินหยิบ"}</div>}
                       {typeof PackAddedBanner === "function" && <div><PackAddedBanner order={r.o} compact/></div>}
                       {typeof PackDocChip === "function" && <div><PackDocChip order={r.o} onOpen={() => setOpen(r.o.id)}/></div>}
