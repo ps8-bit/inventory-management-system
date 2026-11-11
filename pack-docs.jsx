@@ -691,6 +691,35 @@ function useOrderDocsMark(orderId) {
   return mark;
 }
 
+/* Persistent "this order was edited" marker. The alert panel only shows at the
+   moment of the change; once closed (or missed) nothing on the order said so.
+   Driven by THIS device's unacknowledged order alerts (per-device, like the
+   panel), so it clears on รับทราบ here or when the order is packed. */
+function usePackEditAlert(orderId) {
+  const read = () => (typeof loadOrderAlerts === "function" ? loadOrderAlerts() : []).find(a => a.id === orderId && a.kind === "edit") || null;
+  const [a, setA] = useStatePD(read);
+  useEffectPD(() => {
+    const h = () => setA(read());
+    h();
+    window.addEventListener("ims-order-alerts-change", h);
+    return () => window.removeEventListener("ims-order-alerts-change", h);
+  }, [orderId]);
+  return a;
+}
+function PackEditFlag({ orderId }) {
+  const a = usePackEditAlert(orderId);
+  if (!a) return null;
+  const parts = [...(a.diff || []).map(d => d.sku + " " + d.from + "→" + d.to), ...(a.fields || []).map(f => f.label)];
+  const time = a.at ? new Date(a.at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) : "";
+  // The order screen already shows the full before → after (with ตรวจสอบแล้ว);
+  // this chip is what the LIST was missing.
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, alignSelf: "flex-start", maxWidth: "100%", padding: "2px 9px", borderRadius: 999, background: "var(--warning)", color: "#fff", fontSize: 11.5, fontWeight: 700, lineHeight: 1.4 }}>
+      ✏️ มีการแก้ไข{time ? " " + time : ""}{parts.length ? " · " + parts.join(", ") : ""} — ตรวจก่อนแพ็ค
+    </span>
+  );
+}
+
 function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
   const docsMark = useOrderDocsMark(orderId);
   const [list, setList] = useStatePD([]);
@@ -3034,7 +3063,7 @@ function PackSendPrompt({ pushToast, mobile }) {
 
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile, openFileViewer, nameOrderFileByOrderNo, openPackLabelBatch, markLabelsPrinted,
-  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, markOrderDocs, useOrderDocsMark, MPackNew, MPackAdd, PackAddedBanner,
+  packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, markOrderDocs, PackEditFlag, usePackEditAlert, useOrderDocsMark, MPackNew, MPackAdd, PackAddedBanner,
   loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });
