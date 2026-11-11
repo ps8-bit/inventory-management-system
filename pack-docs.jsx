@@ -2192,6 +2192,10 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
   /* Read order number + tracking off the label once it's loaded, and keep them on
      the order (overrides) so search / tracking / ship-status use the real numbers. */
   const [codes, setCodes] = useStatePD(null);   // null | "reading" | {orderNo,tracking,platform} | "none"
+  // Set only on the device that just REPLACED the label: the new file's codes then
+  // overwrite the old ones (tracking/platform/name/address used to be fill-if-empty
+  // only, so a corrected label kept the previous label's tracking and address).
+  const replacedRef = useRefPD(false);
   useEffectPD(() => {
     if (!file) { setCodes(null); return; }
     let alive = true;
@@ -2201,12 +2205,17 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
         if (!alive) return;
         setCodes(c || "none");
         if (!c || !canAttach || typeof setOrderField !== "function") return;
+        const replaced = replacedRef.current;
+        replacedRef.current = false;
         const ch = {};
         if (c.orderNo && c.orderNo !== order.platformOrderNo) ch.platformOrderNo = c.orderNo;
-        if (c.platform && !order.platform) ch.platform = c.platform;
-        if (c.tracking && !order.tracking) ch.tracking = c.tracking;
-        if (c.name && isLabelPlaceholderName(order.customer)) ch.customer = c.name;
-        if (c.addr && !(order.shipTo && order.shipTo.addr) && !(packRecipientFor(order) || {}).addr) ch.shipTo = { name: c.name || "", phone: c.phone || "", addr: c.addr };
+        if (c.platform && (replaced ? c.platform !== order.platform : !order.platform)) ch.platform = c.platform;
+        if (c.tracking && (replaced ? c.tracking !== order.tracking : !order.tracking)) ch.tracking = c.tracking;
+        if (c.name && (replaced ? c.name !== order.customer : isLabelPlaceholderName(order.customer))) ch.customer = c.name;
+        if (c.addr && (replaced
+              ? c.addr !== ((order.shipTo && order.shipTo.addr) || "")
+              : (!(order.shipTo && order.shipTo.addr) && !(packRecipientFor(order) || {}).addr)))
+          ch.shipTo = { name: c.name || "", phone: c.phone || "", addr: c.addr };
         if (Object.keys(ch).length) setOrderField(order.id, ch);
       })
       .catch(() => { if (alive) setCodes("none"); });
@@ -2240,7 +2249,7 @@ function PackShipDocs({ order, lines, pushToast, mobile, onCancelled }) {
       const data = await readOrderFile(f);
       const res = await saveOrderFile(order.id, data);
       if (res.error) pushToast("แนบไฟล์ไม่สำเร็จ: " + res.error);
-      else { pushToast("แนบใบปะหน้าแล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); markOrderDocs(order.id, file ? "เปลี่ยนใบปะหน้า" : "แนบใบปะหน้า"); }
+      else { if (file) replacedRef.current = true; pushToast("แนบใบปะหน้าแล้ว"); setRev(x => x + 1); refreshOrderFileIds().catch(() => {}); markOrderDocs(order.id, file ? "เปลี่ยนใบปะหน้า" : "แนบใบปะหน้า"); }
     } catch (err) { pushToast(err.message || "แนบไฟล์ไม่สำเร็จ"); }
     setBusy(false);
   };
