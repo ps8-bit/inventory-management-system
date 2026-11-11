@@ -7911,6 +7911,7 @@ function MPack({ ctx }) {
                     </span>
                     {r.o.platformOrderNo && <span className="mp-orderno mono">{r.o.platform || "คำสั่งซื้อ"} {r.o.platformOrderNo}</span>}
                     {typeof PackLateBadge === "function" && packLateDays(r.o) > 0 && <span><PackLateBadge order={r.o} compact/></span>}
+                    {typeof PackEditFlag === "function" && <PackEditFlag orderId={r.o.id}/>}
                     {w && <span className="mp-wave">กำลังหยิบรวมอยู่ — แตะเพื่อเปิดรอบนั้น</span>}
                     {typeof PackAddedBanner === "function" && <PackAddedBanner order={r.o} compact/>}
                     {!selecting && typeof PackDocChip === "function" && <PackDocChip order={r.o}/>}
