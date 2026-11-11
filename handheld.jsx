@@ -7479,13 +7479,15 @@ function MPackOrderNote({ orderId, user, compact }) {
   const note = packOrderNote(orderId);
   const canEdit = typeof canEditPackLocNotes === "function" && canEditPackLocNotes();
   const edit = () => editPackOrderNote(orderId, (user && user.name) || "");
+  const photos = (!compact && typeof PackNotePhotos === "function") ? <PackNotePhotos orderId={orderId}/> : null;
   if (!note) {
-    if (!canEdit) return null;
-    return (
+    if (!canEdit) return photos;
+    return (<>
+      {photos}
       <button onClick={edit} style={{ background: "none", border: "1px dashed var(--border)", borderRadius: 10, padding: "8px 12px", color: "var(--muted)", fontSize: 12, cursor: "pointer", width: "100%", textAlign: "left", marginTop: compact ? 0 : 10 }}>
         + เพิ่มโน้ตออร์เดอร์ (รายละเอียดงานของออร์เดอร์นี้)
       </button>
-    );
+    </>);
   }
   return (
     <div onClick={canEdit ? edit : undefined} role={canEdit ? "button" : undefined} style={{ marginTop: compact ? 0 : 10, padding: "10px 12px", background: "var(--accent-soft)", borderLeft: "5px solid var(--accent)", borderRadius: 10, cursor: canEdit ? "pointer" : "default", lineHeight: 1.5 }}>
@@ -7495,6 +7497,7 @@ function MPackOrderNote({ orderId, user, compact }) {
       </div>
       <div style={{ fontSize: compact ? 14 : 15.5, fontWeight: 700, color: "var(--fg)", whiteSpace: "pre-line", wordBreak: "break-word" }}>{note.text}</div>
       {note.by && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 4 }}>— {note.by}</div>}
+      {photos && <div onClick={e => e.stopPropagation()}>{photos}</div>}
     </div>
   );
 }

@@ -691,6 +691,36 @@ function useOrderDocsMark(orderId) {
   return mark;
 }
 
+/* Photos sent with the order (สั่งแพ็คใหม่ → "โน้ตและรูปถึงคนแพ็ค") shown as one
+   strip right under the order note, so the packer sees note + pictures together
+   instead of scrolling to the attachments card at the bottom. Read-only view of
+   the same order_attachments rows; add/delete stays in PackAttachments. */
+function PackNotePhotos({ orderId }) {
+  const docsMark = useOrderDocsMark(orderId);
+  const [list, setList] = useStatePD([]);
+  useEffectPD(() => {
+    let alive = true;
+    loadOrderAttachments(orderId).then(l => { if (alive) setList(l); }).catch(() => {});
+    return () => { alive = false; };
+  }, [orderId, docsMark]);
+  if (!list.length) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--accent)", marginBottom: 6 }}>🖼 รูปแนบ ({list.length}) — แตะเพื่อดูเต็ม</div>
+      <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}>
+        {list.map(a => (
+          <button key={a.id} type="button" onClick={() => openOrderFile(a)} aria-label={"เปิด " + (a.name || "รูปแนบ")}
+            style={{ flex: "none", width: 92, height: 92, padding: 0, border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", background: "#fff", cursor: "pointer" }}>
+            {a.type === "application/pdf"
+              ? <span style={{ display: "grid", placeItems: "center", height: "100%", fontSize: 11, fontWeight: 700, color: "#333" }}>📄 PDF</span>
+              : <img src={a.dataUrl} alt={a.name || "รูปแนบ"} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}/>}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PackAttachments({ orderId, pushToast, card, mobile, unified }) {
   const docsMark = useOrderDocsMark(orderId);
   const [list, setList] = useStatePD([]);
@@ -3035,6 +3065,6 @@ function PackSendPrompt({ pushToast, mobile }) {
 Object.assign(window, {
   loadOrderFile, saveOrderFile, readOrderFile, safeOrderFile, openOrderFile, openFileViewer, nameOrderFileByOrderNo, openPackLabelBatch, markLabelsPrinted,
   packRecipientFor, printOrderAddress, printPackChecklist, openPackChecklist, buildPackChecklistHtml, packLabelConfig, savePackLabelConfig, PackLabelSettings, canEditPackLabel, printOrderFile, PackShipDocs, extractLabelCodes, parseLabelCodes, backfillLabelCodes, isLabelPlaceholderName, PackOrderWho, fixThaiPua, PackPlatformBar, packPlatformOf, packLateDays, PackLateBadge, PackDocChip, refreshOrderFileIds, canUploadOrderFile, PackSendPrompt, PackNewOrder, markOrderDocs, useOrderDocsMark, MPackNew, MPackAdd, PackAddedBanner,
-  loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments,
+  loadOrderAttachments, addOrderAttachment, deleteOrderAttachment, PackAttachments, PackNotePhotos,
   deleteOrderDocs, PackLabelButton, downloadOrderFile
 });
