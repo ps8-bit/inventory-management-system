@@ -2693,8 +2693,16 @@ function _orderAlertDiff(prev, next, mode) {
     });
     // Every changed field keeps BOTH values, so the review screen can show
     // exactly what it was and what it is now.
+    // A field going from EMPTY (or a label placeholder name) to a value is the
+    // system filling it in — label OCR backfill, first label attach — not
+    // someone changing it. Alerting on those flagged every freshly-read Shopee
+    // order as "edited" on every device. COD and packer notes stay: there the
+    // first value is itself news.
+    const blank = (k, v) => v === "" || v === undefined || v === null
+      || (k === "name" && typeof isLabelPlaceholderName === "function" && isLabelPlaceholderName(v));
     const fields = ORDER_ALERT_FIELDS
       .filter(f => p[f.k] !== n[f.k])
+      .filter(f => f.k === "cod" || f.k === "pnote" || !blank(f.k, p[f.k]))
       .map(f => ({ k: f.k, label: f.label, from: f.fmt ? f.fmt(p[f.k]) : p[f.k], to: f.fmt ? f.fmt(n[f.k]) : n[f.k] }));
     if (!diff.length && !fields.length) return;
     out.push({ ...base(id, n), kind: "edit", items: _orderAlertItemList(n.items), diff, fields });
@@ -2803,11 +2811,28 @@ function _orderAlertSystemNotify(fresh) {
    "new" notification. Sent ~2.5 s after the last change. */
 let _oaPushQueue = [];
 let _oaPushTimer = null;
+/* Telegram / web push cut each field to ~48–60 chars, and a Thai address is
+   longer — the changed tail (house no., postcode) was cut off, so the message
+   said "address changed" without showing what. For the outgoing push only, drop
+   the shared start of from/to and keep a little context before the change. The
+   in-app card still shows both values in full. */
+function _pushFocusChange(from, to) {
+  const a = String(from == null ? "" : from), b = String(to == null ? "" : to);
+  if (a.length <= 44 && b.length <= 44) return [a, b];
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  const cut = Math.max(0, i - 12);
+  if (cut < 4) return [a, b];
+  return ["…" + a.slice(cut), "…" + b.slice(cut)];
+}
 function _queueOrderPush(alerts) {
   _oaPushQueue = _mergeOrderAlerts(_oaPushQueue, alerts);
   clearTimeout(_oaPushTimer);
   _oaPushTimer = setTimeout(() => {
-    const batch = _oaPushQueue.slice(0, 5);
+    // Focus AFTER merging, so from/to of a merged edit are cut at the same point.
+    const batch = _oaPushQueue.slice(0, 5).map(a => !(a.fields && a.fields.length) ? a : {
+      ...a, fields: a.fields.map(f => { const [from, to] = _pushFocusChange(f.from, f.to); return { ...f, from, to }; }),
+    });
     _oaPushQueue = [];
     if (batch.length && typeof sendOrderPush === "function") sendOrderPush({ alerts: batch });
   }, 2500);

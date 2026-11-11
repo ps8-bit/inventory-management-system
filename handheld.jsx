@@ -7664,7 +7664,9 @@ function MPackShortSheet({ line, picked, onClose, onResolve, pushToast }) {
    instead of the top (same anchor approach as MInventory's _mInvMemo). */
 let _mPackMemo = null;
 function MPack({ ctx }) {
-  const memo = useMemoM(() => { const m = _mPackMemo; _mPackMemo = null; return m; }, []);
+  // A memo older than a few minutes is from a visit long gone (left via the tabs,
+  // not ←) — landing on that old card would just be confusing.
+  const memo = useMemoM(() => { const m = _mPackMemo; _mPackMemo = null; return (m && Date.now() - m.at < 5 * 60000) ? m : null; }, []);
   const contentRef = useRefM(null);
   const [tick, setTick] = useStateM(0);
   const [selecting, setSelecting] = useStateM(false);
@@ -7701,7 +7703,7 @@ function MPack({ ctx }) {
   const openFrom = (ev, id, route, params) => {
     const el = contentRef.current;
     const card = ev && ev.currentTarget;
-    _mPackMemo = { view, plat, showN, id,
+    _mPackMemo = { at: Date.now(), view, plat, showN, id,
                    scroll: el ? el.scrollTop : 0,
                    rowOffset: (el && card) ? card.getBoundingClientRect().top - el.getBoundingClientRect().top : 0 };
     ctx.push(route, params);
